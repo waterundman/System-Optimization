@@ -7,7 +7,12 @@ use crate::error::{StoreError, StoreResult};
 use crate::migration::{CURRENT_SCHEMA_VERSION, migrate};
 use crate::model::{
     ApplyBlockEdit, BlockRecord, BlockSearchHit, CommitRecord, CreateSnapshot, EditReceipt,
-    ProjectSeed, SnapshotRecord,
+    ProjectSeed, RestoreReceipt, RestoreSnapshot, SnapshotRecord,
+};
+use crate::snapshot::{
+    ProjectSnapshotV1, SNAPSHOT_CODEC, SNAPSHOT_CODEC_VERSION, SNAPSHOT_SCHEMA_VERSION,
+    SnapshotBlock, SnapshotBranch, SnapshotCommit, SnapshotDocument, SnapshotProject,
+    decode_snapshot, encode_snapshot,
 };
 
 pub const MINIMUM_SQLITE_VERSION: &str = "3.51.3";
@@ -403,6 +408,277 @@ impl OptimizerStore {
             .map_err(StoreError::from)
     }
 
+    pub fn get_snapshot(&self, snapshot_id: &str) -> StoreResult<SnapshotRecord> {
+        self.connection
+            .query_row(
+                "SELECT id, project_id, commit_id, root_hash, codec, codec_version, payload, checksum, created_at
+                 FROM materialized_snapshot WHERE id = ?1",
+                [snapshot_id],
+                |row| {
+                    Ok(SnapshotRecord {
+                        id: row.get(0)?,
+                        project_id: row.get(1)?,
+                        commit_id: row.get(2)?,
+                        root_hash: row.get(3)?,
+                        codec: row.get(4)?,
+                        codec_version: row.get(5)?,
+                        payload: row.get(6)?,
+                        checksum: row.get(7)?,
+                        created_at: row.get(8)?,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NotFound {
+                entity: "snapshot",
+                id: snapshot_id.to_owned(),
+            })
+    }
+
+    pub fn decode_snapshot_record(
+        &self,
+        record: &SnapshotRecord,
+    ) -> StoreResult<ProjectSnapshotV1> {
+        if record.codec != SNAPSHOT_CODEC || record.codec_version != SNAPSHOT_CODEC_VERSION {
+            return Err(StoreError::Snapshot(format!(
+                "unsupported codec {}/{}",
+                record.codec, record.codec_version
+            )));
+        }
+        let snapshot = decode_snapshot(&record.payload, &record.checksum)
+            .map_err(|error| StoreError::Snapshot(error.to_string()))?;
+        if snapshot.project.id != record.project_id
+            || snapshot.commit.id != record.commit_id
+            || snapshot.commit.root_hash != record.root_hash
+        {
+            return Err(StoreError::Snapshot(
+                "payload descriptor does not match snapshot database record".into(),
+            ));
+        }
+        Ok(snapshot)
+    }
+
+    pub fn create_head_snapshot(
+        &mut self,
+        snapshot_id: &str,
+        project_id: &str,
+        created_at: &str,
+    ) -> StoreResult<SnapshotRecord> {
+        if snapshot_id.trim().is_empty()
+            || project_id.trim().is_empty()
+            || created_at.trim().is_empty()
+        {
+            return Err(StoreError::Validation(
+                "snapshot id, project id and created_at are required".into(),
+            ));
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let snapshot = read_head_snapshot(&transaction, project_id)?;
+        let encoded =
+            encode_snapshot(&snapshot).map_err(|error| StoreError::Snapshot(error.to_string()))?;
+        let record = SnapshotRecord {
+            id: snapshot_id.to_owned(),
+            project_id: snapshot.project.id.clone(),
+            commit_id: snapshot.commit.id.clone(),
+            root_hash: snapshot.commit.root_hash.clone(),
+            codec: SNAPSHOT_CODEC.into(),
+            codec_version: SNAPSHOT_CODEC_VERSION,
+            payload: encoded.payload,
+            checksum: encoded.checksum,
+            created_at: created_at.to_owned(),
+        };
+        transaction.execute(
+            "INSERT INTO materialized_snapshot(
+               id, project_id, commit_id, root_hash, codec, codec_version, payload, checksum, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                record.id,
+                record.project_id,
+                record.commit_id,
+                record.root_hash,
+                record.codec,
+                record.codec_version,
+                record.payload,
+                record.checksum,
+                record.created_at
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(record)
+    }
+
+    pub fn restore_snapshot(&mut self, command: &RestoreSnapshot) -> StoreResult<RestoreReceipt> {
+        validate_restore(command)?;
+        let record = self.get_snapshot(&command.snapshot_id)?;
+        let snapshot = self.decode_snapshot_record(&record)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        let (branch_project_id, previous_head): (String, String) = transaction
+            .query_row(
+                "SELECT project_id, head_commit_id FROM branch WHERE id = ?1",
+                [&command.branch_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NotFound {
+                entity: "branch",
+                id: command.branch_id.clone(),
+            })?;
+        if branch_project_id != snapshot.project.id {
+            return Err(StoreError::Validation(
+                "snapshot and branch belong to different projects".into(),
+            ));
+        }
+
+        let current_structure = read_structure_signature(&transaction, &branch_project_id)?;
+        let snapshot_structure = snapshot_structure_signature(&snapshot);
+        if current_structure != snapshot_structure {
+            return Err(StoreError::Validation(
+                "document or block structure changed; structural restore is not supported by codec v1"
+                    .into(),
+            ));
+        }
+
+        struct RestoredChange {
+            edit_id: String,
+            block_id: String,
+            before_hash: String,
+            after_hash: String,
+        }
+        let mut changes = Vec::new();
+        for block in &snapshot.blocks {
+            let current = read_block_for_edit(&transaction, &block.id)?;
+            if current.content_hash == block.content_hash
+                && current.content_json == block.content_json
+                && current.plain_text == block.plain_text
+            {
+                continue;
+            }
+            let position = changes.len();
+            let edit_id = format!("{}-{position}", command.edit_id_prefix);
+            let new_revision = current.revision + 1;
+            let updated = transaction.execute(
+                "UPDATE block SET content_json = ?1, plain_text = ?2, content_hash = ?3, revision = ?4
+                 WHERE id = ?5 AND revision = ?6 AND content_hash = ?7 AND deleted_at IS NULL",
+                params![
+                    block.content_json,
+                    block.plain_text,
+                    block.content_hash,
+                    new_revision,
+                    block.id,
+                    current.revision,
+                    current.content_hash
+                ],
+            )?;
+            if updated != 1 {
+                return Err(StoreError::InvariantViolation(
+                    "restore optimistic block update changed an unexpected row count".into(),
+                ));
+            }
+            transaction.execute(
+                "INSERT INTO edit_journal(
+                   id, project_id, block_id, base_revision, new_revision, before_hash, after_hash,
+                   before_content_json, after_content_json, before_plain_text, after_plain_text, occurred_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    edit_id,
+                    branch_project_id,
+                    block.id,
+                    current.revision,
+                    new_revision,
+                    current.content_hash,
+                    block.content_hash,
+                    current.content_json,
+                    block.content_json,
+                    current.plain_text,
+                    block.plain_text,
+                    command.occurred_at
+                ],
+            )?;
+            changes.push(RestoredChange {
+                edit_id,
+                block_id: block.id.clone(),
+                before_hash: current.content_hash,
+                after_hash: block.content_hash.clone(),
+            });
+        }
+        if changes.is_empty() {
+            return Err(StoreError::Validation(
+                "snapshot already matches the current project state".into(),
+            ));
+        }
+
+        transaction.execute(
+            "INSERT INTO commit_node(id, project_id, root_hash, reason, actor_type, actor_id, created_at)
+             VALUES (?1, ?2, ?3, 'restore', ?4, ?5, ?6)",
+            params![
+                command.new_commit_id,
+                branch_project_id,
+                snapshot.commit.root_hash,
+                command.actor_type,
+                command.actor_id,
+                command.occurred_at
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO commit_parent(commit_id, parent_id, position) VALUES (?1, ?2, 0)",
+            params![command.new_commit_id, previous_head],
+        )?;
+        for (position, change) in changes.iter().enumerate() {
+            transaction.execute(
+                "INSERT INTO change_set(commit_id, position, entity_type, entity_id, operation, before_hash, after_hash, edit_journal_id)
+                 VALUES (?1, ?2, 'block', ?3, 'restore', ?4, ?5, ?6)",
+                params![
+                    command.new_commit_id,
+                    position as i64,
+                    change.block_id,
+                    change.before_hash,
+                    change.after_hash,
+                    change.edit_id
+                ],
+            )?;
+        }
+        let branch_updated = transaction.execute(
+            "UPDATE branch SET head_commit_id = ?1, updated_at = ?2 WHERE id = ?3 AND head_commit_id = ?4",
+            params![
+                command.new_commit_id,
+                command.occurred_at,
+                command.branch_id,
+                previous_head
+            ],
+        )?;
+        if branch_updated != 1 {
+            return Err(StoreError::InvariantViolation(
+                "branch head changed while restoring a snapshot".into(),
+            ));
+        }
+        let project_updated = transaction.execute(
+            "UPDATE project SET head_commit_id = ?1, revision = revision + 1, updated_at = ?2 WHERE id = ?3",
+            params![
+                command.new_commit_id,
+                command.occurred_at,
+                branch_project_id
+            ],
+        )?;
+        if project_updated != 1 {
+            return Err(StoreError::InvariantViolation(
+                "project head update changed an unexpected row count during restore".into(),
+            ));
+        }
+        transaction.commit()?;
+        Ok(RestoreReceipt {
+            snapshot_id: command.snapshot_id.clone(),
+            commit_id: command.new_commit_id.clone(),
+            previous_head_commit_id: previous_head,
+            restored_root_hash: snapshot.commit.root_hash,
+            changed_blocks: changes.len(),
+        })
+    }
+
     pub fn search_blocks(
         &self,
         project_id: &str,
@@ -641,4 +917,191 @@ fn validate_edit(command: &ApplyBlockEdit) -> StoreResult<()> {
         }
     }
     Ok(())
+}
+
+fn validate_restore(command: &RestoreSnapshot) -> StoreResult<()> {
+    for (field, value) in [
+        ("snapshot_id", command.snapshot_id.as_str()),
+        ("branch_id", command.branch_id.as_str()),
+        ("new_commit_id", command.new_commit_id.as_str()),
+        ("edit_id_prefix", command.edit_id_prefix.as_str()),
+        ("actor_type", command.actor_type.as_str()),
+        ("occurred_at", command.occurred_at.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(StoreError::Validation(format!("{field} must not be empty")));
+        }
+    }
+    Ok(())
+}
+
+fn read_head_snapshot(
+    transaction: &Transaction<'_>,
+    project_id: &str,
+) -> StoreResult<ProjectSnapshotV1> {
+    let (project_title, project_language, head_commit_id): (String, String, String) = transaction
+        .query_row(
+            "SELECT title, language, head_commit_id FROM project WHERE id = ?1",
+            [project_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?
+        .ok_or_else(|| StoreError::NotFound {
+            entity: "project",
+            id: project_id.to_owned(),
+        })?;
+    let root_hash: String = transaction.query_row(
+        "SELECT root_hash FROM commit_node WHERE id = ?1 AND project_id = ?2",
+        params![head_commit_id, project_id],
+        |row| row.get(0),
+    )?;
+
+    let branches = {
+        let mut statement = transaction.prepare(
+            "SELECT id, name, head_commit_id FROM branch WHERE project_id = ?1 ORDER BY id",
+        )?;
+        statement
+            .query_map([project_id], |row| {
+                Ok(SnapshotBranch {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    head_commit_id: row.get(2)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?
+    };
+    let documents = read_active_documents(transaction, project_id)?;
+    let blocks = read_active_snapshot_blocks(transaction, project_id)?;
+
+    Ok(ProjectSnapshotV1 {
+        schema_version: SNAPSHOT_SCHEMA_VERSION,
+        project: SnapshotProject {
+            id: project_id.to_owned(),
+            title: project_title,
+            language: project_language,
+        },
+        commit: SnapshotCommit {
+            id: head_commit_id,
+            root_hash,
+        },
+        branches,
+        documents,
+        blocks,
+    })
+}
+
+fn read_active_documents(
+    transaction: &Transaction<'_>,
+    project_id: &str,
+) -> StoreResult<Vec<SnapshotDocument>> {
+    let mut statement = transaction.prepare(
+        "SELECT id, parent_id, kind, title, order_key, revision
+         FROM document WHERE project_id = ?1 AND deleted_at IS NULL ORDER BY id",
+    )?;
+    Ok(statement
+        .query_map([project_id], |row| {
+            Ok(SnapshotDocument {
+                id: row.get(0)?,
+                parent_id: row.get(1)?,
+                kind: row.get(2)?,
+                title: row.get(3)?,
+                order_key: row.get(4)?,
+                revision: row.get(5)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?)
+}
+
+fn read_active_snapshot_blocks(
+    transaction: &Transaction<'_>,
+    project_id: &str,
+) -> StoreResult<Vec<SnapshotBlock>> {
+    let mut statement = transaction.prepare(
+        "SELECT b.id, b.document_id, b.kind, b.order_key, b.content_json, b.plain_text,
+                b.content_hash, b.revision, b.locked
+         FROM block b JOIN document d ON d.id = b.document_id
+         WHERE d.project_id = ?1 AND b.deleted_at IS NULL AND d.deleted_at IS NULL
+         ORDER BY b.id",
+    )?;
+    Ok(statement
+        .query_map([project_id], |row| {
+            Ok(SnapshotBlock {
+                id: row.get(0)?,
+                document_id: row.get(1)?,
+                kind: row.get(2)?,
+                order_key: row.get(3)?,
+                content_json: row.get(4)?,
+                plain_text: row.get(5)?,
+                content_hash: row.get(6)?,
+                revision: row.get(7)?,
+                locked: row.get::<_, i64>(8)? == 1,
+            })
+        })?
+        .collect::<Result<_, _>>()?)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct StructureSignature {
+    documents: Vec<(String, Option<String>, String, String)>,
+    blocks: Vec<(String, String, String, String, bool)>,
+}
+
+fn read_structure_signature(
+    transaction: &Transaction<'_>,
+    project_id: &str,
+) -> StoreResult<StructureSignature> {
+    let documents = read_active_documents(transaction, project_id)?
+        .into_iter()
+        .map(|document| {
+            (
+                document.id,
+                document.parent_id,
+                document.kind,
+                document.order_key,
+            )
+        })
+        .collect();
+    let blocks = read_active_snapshot_blocks(transaction, project_id)?
+        .into_iter()
+        .map(|block| {
+            (
+                block.id,
+                block.document_id,
+                block.kind,
+                block.order_key,
+                block.locked,
+            )
+        })
+        .collect();
+    Ok(StructureSignature { documents, blocks })
+}
+
+fn snapshot_structure_signature(snapshot: &ProjectSnapshotV1) -> StructureSignature {
+    StructureSignature {
+        documents: snapshot
+            .documents
+            .iter()
+            .map(|document| {
+                (
+                    document.id.clone(),
+                    document.parent_id.clone(),
+                    document.kind.clone(),
+                    document.order_key.clone(),
+                )
+            })
+            .collect(),
+        blocks: snapshot
+            .blocks
+            .iter()
+            .map(|block| {
+                (
+                    block.id.clone(),
+                    block.document_id.clone(),
+                    block.kind.clone(),
+                    block.order_key.clone(),
+                    block.locked,
+                )
+            })
+            .collect(),
+    }
 }

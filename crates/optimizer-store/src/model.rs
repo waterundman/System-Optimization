@@ -111,6 +111,26 @@ pub struct SnapshotRecord {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreSnapshot {
+    pub snapshot_id: String,
+    pub branch_id: String,
+    pub new_commit_id: String,
+    pub edit_id_prefix: String,
+    pub actor_type: String,
+    pub actor_id: Option<String>,
+    pub occurred_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreReceipt {
+    pub snapshot_id: String,
+    pub commit_id: String,
+    pub previous_head_commit_id: String,
+    pub restored_root_hash: String,
+    pub changed_blocks: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlockSearchHit {
     pub block_id: String,

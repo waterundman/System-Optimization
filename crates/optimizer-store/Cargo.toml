@@ -6,8 +6,12 @@ license = "MIT OR Apache-2.0"
 description = "SQLite document, edit journal, commit DAG and snapshot store for Optimizer System"
 
 [dependencies]
+hex = "0.4.3"
 rusqlite = { version = "0.39.0", features = ["backup", "bundled"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+sha2 = "0.10.9"
+zstd = "0.13.3"
 
 [lib]
 path = "src/lib.rs"
-

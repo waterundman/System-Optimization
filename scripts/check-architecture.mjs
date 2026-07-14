@@ -21,7 +21,8 @@ async function walk(dir) {
   return output;
 }
 
-const files = await walk(resolve("packages/kernel/src"));
+const roots = ["packages/kernel/src", "packages/editor-bridge/src"];
+const files = (await Promise.all(roots.map((root) => walk(resolve(root))))).flat();
 const violations = [];
 for (const file of files) {
   const source = await readFile(file, "utf8");
@@ -31,8 +32,7 @@ for (const file of files) {
 }
 
 if (violations.length) {
-  throw new Error(`Kernel architecture violations:\n${violations.join("\n")}`);
+  throw new Error(`Core architecture violations:\n${violations.join("\n")}`);
 }
 
-console.log(`Architecture check passed: ${files.length} kernel source files`);
-
+console.log(`Architecture check passed: ${files.length} core source files`);

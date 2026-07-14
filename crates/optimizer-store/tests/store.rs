@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use optimizer_store::{
     ApplyBlockEdit, CURRENT_SCHEMA_VERSION, CreateSnapshot, MINIMUM_SQLITE_VERSION, OptimizerStore,
-    ProjectSeed, SeedBlock, SeedDocument, StoreError,
+    ProjectSeed, RestoreSnapshot, SeedBlock, SeedDocument, StoreError, encode_snapshot,
 };
 
 struct TempDatabase {
@@ -210,4 +210,65 @@ fn creates_a_consistent_online_backup() {
     );
     assert_eq!(backup.list_commits("project-1").unwrap().len(), 2);
     backup.verify_invariants().unwrap();
+}
+
+#[test]
+fn creates_deterministic_checked_snapshot_and_restores_it_as_a_new_commit() {
+    let temp = TempDatabase::new();
+    let mut store = open_seeded(&temp.database);
+    let snapshot = store
+        .create_head_snapshot("snapshot-head", "project-1", "2026-07-14T00:00:30.000Z")
+        .unwrap();
+    let decoded = store.decode_snapshot_record(&snapshot).unwrap();
+    let reencoded = encode_snapshot(&decoded).unwrap();
+    assert_eq!(reencoded.payload, snapshot.payload);
+    assert_eq!(reencoded.checksum, snapshot.checksum);
+    assert_eq!(decoded.commit.id, "commit-initial");
+
+    store
+        .apply_block_edit(&edit("commit-after-snapshot", 0, "sha256:block-initial"))
+        .unwrap();
+    let restored = store
+        .restore_snapshot(&RestoreSnapshot {
+            snapshot_id: "snapshot-head".into(),
+            branch_id: "branch-main".into(),
+            new_commit_id: "commit-restore".into(),
+            edit_id_prefix: "restore-edit".into(),
+            actor_type: "human".into(),
+            actor_id: Some("user-local".into()),
+            occurred_at: "2026-07-14T00:03:00.000Z".into(),
+        })
+        .unwrap();
+    assert_eq!(restored.previous_head_commit_id, "commit-after-snapshot");
+    assert_eq!(restored.restored_root_hash, "sha256:root-initial");
+    assert_eq!(restored.changed_blocks, 1);
+
+    let block = store.get_block("block-1").unwrap();
+    assert_eq!(block.plain_text, "station platform");
+    assert_eq!(block.revision, 2);
+    assert_eq!(
+        store
+            .search_blocks("project-1", "station", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    let commits = store.list_commits("project-1").unwrap();
+    assert_eq!(commits.len(), 3);
+    assert_eq!(commits[2].id, "commit-restore");
+    assert_eq!(commits[2].parents, vec!["commit-after-snapshot"]);
+    assert_eq!(commits[2].reason, "restore");
+    store.verify_invariants().unwrap();
+}
+
+#[test]
+fn rejects_snapshot_payload_when_checksum_is_tampered() {
+    let temp = TempDatabase::new();
+    let mut store = open_seeded(&temp.database);
+    let mut snapshot = store
+        .create_head_snapshot("snapshot-tamper", "project-1", "2026-07-14T00:00:30.000Z")
+        .unwrap();
+    snapshot.payload[0] ^= 0xff;
+    let error = store.decode_snapshot_record(&snapshot).unwrap_err();
+    assert!(matches!(error, StoreError::Snapshot(_)));
 }

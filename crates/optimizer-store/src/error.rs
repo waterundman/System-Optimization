@@ -8,6 +8,7 @@ pub enum StoreError {
         minimum: &'static str,
     },
     Validation(String),
+    Snapshot(String),
     NotFound {
         entity: &'static str,
         id: String,
@@ -34,6 +35,7 @@ impl fmt::Display for StoreError {
                 )
             }
             Self::Validation(message) => write!(formatter, "validation error: {message}"),
+            Self::Snapshot(message) => write!(formatter, "snapshot error: {message}"),
             Self::NotFound { entity, id } => write!(formatter, "{entity} not found: {id}"),
             Self::Conflict {
                 entity,
