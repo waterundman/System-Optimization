@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { validateOperationIntent } from "../src/index.ts";
+import { validateOperationIntent, validatePatchProposal } from "../src/index.ts";
 
 const valid = {
   schemaVersion: 1,
@@ -42,3 +42,51 @@ test("rejects an invalid target and output budget", () => {
   }
 });
 
+test("validates immutable PatchProposal hunk baselines", () => {
+  const proposal = {
+    schemaVersion: 2,
+    id: "proposal-1",
+    operationRunId: "run-1",
+    baseCommitId: "commit-1",
+    target: valid.target,
+    hunks: [{
+      id: "hunk-1",
+      from: { blockId: "block-1", offset: 1 },
+      to: { blockId: "block-1", offset: 3 },
+      original: "原文",
+      replacement: "修改",
+      granularity: "token",
+    }],
+    warnings: [],
+    status: "review",
+    createdAt: "2026-07-14T00:00:00.000Z",
+    proposalHash: `sha256:${"0".repeat(64)}`,
+  };
+  assert.equal(validatePatchProposal(proposal).ok, true);
+
+  const invalid = validatePatchProposal({
+    ...proposal,
+    hunks: [{ ...proposal.hunks[0], original: "长度不匹配" }],
+  });
+  assert.equal(invalid.ok, false);
+  if (!invalid.ok) {
+    assert.equal(invalid.issues.some((issue) => issue.path === "$.hunks[0].original"), true);
+  }
+
+  const outsideTarget = validatePatchProposal({
+    ...proposal,
+    hunks: [{
+      ...proposal.hunks[0],
+      from: { blockId: "block-1", offset: 5 },
+      to: { blockId: "block-1", offset: 5 },
+      original: "",
+    }],
+  });
+  assert.equal(outsideTarget.ok, false);
+  if (!outsideTarget.ok) {
+    assert.equal(
+      outsideTarget.issues.some((issue) => issue.message.includes("within the proposal target")),
+      true,
+    );
+  }
+});

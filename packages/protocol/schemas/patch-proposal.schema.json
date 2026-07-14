@@ -4,25 +4,28 @@
   "title": "PatchProposal",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "id", "operationRunId", "baseCommitId", "target", "hunks", "warnings", "status", "createdAt"],
+  "required": ["schemaVersion", "id", "operationRunId", "baseCommitId", "target", "hunks", "warnings", "status", "createdAt", "proposalHash"],
   "properties": {
-    "schemaVersion": { "const": 1 },
+    "schemaVersion": { "const": 2 },
     "id": { "type": "string", "minLength": 1 },
     "operationRunId": { "type": "string", "minLength": 1 },
     "baseCommitId": { "type": "string", "minLength": 1 },
     "target": { "$ref": "operation-intent.schema.json#/$defs/target" },
     "hunks": {
       "type": "array",
+      "minItems": 1,
       "maxItems": 10000,
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "from", "to", "replacement"],
+        "required": ["id", "from", "to", "original", "replacement", "granularity"],
         "properties": {
           "id": { "type": "string", "minLength": 1 },
           "from": { "$ref": "operation-intent.schema.json#/$defs/anchor" },
           "to": { "$ref": "operation-intent.schema.json#/$defs/anchor" },
+          "original": { "type": "string", "maxLength": 10000000 },
           "replacement": { "type": "string", "maxLength": 10000000 },
+          "granularity": { "enum": ["paragraph", "sentence", "token"] },
           "atomicGroup": { "type": "string", "minLength": 1 }
         }
       }
@@ -30,7 +33,7 @@
     "summary": { "type": "string", "maxLength": 100000 },
     "warnings": { "type": "array", "items": { "type": "string" } },
     "status": { "enum": ["review", "accepted", "rejected", "conflicted"] },
-    "createdAt": { "type": "string", "format": "date-time" }
+    "createdAt": { "type": "string", "format": "date-time" },
+    "proposalHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
   }
 }
-

@@ -138,17 +138,20 @@ export interface ContextPacket {
 }
 
 export type PatchProposalStatus = "review" | "accepted" | "rejected" | "conflicted";
+export type DiffGranularity = "paragraph" | "sentence" | "token";
 
 export interface PatchHunk {
   readonly id: string;
   readonly from: TextAnchor;
   readonly to: TextAnchor;
+  readonly original: string;
   readonly replacement: string;
+  readonly granularity: DiffGranularity;
   readonly atomicGroup?: string;
 }
 
 export interface PatchProposal {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly id: PatchProposalId;
   readonly operationRunId: OperationRunId;
   readonly baseCommitId: CommitId;
@@ -158,6 +161,7 @@ export interface PatchProposal {
   readonly warnings: readonly string[];
   readonly status: PatchProposalStatus;
   readonly createdAt: string;
+  readonly proposalHash: string;
 }
 
 export interface EventEnvelope<Payload = unknown> {
@@ -185,4 +189,3 @@ export type OperationState =
   | "conflicted"
   | "failed"
   | "cancelled";
-

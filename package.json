@@ -15,10 +15,10 @@
     "test": "node --test test/all.test.ts",
     "test:protocol": "node --test packages/protocol/test/protocol.test.ts",
     "test:kernel": "node --test packages/kernel/test/context-compiler.test.ts packages/kernel/test/operation-state-machine.test.ts",
+    "test:patch": "node --test packages/patch-engine/test/patch-engine.test.ts",
     "check:schemas": "node scripts/check-protocol-schemas.mjs",
     "check:architecture": "node scripts/check-architecture.mjs",
     "check": "npm run check:schemas && npm run check:architecture && npm test",
     "lab": "node apps/kernel-lab/src/index.ts"
   }
 }
-

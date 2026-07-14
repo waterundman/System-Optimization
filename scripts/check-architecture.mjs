@@ -21,7 +21,7 @@ async function walk(dir) {
   return output;
 }
 
-const roots = ["packages/kernel/src", "packages/editor-bridge/src"];
+const roots = ["packages/kernel/src", "packages/editor-bridge/src", "packages/patch-engine/src"];
 const files = (await Promise.all(roots.map((root) => walk(resolve(root))))).flat();
 const violations = [];
 for (const file of files) {
