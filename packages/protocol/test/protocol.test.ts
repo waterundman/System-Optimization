@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { validateOperationIntent, validatePatchProposal } from "../src/index.ts";
+import {
+  validateModelProviderConfiguration,
+  validateOperationIntent,
+  validatePatchProposal,
+} from "../src/index.ts";
 
 const valid = {
   schemaVersion: 1,
@@ -88,5 +92,29 @@ test("validates immutable PatchProposal hunk baselines", () => {
       outsideTarget.issues.some((issue) => issue.message.includes("within the proposal target")),
       true,
     );
+  }
+});
+
+test("persists provider settings through credential references, never API keys", () => {
+  const configuration = {
+    schemaVersion: 1,
+    id: "provider-deepseek-default",
+    providerId: "deepseek",
+    enabled: true,
+    defaultModel: "deepseek-v4-flash",
+    credentialRef: "secret://providers/deepseek/default",
+    defaultTimeoutMs: 60_000,
+    maxRequestBytes: 16 * 1024 * 1024,
+    updatedAt: "2026-07-14T00:00:00.000Z",
+  };
+  assert.equal(validateModelProviderConfiguration(configuration).ok, true);
+
+  const leaked = validateModelProviderConfiguration({
+    ...configuration,
+    apiKey: "must-not-be-persisted",
+  });
+  assert.equal(leaked.ok, false);
+  if (!leaked.ok) {
+    assert.equal(leaked.issues.some((issue) => issue.path === "$.apiKey"), true);
   }
 });

@@ -1,10 +1,13 @@
 import type {
   DiffGranularity,
+  ModelProviderConfiguration,
+  ModelProviderId,
   OperationIntent,
   OperationType,
   OutputKind,
   PatchProposal,
   PatchProposalStatus,
+  QwenDeploymentRegion,
 } from "./types.ts";
 
 export interface ValidationIssue {
@@ -27,6 +30,14 @@ const operationTypes = new Set<OperationType>([
 const outputKinds = new Set<OutputKind>(["patch_proposal", "insert_proposal", "findings"]);
 const granularities = new Set<DiffGranularity>(["paragraph", "sentence", "token"]);
 const proposalStatuses = new Set<PatchProposalStatus>(["review", "accepted", "rejected", "conflicted"]);
+const modelProviderIds = new Set<ModelProviderId>(["deepseek", "qwen", "kimi", "minimax"]);
+const qwenRegions = new Set<QwenDeploymentRegion>([
+  "china",
+  "singapore",
+  "us",
+  "germany",
+  "japan",
+]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -172,6 +183,95 @@ export function validatePatchProposal(input: unknown): ValidationResult<PatchPro
   }
 
   return issues.length ? { ok: false, issues } : { ok: true, value: input as unknown as PatchProposal };
+}
+
+export function validateModelProviderConfiguration(
+  input: unknown,
+): ValidationResult<ModelProviderConfiguration> {
+  const issues: ValidationIssue[] = [];
+  if (!isRecord(input)) {
+    return { ok: false, issues: [{ path: "$", message: "must be an object" }] };
+  }
+  const allowedFields = new Set([
+    "schemaVersion",
+    "id",
+    "providerId",
+    "enabled",
+    "defaultModel",
+    "credentialRef",
+    "qwen",
+    "defaultTimeoutMs",
+    "maxRequestBytes",
+    "updatedAt",
+  ]);
+  for (const field of Object.keys(input)) {
+    if (!allowedFields.has(field)) {
+      issues.push({ path: `$.${field}`, message: "is not allowed; secrets must not be persisted" });
+    }
+  }
+  if (input.schemaVersion !== 1) {
+    issues.push({ path: "$.schemaVersion", message: "must equal 1" });
+  }
+  for (const field of ["id", "defaultModel", "updatedAt"] as const) {
+    if (!nonEmptyString(input[field])) {
+      issues.push({ path: `$.${field}`, message: "must be a non-empty string" });
+    }
+  }
+  if (!modelProviderIds.has(input.providerId as ModelProviderId)) {
+    issues.push({ path: "$.providerId", message: "is not a supported provider" });
+  }
+  if (typeof input.enabled !== "boolean") {
+    issues.push({ path: "$.enabled", message: "must be a boolean" });
+  }
+  if (
+    typeof input.credentialRef !== "string"
+    || !/^secret:\/\/[A-Za-z0-9._~/-]+$/.test(input.credentialRef)
+  ) {
+    issues.push({ path: "$.credentialRef", message: "must be an opaque secret:// reference" });
+  }
+  validateBoundedInteger(input.defaultTimeoutMs, "$.defaultTimeoutMs", 1, 3_600_000, issues);
+  validateBoundedInteger(input.maxRequestBytes, "$.maxRequestBytes", 1, 67_108_864, issues);
+
+  if (input.qwen !== undefined) {
+    if (input.providerId !== "qwen") {
+      issues.push({ path: "$.qwen", message: "is only valid for the qwen provider" });
+    } else if (!isRecord(input.qwen)) {
+      issues.push({ path: "$.qwen", message: "must be an object" });
+    } else {
+      if (!qwenRegions.has(input.qwen.region as QwenDeploymentRegion)) {
+        issues.push({ path: "$.qwen.region", message: "is not a supported Qwen region" });
+      }
+      if (
+        input.qwen.workspaceId !== undefined
+        && (
+          typeof input.qwen.workspaceId !== "string"
+          || !/^[A-Za-z0-9_-]+$/.test(input.qwen.workspaceId)
+        )
+      ) {
+        issues.push({ path: "$.qwen.workspaceId", message: "contains unsupported characters" });
+      }
+      for (const field of Object.keys(input.qwen)) {
+        if (field !== "region" && field !== "workspaceId") {
+          issues.push({ path: `$.qwen.${field}`, message: "is not allowed" });
+        }
+      }
+    }
+  }
+  return issues.length
+    ? { ok: false, issues }
+    : { ok: true, value: input as unknown as ModelProviderConfiguration };
+}
+
+function validateBoundedInteger(
+  value: unknown,
+  path: string,
+  minimum: number,
+  maximum: number,
+  issues: ValidationIssue[],
+): void {
+  if (!Number.isInteger(value) || Number(value) < minimum || Number(value) > maximum) {
+    issues.push({ path, message: `must be an integer between ${minimum} and ${maximum}` });
+  }
 }
 
 function validateTarget(

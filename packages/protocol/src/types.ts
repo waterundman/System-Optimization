@@ -10,6 +10,9 @@ export type OperationRunId = Brand<string, "OperationRunId">;
 export type ContextPacketId = Brand<string, "ContextPacketId">;
 export type PatchProposalId = Brand<string, "PatchProposalId">;
 export type EventId = Brand<string, "EventId">;
+export type CredentialRef = Brand<string, "CredentialRef">;
+export type ModelProviderId = "deepseek" | "qwen" | "kimi" | "minimax";
+export type QwenDeploymentRegion = "china" | "singapore" | "us" | "germany" | "japan";
 
 export type OperationType =
   | "polish"
@@ -174,6 +177,22 @@ export interface EventEnvelope<Payload = unknown> {
   readonly operationRunId?: OperationRunId;
   readonly sequence?: number;
   readonly payload: Payload;
+}
+
+export interface ModelProviderConfiguration {
+  readonly schemaVersion: 1;
+  readonly id: string;
+  readonly providerId: ModelProviderId;
+  readonly enabled: boolean;
+  readonly defaultModel: string;
+  readonly credentialRef: CredentialRef;
+  readonly qwen?: {
+    readonly region: QwenDeploymentRegion;
+    readonly workspaceId?: string;
+  };
+  readonly defaultTimeoutMs: number;
+  readonly maxRequestBytes: number;
+  readonly updatedAt: string;
 }
 
 export type OperationState =

@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://optimizer.local/schemas/model-provider-configuration.schema.json",
+  "title": "ModelProviderConfiguration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "providerId",
+    "enabled",
+    "defaultModel",
+    "credentialRef",
+    "defaultTimeoutMs",
+    "maxRequestBytes",
+    "updatedAt"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": { "type": "string", "minLength": 1 },
+    "providerId": { "enum": ["deepseek", "qwen", "kimi", "minimax"] },
+    "enabled": { "type": "boolean" },
+    "defaultModel": { "type": "string", "minLength": 1 },
+    "credentialRef": { "type": "string", "pattern": "^secret://[A-Za-z0-9._~/-]+$" },
+    "qwen": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["region"],
+      "properties": {
+        "region": { "enum": ["china", "singapore", "us", "germany", "japan"] },
+        "workspaceId": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" }
+      }
+    },
+    "defaultTimeoutMs": { "type": "integer", "minimum": 1, "maximum": 3600000 },
+    "maxRequestBytes": { "type": "integer", "minimum": 1, "maximum": 67108864 },
+    "updatedAt": { "type": "string", "format": "date-time" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "providerId": { "const": "qwen" } } },
+      "then": {},
+      "else": { "not": { "required": ["qwen"] } }
+    }
+  ]
+}
