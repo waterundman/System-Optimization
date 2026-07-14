@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://optimizer.local/schemas/project-snapshot.schema.json",
+  "title": "ProjectSnapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "projectId", "commitId", "rootHash", "documents", "blocks"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "projectId": { "type": "string", "minLength": 1 },
+    "commitId": { "type": "string", "minLength": 1 },
+    "rootHash": { "type": "string", "minLength": 1 },
+    "documents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "projectId", "kind", "title", "orderKey", "revision"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "projectId": { "type": "string", "minLength": 1 },
+          "parentId": { "type": "string", "minLength": 1 },
+          "kind": { "enum": ["folder", "document", "chapter", "scene", "note"] },
+          "title": { "type": "string" },
+          "orderKey": { "type": "string", "minLength": 1 },
+          "revision": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "blocks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "documentId", "kind", "orderKey", "content", "plainText", "contentHash", "revision", "locked"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "documentId": { "type": "string", "minLength": 1 },
+          "kind": { "enum": ["paragraph", "heading", "quote", "dialogue", "list", "table", "scene_break", "locked"] },
+          "orderKey": { "type": "string", "minLength": 1 },
+          "content": { "type": "object" },
+          "plainText": { "type": "string" },
+          "contentHash": { "type": "string", "minLength": 1 },
+          "revision": { "type": "integer", "minimum": 0 },
+          "locked": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}
+

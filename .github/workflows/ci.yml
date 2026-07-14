@@ -1,0 +1,22 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  kernel:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Protocol, architecture and kernel checks
+        run: npm.cmd run check
+      - name: Rust host tests
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo test --workspace --locked

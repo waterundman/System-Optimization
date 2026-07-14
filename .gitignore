@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+target/
+.DS_Store
+*.log
+*.sqlite3-wal
+*.sqlite3-shm
+.optimizer-cache/
+

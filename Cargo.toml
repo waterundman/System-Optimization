@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/optimizer-host", "crates/optimizer-store"]
+resolver = "3"

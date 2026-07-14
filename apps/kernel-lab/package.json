@@ -1,0 +1,7 @@
+{
+  "name": "@optimizer/kernel-lab",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module"
+}
+

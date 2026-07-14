@@ -1,0 +1,13 @@
+[package]
+name = "optimizer-store"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "SQLite document, edit journal, commit DAG and snapshot store for Optimizer System"
+
+[dependencies]
+rusqlite = { version = "0.39.0", features = ["backup", "bundled"] }
+
+[lib]
+path = "src/lib.rs"
+

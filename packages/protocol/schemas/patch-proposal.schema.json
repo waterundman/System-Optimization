@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://optimizer.local/schemas/patch-proposal.schema.json",
+  "title": "PatchProposal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "operationRunId", "baseCommitId", "target", "hunks", "warnings", "status", "createdAt"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": { "type": "string", "minLength": 1 },
+    "operationRunId": { "type": "string", "minLength": 1 },
+    "baseCommitId": { "type": "string", "minLength": 1 },
+    "target": { "$ref": "operation-intent.schema.json#/$defs/target" },
+    "hunks": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "from", "to", "replacement"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "from": { "$ref": "operation-intent.schema.json#/$defs/anchor" },
+          "to": { "$ref": "operation-intent.schema.json#/$defs/anchor" },
+          "replacement": { "type": "string", "maxLength": 10000000 },
+          "atomicGroup": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "summary": { "type": "string", "maxLength": 100000 },
+    "warnings": { "type": "array", "items": { "type": "string" } },
+    "status": { "enum": ["review", "accepted", "rejected", "conflicted"] },
+    "createdAt": { "type": "string", "format": "date-time" }
+  }
+}
+

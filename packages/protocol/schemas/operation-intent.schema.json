@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://optimizer.local/schemas/operation-intent.schema.json",
+  "title": "OperationIntent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "projectId", "baseCommitId", "type", "strength", "target", "constraints", "output", "createdAt"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": { "type": "string", "minLength": 1 },
+    "projectId": { "type": "string", "minLength": 1 },
+    "baseCommitId": { "type": "string", "minLength": 1 },
+    "type": { "enum": ["polish", "continue_scene", "compress", "expand", "critique"] },
+    "strength": { "enum": ["low", "medium", "high"] },
+    "target": { "$ref": "#/$defs/target" },
+    "userInstruction": { "type": "string", "maxLength": 10000 },
+    "constraints": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "rule"],
+        "properties": {
+          "severity": { "enum": ["hard", "soft"] },
+          "rule": { "type": "string", "minLength": 1, "maxLength": 10000 },
+          "sourceRef": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "maxTokens"],
+      "properties": {
+        "kind": { "enum": ["patch_proposal", "insert_proposal", "findings"] },
+        "maxTokens": { "type": "integer", "minimum": 1, "maximum": 1000000 }
+      }
+    },
+    "createdAt": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "anchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["blockId", "offset"],
+      "properties": {
+        "blockId": { "type": "string", "minLength": 1 },
+        "offset": { "type": "integer", "minimum": 0 },
+        "affinity": { "enum": ["before", "after"] }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["documentId", "blockId", "baseRevision", "baseHash", "from", "to"],
+      "properties": {
+        "documentId": { "type": "string", "minLength": 1 },
+        "blockId": { "type": "string", "minLength": 1 },
+        "baseRevision": { "type": "integer", "minimum": 0 },
+        "baseHash": { "type": "string", "minLength": 1 },
+        "from": { "$ref": "#/$defs/anchor" },
+        "to": { "$ref": "#/$defs/anchor" }
+      }
+    }
+  }
+}
+

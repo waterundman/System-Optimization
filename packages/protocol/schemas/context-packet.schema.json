@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://optimizer.local/schemas/context-packet.schema.json",
+  "title": "ContextPacket",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "operationIntentId", "projectId", "baseCommitId", "providerLocality", "items", "exclusions", "budget", "compilerVersion", "operationProfileVersion", "compiledAt", "packetHash"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": { "type": "string", "minLength": 1 },
+    "operationIntentId": { "type": "string", "minLength": 1 },
+    "projectId": { "type": "string", "minLength": 1 },
+    "baseCommitId": { "type": "string", "minLength": 1 },
+    "providerLocality": { "enum": ["local", "remote"] },
+    "items": {
+      "type": "array",
+      "maxItems": 2048,
+      "items": { "$ref": "#/$defs/item" }
+    },
+    "exclusions": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": { "$ref": "#/$defs/exclusion" }
+    },
+    "budget": { "$ref": "#/$defs/budget" },
+    "compilerVersion": { "type": "string", "minLength": 1 },
+    "operationProfileVersion": { "type": "string", "minLength": 1 },
+    "compiledAt": { "type": "string", "format": "date-time" },
+    "packetHash": { "type": "string", "minLength": 1 }
+  },
+  "$defs": {
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sourceRef", "sourceHash", "tier", "status", "authority", "sensitivity", "renderMode", "reasonCodes", "estimatedTokens", "score", "mandatory", "content"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "sourceRef": { "type": "string", "minLength": 1 },
+        "sourceHash": { "type": "string", "minLength": 1 },
+        "tier": { "enum": ["L0_TARGET", "L1_LOCAL", "L2_STRUCTURAL", "L3_KNOWLEDGE", "L4_STYLE_GLOBAL"] },
+        "status": { "enum": ["canonical", "draft", "disputed", "archived", "rejected", "deleted"] },
+        "authority": { "enum": ["user_confirmed", "source_derived", "model_inferred", "external_untrusted"] },
+        "sensitivity": { "enum": ["public", "local", "local_sensitive", "never_send"] },
+        "renderMode": { "enum": ["verbatim", "summary", "constraint"] },
+        "reasonCodes": { "type": "array", "items": { "type": "string" } },
+        "estimatedTokens": { "type": "integer", "minimum": 0 },
+        "score": { "type": "number" },
+        "mandatory": { "type": "boolean" },
+        "content": { "type": "string", "maxLength": 10000000 }
+      }
+    },
+    "exclusion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceRef", "sourceHash", "reason"],
+      "properties": {
+        "sourceRef": { "type": "string", "minLength": 1 },
+        "sourceHash": { "type": "string", "minLength": 1 },
+        "reason": { "enum": ["INELIGIBLE_STATUS", "DRAFT_NOT_SELECTED", "POLICY_DENIED", "DUPLICATE", "TIER_BUDGET", "TOTAL_BUDGET"] }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["modelLimit", "reservedOutput", "reservedOverhead", "inputBudget", "estimatedInput", "tokenizer"],
+      "properties": {
+        "modelLimit": { "type": "integer", "minimum": 1 },
+        "reservedOutput": { "type": "integer", "minimum": 0 },
+        "reservedOverhead": { "type": "integer", "minimum": 0 },
+        "inputBudget": { "type": "integer", "minimum": 0 },
+        "estimatedInput": { "type": "integer", "minimum": 0 },
+        "tokenizer": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
+
