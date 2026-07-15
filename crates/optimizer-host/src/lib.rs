@@ -2,6 +2,14 @@ use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+mod operation_commands;
+
+pub use operation_commands::{
+    ArtifactAudit, ContextPacketAudit, FailureAudit, LifecycleEventAudit, ModelUsageAudit,
+    OperationAuditResponse, OperationCommandError, OperationCommandHost, PersistOperationResponse,
+    PersistReviewResponse, ReviewAudit, ReviewEventAudit, RunAudit,
+};
+
 #[derive(Debug)]
 pub enum HostError {
     RootMustBeAbsolute(PathBuf),

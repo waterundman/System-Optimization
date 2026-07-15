@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "run": {
+    "id": "run-fixture-1",
+    "operationIntentId": "intent-fixture-1",
+    "projectId": "project-1",
+    "baseCommitId": "commit-initial",
+    "providerId": "deepseek",
+    "model": "deepseek-v4-flash",
+    "state": "review",
+    "responseId": "response-fixture-1",
+    "finishReason": "stop",
+    "usage": {
+      "inputTokens": 80,
+      "outputTokens": 20,
+      "totalTokens": 100,
+      "cachedInputTokens": 12
+    },
+    "startedAt": "2026-07-15T00:00:00.000Z",
+    "updatedAt": "2026-07-15T00:01:00.000Z"
+  },
+  "contextPacket": {
+    "id": "context-fixture-1",
+    "operationIntentId": "intent-fixture-1",
+    "projectId": "project-1",
+    "baseCommitId": "commit-initial",
+    "packetHash": "sha256:context-fixture-1",
+    "payload": {
+      "schemaVersion": 1,
+      "id": "context-fixture-1",
+      "operationIntentId": "intent-fixture-1",
+      "projectId": "project-1",
+      "baseCommitId": "commit-initial",
+      "items": [],
+      "exclusions": [],
+      "packetHash": "sha256:context-fixture-1"
+    },
+    "createdAt": "2026-07-15T00:00:10.000Z"
+  },
+  "lifecycleEvents": [
+    { "fromState": "draft", "toState": "compiling", "occurredAt": "2026-07-15T00:00:00.000Z" },
+    { "fromState": "compiling", "toState": "preflight", "occurredAt": "2026-07-15T00:00:10.000Z" },
+    { "fromState": "preflight", "toState": "queued", "occurredAt": "2026-07-15T00:00:20.000Z" },
+    { "fromState": "queued", "toState": "streaming", "occurredAt": "2026-07-15T00:00:30.000Z" },
+    { "fromState": "streaming", "toState": "validating", "occurredAt": "2026-07-15T00:00:50.000Z" },
+    { "fromState": "validating", "toState": "review", "occurredAt": "2026-07-15T00:01:00.000Z" }
+  ],
+  "artifact": {
+    "id": "proposal-fixture-1",
+    "kind": "patch_proposal",
+    "bindingHash": "sha256:proposal-fixture-1",
+    "payload": {
+      "schemaVersion": 2,
+      "id": "proposal-fixture-1",
+      "operationRunId": "run-fixture-1",
+      "proposalHash": "sha256:proposal-fixture-1"
+    },
+    "createdAt": "2026-07-15T00:01:00.000Z"
+  }
+}

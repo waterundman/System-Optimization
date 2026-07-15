@@ -195,6 +195,77 @@ export interface ModelProviderConfiguration {
   readonly updatedAt: string;
 }
 
+export interface PersistedModelUsage {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly totalTokens: number;
+  readonly cachedInputTokens?: number;
+  readonly reasoningTokens?: number;
+}
+
+export interface PersistedOperationFailure {
+  readonly code: string;
+  readonly message: string;
+  readonly retriable: boolean;
+}
+
+export interface OperationPersistenceBundleV1 {
+  readonly schemaVersion: 1;
+  readonly run: {
+    readonly id: OperationRunId;
+    readonly operationIntentId: OperationIntentId;
+    readonly projectId: ProjectId;
+    readonly baseCommitId: CommitId;
+    readonly providerId: ModelProviderId;
+    readonly model: string;
+    readonly state: Extract<OperationState, "review" | "failed" | "cancelled">;
+    readonly responseId?: string;
+    readonly finishReason?: string;
+    readonly usage?: PersistedModelUsage;
+    readonly failure?: PersistedOperationFailure;
+    readonly startedAt: string;
+    readonly updatedAt: string;
+  };
+  readonly contextPacket?: {
+    readonly id: ContextPacketId;
+    readonly operationIntentId: OperationIntentId;
+    readonly projectId: ProjectId;
+    readonly baseCommitId: CommitId;
+    readonly packetHash: string;
+    readonly payload: ContextPacket;
+    readonly createdAt: string;
+  };
+  readonly lifecycleEvents: readonly {
+    readonly fromState: OperationState;
+    readonly toState: OperationState;
+    readonly occurredAt: string;
+    readonly reason?: string;
+  }[];
+  readonly artifact?: {
+    readonly id: string;
+    readonly kind: "patch_proposal" | "findings";
+    readonly bindingHash: string;
+    readonly payload: Readonly<Record<string, unknown>>;
+    readonly createdAt: string;
+  };
+}
+
+export type PersistedReviewStatus = "review" | "ready" | "applied" | "rejected" | "conflicted";
+
+export interface PersistReviewEventCommandV1 {
+  readonly schemaVersion: 1;
+  readonly id: string;
+  readonly proposalId: PatchProposalId;
+  readonly expectedRevision: number;
+  readonly expectedStatus: PersistedReviewStatus;
+  readonly kind: "decision" | "apply" | "conflict" | "rebase" | "reject";
+  readonly nextStatus: PersistedReviewStatus;
+  readonly hunkId?: string;
+  readonly decision?: "accepted" | "rejected";
+  readonly payload?: unknown;
+  readonly occurredAt: string;
+}
+
 export type OperationState =
   | "draft"
   | "compiling"

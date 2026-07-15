@@ -5,3 +5,4 @@ import "../packages/editor-bridge/test/editor-bridge.test.ts";
 import "../packages/patch-engine/test/patch-engine.test.ts";
 import "../packages/model-gateway/test/model-gateway.test.ts";
 import "../packages/operation-runner/test/operation-runner.test.ts";
+import "../packages/operation-runner/test/persistence.test.ts";

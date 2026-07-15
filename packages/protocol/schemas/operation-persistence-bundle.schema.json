@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://optimizer.local/schemas/operation-persistence-bundle.schema.json",
+  "title": "OperationPersistenceBundleV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "run", "lifecycleEvents"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "operationIntentId", "projectId", "baseCommitId", "providerId", "model",
+        "state", "startedAt", "updatedAt"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "operationIntentId": { "type": "string", "minLength": 1 },
+        "projectId": { "type": "string", "minLength": 1 },
+        "baseCommitId": { "type": "string", "minLength": 1 },
+        "providerId": { "enum": ["deepseek", "qwen", "kimi", "minimax"] },
+        "model": { "type": "string", "minLength": 1 },
+        "state": { "enum": ["review", "failed", "cancelled"] },
+        "responseId": { "type": "string", "minLength": 1 },
+        "finishReason": { "type": "string", "minLength": 1 },
+        "usage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["inputTokens", "outputTokens", "totalTokens"],
+          "properties": {
+            "inputTokens": { "type": "integer", "minimum": 0 },
+            "outputTokens": { "type": "integer", "minimum": 0 },
+            "totalTokens": { "type": "integer", "minimum": 0 },
+            "cachedInputTokens": { "type": "integer", "minimum": 0 },
+            "reasoningTokens": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "failure": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "retriable"],
+          "properties": {
+            "code": { "type": "string", "minLength": 1 },
+            "message": { "type": "string", "minLength": 1, "maxLength": 4000 },
+            "retriable": { "type": "boolean" }
+          }
+        },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "contextPacket": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "operationIntentId", "projectId", "baseCommitId", "packetHash", "payload", "createdAt"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "operationIntentId": { "type": "string", "minLength": 1 },
+        "projectId": { "type": "string", "minLength": 1 },
+        "baseCommitId": { "type": "string", "minLength": 1 },
+        "packetHash": { "type": "string", "minLength": 1 },
+        "payload": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "lifecycleEvents": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["fromState", "toState", "occurredAt"],
+        "properties": {
+          "fromState": { "$ref": "#/$defs/operationState" },
+          "toState": { "$ref": "#/$defs/operationState" },
+          "occurredAt": { "type": "string", "format": "date-time" },
+          "reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "bindingHash", "payload", "createdAt"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["patch_proposal", "findings"] },
+        "bindingHash": { "type": "string", "minLength": 1 },
+        "payload": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "$defs": {
+    "operationState": {
+      "enum": [
+        "draft", "compiling", "preflight", "queued", "streaming", "validating",
+        "review", "accepted", "rejected", "conflicted", "failed", "cancelled"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "run": { "properties": { "state": { "const": "review" } } } } },
+      "then": {
+        "required": ["contextPacket", "artifact"],
+        "properties": { "run": { "required": ["responseId", "finishReason"], "not": { "required": ["failure"] } } }
+      },
+      "else": {
+        "not": { "required": ["artifact"] },
+        "properties": { "run": { "required": ["failure"] } }
+      }
+    }
+  ]
+}

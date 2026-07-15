@@ -28,6 +28,13 @@ OperationIntent
 - `patch_proposal` / `insert_proposal`：模型返回完整 replacement，Patch Engine 生成逐 hunk 提案。
 - `findings`：模型返回经过数量、字段、severity 和长度校验的问题列表，不生成编辑事务。
 
-`onProgress` 只面向瞬时 UI 更新，观察者异常不会改变操作语义。需要持久化的生命周期、模型用量和 proposal 将由后续 Operation Store 负责。
+`onProgress` 只面向瞬时 UI 更新，观察者异常不会改变操作语义。生命周期、模型用量和产物由持久化适配器编译为 `OperationPersistenceBundleV1`，再交给 Rust Host 与 Operation Store 原子写入。
 
 成功结果包含完整 ContextPacket、模型响应 ID、模型名称、用量和生命周期。失败结果 `OperationExecutionError` 也会保留 run ID、Provider、已解析模型以及失败前已经完成的 ContextPacket，供宿主构造可审计的失败 OperationRun；不会保存 API Key 或原始 HTTP Header。
+
+## 持久化边界
+
+- `buildSuccessfulPersistenceBundle` 绑定 Intent、ContextPacket 与 Patch/Findings，拒绝错配的 project、commit 或 operation。
+- `buildFailedPersistenceBundle` 保留安全化错误码、可重试标志、已完成的 ContextPacket 与失败生命周期，不伪造 Artifact。
+- `serializeOperationPersistenceBundle` 和 `serializeReviewEventCommand` 使用确定性 JSON，便于夹具、重放和审计。
+- 宿主边界协议显式版本化；新增字段必须先更新 TypeScript 类型、JSON Schema、Rust DTO 与共享夹具。

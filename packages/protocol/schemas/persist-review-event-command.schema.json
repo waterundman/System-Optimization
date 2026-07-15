@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://optimizer.local/schemas/persist-review-event-command.schema.json",
+  "title": "PersistReviewEventCommandV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "id", "proposalId", "expectedRevision", "expectedStatus",
+    "kind", "nextStatus", "occurredAt"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": { "type": "string", "minLength": 1 },
+    "proposalId": { "type": "string", "minLength": 1 },
+    "expectedRevision": { "type": "integer", "minimum": 0 },
+    "expectedStatus": { "$ref": "#/$defs/reviewStatus" },
+    "kind": { "enum": ["decision", "apply", "conflict", "rebase", "reject"] },
+    "nextStatus": { "$ref": "#/$defs/reviewStatus" },
+    "hunkId": { "type": "string", "minLength": 1 },
+    "decision": { "enum": ["accepted", "rejected"] },
+    "payload": {},
+    "occurredAt": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "reviewStatus": { "enum": ["review", "ready", "applied", "rejected", "conflicted"] }
+  }
+}
