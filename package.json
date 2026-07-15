@@ -17,6 +17,7 @@
     "test:kernel": "node --test packages/kernel/test/context-compiler.test.ts packages/kernel/test/operation-state-machine.test.ts",
     "test:patch": "node --test packages/patch-engine/test/patch-engine.test.ts",
     "test:models": "node --test packages/model-gateway/test/model-gateway.test.ts",
+    "test:operations": "node --test packages/operation-runner/test/operation-runner.test.ts",
     "check:schemas": "node scripts/check-protocol-schemas.mjs",
     "check:architecture": "node scripts/check-architecture.mjs",
     "check": "npm run check:schemas && npm run check:architecture && npm test",

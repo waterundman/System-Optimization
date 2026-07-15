@@ -26,6 +26,7 @@ const roots = [
   "packages/editor-bridge/src",
   "packages/patch-engine/src",
   "packages/model-gateway/src",
+  "packages/operation-runner/src",
 ];
 const files = (await Promise.all(roots.map((root) => walk(resolve(root))))).flat();
 const violations = [];

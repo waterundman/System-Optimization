@@ -13,6 +13,8 @@
 - Qwen 中国、新加坡、美国、德国、日本地域端点；
 - Provider Router 动态切换。
 
+每个 Provider Profile 同时声明 `locality`。当前四个云端 profile 均固定为 `remote`，供 Context Compiler 和 Operation Runner 执行 `never_send` 隐私策略；后续本地 Provider 必须显式声明为 `local`。
+
 网关不直接读取环境变量。宿主解析 secret 后注入，避免领域包访问进程环境：
 
 ```ts

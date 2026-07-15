@@ -1,4 +1,4 @@
-import type { ModelProviderId } from "../../protocol/src/index.ts";
+import type { ModelProviderId, ProviderLocality } from "../../protocol/src/index.ts";
 
 export type ProviderId = ModelProviderId;
 export type ProviderDialect = ProviderId;
@@ -108,6 +108,7 @@ export interface ProviderProfile {
   readonly id: ProviderId;
   readonly label: string;
   readonly dialect: ProviderDialect;
+  readonly locality: ProviderLocality;
   readonly baseUrl: string;
   readonly apiKeyEnvironmentVariable: string;
   readonly defaultModel: string;
