@@ -19,7 +19,7 @@
         "operationIntentId": { "type": "string", "minLength": 1 },
         "projectId": { "type": "string", "minLength": 1 },
         "baseCommitId": { "type": "string", "minLength": 1 },
-        "providerId": { "enum": ["deepseek", "qwen", "kimi", "minimax"] },
+        "providerId": { "enum": ["deepseek", "qwen", "kimi", "minimax", "ollama"] },
         "model": { "type": "string", "minLength": 1 },
         "state": { "enum": ["review", "failed", "cancelled"] },
         "responseId": { "type": "string", "minLength": 1 },

@@ -33,6 +33,14 @@ await page.goto("http://127.0.0.1:4173/", { waitUntil: "networkidle" });
 await page.getByRole("button", { name: "模型设置" }).click();
 await page.getByText("凭据已存入系统保险库").waitFor();
 await page.screenshot({ path: resolve(screenshotDirectory, "provider-settings.png"), fullPage: true });
+await page.getByRole("button", { name: "Ollama / 本地" }).click();
+await page.getByText("固定本地端点 · 无需 API Key").waitFor();
+await page.getByText(/127\.0\.0\.1:11434\/v1/).waitFor();
+await page.getByRole("checkbox", { name: "启用此供应商" }).check();
+await page.getByRole("button", { name: "保存模型设置" }).click();
+await page.getByText(/请求只会发往固定回环端点/).waitFor();
+await page.screenshot({ path: resolve(screenshotDirectory, "ollama-settings.png"), fullPage: true });
+await page.getByRole("button", { name: "DeepSeek" }).click();
 await page.getByRole("button", { name: "收起模型" }).click();
 
 await page.getByRole("button", { name: "风格样本" }).click();

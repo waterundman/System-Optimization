@@ -30,7 +30,13 @@ const operationTypes = new Set<OperationType>([
 const outputKinds = new Set<OutputKind>(["patch_proposal", "insert_proposal", "findings"]);
 const granularities = new Set<DiffGranularity>(["paragraph", "sentence", "token"]);
 const proposalStatuses = new Set<PatchProposalStatus>(["review", "accepted", "rejected", "conflicted"]);
-const modelProviderIds = new Set<ModelProviderId>(["deepseek", "qwen", "kimi", "minimax"]);
+const modelProviderIds = new Set<ModelProviderId>([
+  "deepseek",
+  "qwen",
+  "kimi",
+  "minimax",
+  "ollama",
+]);
 const qwenRegions = new Set<QwenDeploymentRegion>([
   "china",
   "singapore",

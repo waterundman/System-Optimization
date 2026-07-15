@@ -9,6 +9,7 @@ import {
   deepSeekProfile,
   kimiProfile,
   miniMaxProfile,
+  ollamaProfile,
   type FetchLike,
   type HttpRequestInit,
   type HttpResponseLike,
@@ -55,6 +56,41 @@ test("builds region-aware Qwen endpoints and validates workspace IDs", () => {
     () => createQwenProfile({ region: "unknown" as never }),
     (error: unknown) => error instanceof ProviderError && error.kind === "configuration",
   );
+});
+
+test("pins Ollama to the local OpenAI-compatible endpoint without credentials", async () => {
+  const built = buildChatRequest(ollamaProfile, {
+    ...basicRequest,
+    reasoning: { mode: "disabled" },
+    responseFormat: "json_object",
+  }, true);
+  assert.equal(ollamaProfile.locality, "local");
+  assert.equal(ollamaProfile.authentication, "none");
+  assert.equal(built.url, "http://127.0.0.1:11434/v1/chat/completions");
+  assert.equal(built.body.max_tokens, 512);
+  assert.equal(built.body.reasoning_effort, "none");
+
+  assert.throws(
+    () => buildChatRequest({ ...ollamaProfile, baseUrl: "http://example.com/v1" }, basicRequest, false),
+    (error: unknown) => error instanceof ProviderError && error.kind === "configuration",
+  );
+
+  const calls: HttpRequestInit[] = [];
+  const gateway = new OpenAICompatibleModelGateway({
+    profile: ollamaProfile,
+    fetch: async (_url, init) => {
+      calls.push(init);
+      return jsonResponse({
+        id: "chat-local-1",
+        model: "qwen3:8b",
+        choices: [{ message: { content: "本地结果", reasoning: "本地推理" }, finish_reason: "stop" }],
+      });
+    },
+  });
+  const completion = await gateway.complete(basicRequest);
+  assert.equal(completion.content, "本地结果");
+  assert.equal(completion.reasoningContent, "本地推理");
+  assert.equal(calls[0]?.headers.Authorization, undefined);
 });
 
 test("maps DeepSeek reasoning and output parameters to its official dialect", () => {

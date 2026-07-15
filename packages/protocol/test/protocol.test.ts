@@ -108,6 +108,13 @@ test("persists provider settings through credential references, never API keys",
     updatedAt: "2026-07-14T00:00:00.000Z",
   };
   assert.equal(validateModelProviderConfiguration(configuration).ok, true);
+  assert.equal(validateModelProviderConfiguration({
+    ...configuration,
+    id: "provider-ollama-default",
+    providerId: "ollama",
+    defaultModel: "qwen3:8b",
+    credentialRef: "secret://providers/ollama/default",
+  }).ok, true);
 
   const leaked = validateModelProviderConfiguration({
     ...configuration,

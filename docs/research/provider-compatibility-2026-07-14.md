@@ -1,6 +1,6 @@
 # 模型 Provider 官方兼容性核对
 
-- 核对日期：2026-07-14
+- 核对日期：2026-07-14；Ollama 增补：2026-07-15
 - 范围：文本优化器使用的 OpenAI-compatible Chat Completions
 
 | Provider | 官方 base URL / 端点 | 本轮验证模型 | 关键差异 |
@@ -9,6 +9,7 @@
 | Qwen | 地域工作区域名 + `/compatible-mode/v1/chat/completions` | `qwen-plus`、`qwen3.7-plus` | 地域域名、`enable_thinking`、`max_completion_tokens` |
 | Kimi | `https://api.moonshot.cn/v1/chat/completions` | `kimi-k2.6`、`kimi-k2.7-code` | `thinking.keep`、Preserved Thinking、SSE |
 | MiniMax | `https://api.minimaxi.com/v1/chat/completions` | `MiniMax-M3`、M2.7/M2.5 | `reasoning_split`、累计流片段、`max_completion_tokens` |
+| Ollama | `http://127.0.0.1:11434/v1/chat/completions` | `qwen3:8b`（默认，可编辑） | 本地无凭据、SSE、JSON mode、`max_tokens`、`reasoning_effort` |
 
 ## 官方资料
 
@@ -16,6 +17,7 @@
 - Qwen：https://help.aliyun.com/en/model-studio/qwen-api-via-openai-chat-completions
 - Kimi：https://platform.kimi.com/docs/api/chat
 - MiniMax：https://platform.minimaxi.com/docs/api-reference/text-openai-api
+- Ollama：https://docs.ollama.com/api/openai-compatibility
 
 DeepSeek 的旧 `deepseek-chat`、`deepseek-reasoner` 名称将在 2026-07-24 停用，因此没有作为默认或已知模型写入新 profile。
 

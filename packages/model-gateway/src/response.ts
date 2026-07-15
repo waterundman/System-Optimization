@@ -63,7 +63,8 @@ export function parseStreamChunk(input: unknown): ParsedStreamChunk {
     const choice = requireRecord(first, "choices[0]");
     const delta = requireRecord(choice.delta, "choices[0].delta");
     content = optionalString(delta.content, "delta.content");
-    reasoningContent = optionalString(delta.reasoning_content, "delta.reasoning_content");
+    reasoningContent = optionalString(delta.reasoning_content, "delta.reasoning_content")
+      ?? optionalString(delta.reasoning, "delta.reasoning");
     reasoningDetailsText = extractReasoningDetails(delta.reasoning_details);
     toolCallDeltas = parseToolCallDeltas(delta.tool_calls);
     if (choice.finish_reason !== null && choice.finish_reason !== undefined) {
@@ -109,6 +110,7 @@ export function parseUsage(input: unknown): ModelUsage | undefined {
 
 function extractReasoning(message: Readonly<Record<string, unknown>>): string | undefined {
   return optionalString(message.reasoning_content, "message.reasoning_content")
+    ?? optionalString(message.reasoning, "message.reasoning")
     ?? extractReasoningDetails(message.reasoning_details);
 }
 

@@ -5,12 +5,13 @@ import {
   credentialReference,
   defaultProviderSettings,
   providerConfiguration,
+  providerRequiresCredential,
   runDesktopOperation,
 } from "../dist/operation-client.js";
 
-test("builds fixed credential-bound configurations for all supported providers", () => {
+test("builds fixed host configurations for cloud and local providers", () => {
   const settings = defaultProviderSettings();
-  assert.deepEqual(Object.keys(settings), ["deepseek", "qwen", "kimi", "minimax"]);
+  assert.deepEqual(Object.keys(settings), ["deepseek", "qwen", "kimi", "minimax", "ollama"]);
   for (const providerId of Object.keys(settings)) {
     settings[providerId].enabled = true;
     const configuration = providerConfiguration(
@@ -21,6 +22,9 @@ test("builds fixed credential-bound configurations for all supported providers",
     assert.equal(configuration.credentialRef, credentialReference(providerId));
     assert.equal("apiKey" in configuration, false);
   }
+  assert.equal(providerRequiresCredential("deepseek"), true);
+  assert.equal(providerRequiresCredential("ollama"), false);
+  assert.equal(settings.ollama.defaultModel, "qwen3:8b");
 });
 
 test("runs Context Compiler to host stream to persisted patch proposal without plaintext secrets", async () => {

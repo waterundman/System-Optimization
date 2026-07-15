@@ -9,13 +9,15 @@ WebView 只允许：
 - 写入 Patch review 事件；
 - 读取 Operation 审计；
 - 写入、检查和删除 provider secret。
-- 通过 Rust Host 执行 DeepSeek、Qwen、Kimi、MiniMax 固定端点的流式请求与取消。
+- 通过 Rust Host 执行 DeepSeek、Qwen、Kimi、MiniMax 固定 HTTPS 端点，以及 Ollama 固定回环端点的流式请求与取消。
 - 复用 Kernel/Operation Runner/Patch Engine 完成 AI 操作、Findings 与逐 hunk 审查。
 - 原子应用已审查 Proposal，同时写入 `ai_accept` Commit 与完整 Operation/Review 审计。
 - 读取文档树并用版本基线保存 Block；
 - 建立检查点、浏览版本元数据并恢复为新 Commit。
 
-WebView 不存在“读取 secret 明文”命令。模型请求执行器后续应在 Rust 信任边界内解析 `credentialRef`，或使用一次性宿主网络命令，不能把 API Key 返回 JavaScript。
+WebView 不存在“读取 secret 明文”命令。云端模型请求由 Rust 信任边界解析 `credentialRef` 并执行，API Key 不会返回 JavaScript。
+
+Ollama 是无凭据的显式本地 Provider：宿主只连接 `127.0.0.1:11434/v1/chat/completions` 并禁用系统代理，不接受页面提交的地址。模型需由用户预先在 Ollama 中拉取；运行失败不会自动把本地 Context Packet 发往云端。
 
 ## 项目会话
 

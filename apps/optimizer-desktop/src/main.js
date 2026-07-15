@@ -16,6 +16,7 @@ import {
   decideDesktopHunk,
   defaultProviderSettings,
   persistDesktopReviewDecision,
+  providerRequiresCredential,
   rejectDesktopReview,
   runDesktopOperation,
 } from "./operation-client.js";
@@ -129,6 +130,7 @@ function persistProviderSettings() {
 
 async function refreshProviderSecretStatus() {
   const entries = await Promise.all(Object.keys(PROVIDER_PRESETS).map(async (providerId) => {
+    if (!providerRequiresCredential(providerId)) return [providerId, false];
     try {
       const status = await invokeHost("has_provider_secret", {
         reference: credentialReference(providerId),
@@ -541,11 +543,17 @@ function textOffset(root, node, offset) {
 async function runAiOperation(operationType) {
   if (state.aiRunning || state.aiReview?.kind === "patch_proposal") return;
   const providerSettings = state.providerSettings[state.selectedProviderId];
-  if (!providerSettings.enabled || !providerSettings.credentialExists) {
+  const credentialRequired = providerRequiresCredential(state.selectedProviderId);
+  if (!providerSettings.enabled || (credentialRequired && !providerSettings.credentialExists)) {
     state.providersOpen = true;
     state.versionsOpen = false;
     state.stylesOpen = false;
-    setNotice("warning", `请先在模型设置中启用 ${PROVIDER_PRESETS[state.selectedProviderId].label} 并保存 API Key。`);
+    setNotice(
+      "warning",
+      credentialRequired
+        ? `请先在模型设置中启用 ${PROVIDER_PRESETS[state.selectedProviderId].label} 并保存 API Key。`
+        : `请先在模型设置中启用 ${PROVIDER_PRESETS[state.selectedProviderId].label}。`,
+    );
     renderWorkspace();
     return;
   }
@@ -1133,6 +1141,7 @@ async function updateStyleSampleStatus(sample, status) {
 function providerDrawer() {
   const providerId = state.selectedProviderId;
   const settings = state.providerSettings[providerId];
+  const credentialRequired = providerRequiresCredential(providerId);
   const drawer = element("aside", { className: "version-drawer provider-drawer" }, [
     element("div", { className: "drawer-heading" }, [
       element("div", {}, [
@@ -1153,20 +1162,31 @@ function providerDrawer() {
     ),
   ]);
   const form = element("form", { className: "provider-form" }, [
-    element("div", { className: `credential-status${settings.credentialExists ? " connected" : ""}` }, [
+    element("div", { className: `credential-status${!credentialRequired || settings.credentialExists ? " connected" : ""}` }, [
       element("span", { className: "status-dot" }),
-      element("strong", { text: settings.credentialExists ? "凭据已存入系统保险库" : "尚未保存凭据" }),
+      element("strong", {
+        text: credentialRequired
+          ? (settings.credentialExists ? "凭据已存入系统保险库" : "尚未保存凭据")
+          : "固定本地端点 · 无需 API Key",
+      }),
     ]),
     checkboxField("启用此供应商", "enabled", settings.enabled),
     labeledInput("默认模型", "defaultModel", PROVIDER_PRESETS[providerId].defaultModel, true, settings.defaultModel),
     ...(providerId === "qwen" ? qwenProviderFields(settings) : []),
-    passwordField("API Key", "apiKey", settings.credentialExists ? "留空则保持现有凭据" : "仅发送到 Rust 宿主"),
-    element("p", {
-      className: "form-hint",
-      text: "API Key 只写入操作系统凭据库。WebView 无读取命令；本地偏好仅保存模型名、区域和启用状态。",
-    }),
+    ...(credentialRequired ? [
+      passwordField("API Key", "apiKey", settings.credentialExists ? "留空则保持现有凭据" : "仅发送到 Rust 宿主"),
+      element("p", {
+        className: "form-hint",
+        text: "API Key 只写入操作系统凭据库。WebView 无读取命令；本地偏好仅保存模型名、区域和启用状态。",
+      }),
+    ] : [
+      element("p", {
+        className: "form-hint",
+        text: "仅连接本机回环 127.0.0.1:11434/v1；地址不可由文档或页面修改，never_send 样本可在本地上下文中使用。请先在 Ollama 中拉取同名模型。",
+      }),
+    ]),
     element("button", { className: "primary-button", text: "保存模型设置", type: "submit" }),
-    settings.credentialExists
+    credentialRequired && settings.credentialExists
       ? button("删除已保存凭据", "quiet-button provider-delete", deleteProviderCredential)
       : null,
   ]);
@@ -1208,7 +1228,8 @@ async function saveProviderSettings(event) {
   setFormBusy(form, true);
   try {
     const previous = state.providerSettings[providerId];
-    const apiKey = formValue(form, "apiKey");
+    const credentialRequired = providerRequiresCredential(providerId);
+    const apiKey = credentialRequired ? formValue(form, "apiKey") : "";
     if (apiKey) {
       await invokeHost("store_provider_secret", {
         reference: credentialReference(providerId),
@@ -1216,7 +1237,7 @@ async function saveProviderSettings(event) {
       });
     }
     const enabled = form.elements.namedItem("enabled").checked;
-    if (enabled && !apiKey && !previous.credentialExists) {
+    if (enabled && credentialRequired && !apiKey && !previous.credentialExists) {
       throw { code: "PROVIDER_CREDENTIAL_MISSING", message: "启用供应商前请先填写 API Key。" };
     }
     state.providerSettings[providerId] = {
@@ -1229,7 +1250,12 @@ async function saveProviderSettings(event) {
     };
     persistProviderSettings();
     await refreshProviderSecretStatus();
-    setNotice("success", `${PROVIDER_PRESETS[providerId].label} 设置已保存；明文凭据未返回 WebView。`);
+    setNotice(
+      "success",
+      credentialRequired
+        ? `${PROVIDER_PRESETS[providerId].label} 设置已保存；明文凭据未返回 WebView。`
+        : `${PROVIDER_PRESETS[providerId].label} 设置已保存；请求只会发往固定回环端点。`,
+    );
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
   } finally {
@@ -1240,6 +1266,7 @@ async function saveProviderSettings(event) {
 
 async function deleteProviderCredential() {
   const providerId = state.selectedProviderId;
+  if (!providerRequiresCredential(providerId)) return;
   try {
     await invokeHost("delete_provider_secret", { reference: credentialReference(providerId) });
     state.providerSettings[providerId] = {

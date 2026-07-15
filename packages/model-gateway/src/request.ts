@@ -98,6 +98,17 @@ function applyReasoningDialect(
     return;
   }
 
+  if (profile.dialect === "ollama") {
+    if (reasoning.mode === "disabled") {
+      body.reasoning_effort = "none";
+    } else if (reasoning.effort !== undefined) {
+      body.reasoning_effort = reasoning.effort;
+    } else if (reasoning.mode === "enabled") {
+      body.reasoning_effort = "medium";
+    }
+    return;
+  }
+
   if (reasoning.mode !== "adaptive") {
     body.thinking = { type: reasoning.mode };
   }
@@ -111,8 +122,14 @@ function validateProfile(profile: ProviderProfile): void {
   } catch {
     throw configurationError(profile, "Provider baseUrl is invalid");
   }
+  const fixedOllamaEndpoint = profile.id === "ollama"
+    && profile.locality === "local"
+    && parsed.protocol === "http:"
+    && parsed.hostname === "127.0.0.1"
+    && parsed.port === "11434"
+    && parsed.pathname === "/v1";
   if (
-    parsed.protocol !== "https:"
+    (parsed.protocol !== "https:" && !fixedOllamaEndpoint)
     || parsed.username
     || parsed.password
     || parsed.search
@@ -120,7 +137,7 @@ function validateProfile(profile: ProviderProfile): void {
   ) {
     throw configurationError(
       profile,
-      "Provider baseUrl must be HTTPS and must not contain credentials, query or fragment",
+      "Provider baseUrl must be HTTPS, except for the fixed Ollama loopback endpoint, and must not contain credentials, query or fragment",
     );
   }
 }

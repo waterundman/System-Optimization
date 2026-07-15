@@ -29,18 +29,18 @@ const defaultTimer: TimerPort = {
 
 export class OpenAICompatibleModelGateway {
   readonly profile: ProviderProfile;
-  #apiKey: string;
+  #apiKey?: string;
   private readonly fetch: FetchLike;
   private readonly timer: TimerPort;
   private readonly defaultTimeoutMs: number;
   private readonly maxRequestBytes: number;
 
   constructor(config: ModelGatewayConfig) {
-    if (!config.apiKey.trim()) {
+    if (config.profile.authentication === "bearer" && !config.apiKey?.trim()) {
       throw new ProviderError({
         kind: "configuration",
         providerId: config.profile.id,
-        message: `API key is required; resolve ${config.profile.apiKeyEnvironmentVariable} in the host`,
+        message: `API key is required; resolve ${config.profile.apiKeyEnvironmentVariable ?? "the configured credential"} in the host`,
       });
     }
     const defaultTimeoutMs = config.defaultTimeoutMs ?? 60_000;
@@ -198,7 +198,9 @@ export class OpenAICompatibleModelGateway {
       response = await this.fetch(url, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${this.#apiKey}`,
+          ...(this.profile.authentication === "bearer"
+            ? { Authorization: `Bearer ${this.#apiKey}` }
+            : {}),
           "Content-Type": "application/json",
           Accept: "application/json, text/event-stream",
         },

@@ -17,7 +17,7 @@ impl ModelTransport for NativeModelTransport {
     fn execute(
         &self,
         request: &PreparedModelRequest,
-        _secret: &SecretValue,
+        _secret: Option<&SecretValue>,
         _cancellation: &ModelCancellation,
         _sink: &mut dyn ModelResponseSink,
     ) -> Result<(), ModelGatewayError> {
@@ -39,10 +39,10 @@ mod windows {
 
     use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, GetLastError};
     use windows_sys::Win32::Networking::WinHttp::{
-        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE, WINHTTP_QUERY_FLAG_NUMBER,
-        WINHTTP_QUERY_RAW_HEADERS_CRLF, WINHTTP_QUERY_STATUS_CODE, WinHttpCloseHandle,
-        WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders, WinHttpReadData,
-        WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetTimeouts,
+        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_FLAG_SECURE,
+        WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_RAW_HEADERS_CRLF, WINHTTP_QUERY_STATUS_CODE,
+        WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders,
+        WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetTimeouts,
     };
     use zeroize::Zeroize;
 
@@ -51,7 +51,7 @@ mod windows {
         fn execute(
             &self,
             request: &PreparedModelRequest,
-            secret: &SecretValue,
+            secret: Option<&SecretValue>,
             cancellation: &ModelCancellation,
             sink: &mut dyn ModelResponseSink,
         ) -> Result<(), ModelGatewayError> {
@@ -63,7 +63,11 @@ mod windows {
                 unsafe {
                     WinHttpOpen(
                         agent.as_ptr(),
-                        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                        if request.use_tls() {
+                            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY
+                        } else {
+                            WINHTTP_ACCESS_TYPE_NO_PROXY
+                        },
                         ptr::null(),
                         ptr::null(),
                         0,
@@ -100,7 +104,11 @@ mod windows {
                     ptr::null(),
                     ptr::null(),
                     ptr::null(),
-                    WINHTTP_FLAG_SECURE,
+                    if request.use_tls() {
+                        WINHTTP_FLAG_SECURE
+                    } else {
+                        0
+                    },
                 )
             };
             if request_handle.is_null() {
@@ -109,11 +117,14 @@ mod windows {
             cancellation.install_native_request(request_handle, request.provider_id())?;
             let _request_registration = RequestRegistration(cancellation);
 
-            let mut headers: Vec<u16> = "Authorization: Bearer ".encode_utf16().collect();
-            headers.extend(secret.expose_secret().encode_utf16());
+            let mut headers = Vec::new();
+            if let Some(secret) = secret {
+                headers.extend("Authorization: Bearer ".encode_utf16());
+                headers.extend(secret.expose_secret().encode_utf16());
+                headers.extend("\r\n".encode_utf16());
+            }
             headers.extend(
-                "\r\nContent-Type: application/json\r\nAccept: text/event-stream\r\n"
-                    .encode_utf16(),
+                "Content-Type: application/json\r\nAccept: text/event-stream\r\n".encode_utf16(),
             );
             let header_length = u32::try_from(headers.len()).map_err(|_| {
                 ModelGatewayError::transport("provider request headers are too large", false)

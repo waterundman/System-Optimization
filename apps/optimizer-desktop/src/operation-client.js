@@ -25,20 +25,35 @@ export const PROVIDER_PRESETS = Object.freeze({
   deepseek: Object.freeze({
     label: "DeepSeek",
     defaultModel: "deepseek-v4-flash",
+    credentialRequired: true,
   }),
   qwen: Object.freeze({
     label: "Qwen / 通义千问",
     defaultModel: "qwen-plus",
+    credentialRequired: true,
   }),
   kimi: Object.freeze({
     label: "Kimi",
     defaultModel: "kimi-k2.6",
+    credentialRequired: true,
   }),
   minimax: Object.freeze({
     label: "MiniMax",
     defaultModel: "MiniMax-M3",
+    credentialRequired: true,
+  }),
+  ollama: Object.freeze({
+    label: "Ollama / 本地",
+    defaultModel: "qwen3:8b",
+    credentialRequired: false,
   }),
 });
+
+export function providerRequiresCredential(providerId) {
+  const preset = PROVIDER_PRESETS[providerId];
+  if (!preset) throw new TypeError("Unsupported provider");
+  return preset.credentialRequired;
+}
 
 export function defaultProviderSettings() {
   return Object.fromEntries(Object.entries(PROVIDER_PRESETS).map(([providerId, preset]) => [

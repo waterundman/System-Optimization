@@ -2,6 +2,7 @@ import type { ModelProviderId, ProviderLocality } from "../../protocol/src/index
 
 export type ProviderId = ModelProviderId;
 export type ProviderDialect = ProviderId;
+export type ProviderAuthentication = "bearer" | "none";
 export type MessageRole = "system" | "user" | "assistant" | "tool";
 export type FinishReason =
   | "stop"
@@ -110,7 +111,8 @@ export interface ProviderProfile {
   readonly dialect: ProviderDialect;
   readonly locality: ProviderLocality;
   readonly baseUrl: string;
-  readonly apiKeyEnvironmentVariable: string;
+  readonly authentication: ProviderAuthentication;
+  readonly apiKeyEnvironmentVariable?: string;
   readonly defaultModel: string;
   readonly knownModels: readonly string[];
   readonly maxOutputTokenField: "max_tokens" | "max_completion_tokens";
@@ -166,7 +168,7 @@ export interface ModelGatewayOptions {
 
 export interface ModelGatewayConfig {
   readonly profile: ProviderProfile;
-  readonly apiKey: string;
+  readonly apiKey?: string;
   readonly fetch?: FetchLike;
   readonly timer?: TimerPort;
   readonly defaultTimeoutMs?: number;

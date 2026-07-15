@@ -32,6 +32,7 @@ pub enum ModelProviderId {
     Qwen,
     Kimi,
     Minimax,
+    Ollama,
 }
 
 impl ModelProviderId {
@@ -41,6 +42,7 @@ impl ModelProviderId {
             Self::Qwen => "qwen",
             Self::Kimi => "kimi",
             Self::Minimax => "minimax",
+            Self::Ollama => "ollama",
         }
     }
 
@@ -50,6 +52,7 @@ impl ModelProviderId {
             Self::Qwen => "Qwen",
             Self::Kimi => "Kimi",
             Self::Minimax => "MiniMax",
+            Self::Ollama => "Ollama",
         }
     }
 
@@ -490,7 +493,7 @@ pub trait ModelTransport: Send + Sync {
     fn execute(
         &self,
         request: &PreparedModelRequest,
-        secret: &SecretValue,
+        secret: Option<&SecretValue>,
         cancellation: &ModelCancellation,
         sink: &mut dyn ModelResponseSink,
     ) -> Result<(), ModelGatewayError>;
@@ -503,6 +506,7 @@ pub struct PreparedModelRequest {
     host: String,
     path: String,
     port: u16,
+    use_tls: bool,
     body: Vec<u8>,
     timeout_ms: u32,
     max_response_bytes: usize,
@@ -527,6 +531,10 @@ impl PreparedModelRequest {
 
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    pub fn use_tls(&self) -> bool {
+        self.use_tls
     }
 
     pub fn body(&self) -> &[u8] {
@@ -706,14 +714,18 @@ impl ModelExecutionHost {
     {
         let prepared = prepare_request(&input)?;
         let provider_id = prepared.provider_id;
-        let reference = SecretReference::parse(input.configuration.credential_ref.clone())?;
-        let secret = self.secrets.resolve(&reference)?.ok_or_else(|| {
-            ModelGatewayError::new(
-                "PROVIDER_CREDENTIAL_MISSING",
-                format!("No credential is stored for {reference}"),
-            )
-            .for_provider(provider_id)
-        })?;
+        let secret = if provider_id == ModelProviderId::Ollama {
+            None
+        } else {
+            let reference = SecretReference::parse(input.configuration.credential_ref.clone())?;
+            Some(self.secrets.resolve(&reference)?.ok_or_else(|| {
+                ModelGatewayError::new(
+                    "PROVIDER_CREDENTIAL_MISSING",
+                    format!("No credential is stored for {reference}"),
+                )
+                .for_provider(provider_id)
+            })?)
+        };
         let control = Arc::new(ModelCancellation::new());
         {
             let mut active = self.active.lock().map_err(|_| {
@@ -751,12 +763,12 @@ impl ModelExecutionHost {
         let mut sink = StreamingGatewaySink::new(
             prepared.request_id.clone(),
             provider_id,
-            secret.expose_secret(),
+            secret.as_ref().map(SecretValue::expose_secret),
             &mut emit,
         );
-        let transport_result = self
-            .transport
-            .execute(&prepared, &secret, &control, &mut sink);
+        let transport_result =
+            self.transport
+                .execute(&prepared, secret.as_ref(), &control, &mut sink);
         let _ = watchdog_done.send(());
         if let Some(error) = control.cancellation_error(provider_id) {
             return Err(error);
@@ -858,7 +870,8 @@ fn prepare_request(
         provider_id: input.configuration.provider_id,
         host: endpoint.host,
         path: endpoint.path,
-        port: 443,
+        port: endpoint.port,
+        use_tls: endpoint.use_tls,
         body,
         timeout_ms: input.configuration.default_timeout_ms,
         max_response_bytes: MAX_RESPONSE_BYTES,
@@ -1098,6 +1111,8 @@ fn valid_tool_name(value: &str) -> bool {
 struct ProviderEndpoint {
     host: String,
     path: String,
+    port: u16,
+    use_tls: bool,
 }
 
 fn provider_endpoint(
@@ -1107,6 +1122,7 @@ fn provider_endpoint(
         ModelProviderId::Deepseek => ("api.deepseek.com".to_string(), "/chat/completions"),
         ModelProviderId::Kimi => ("api.moonshot.cn".to_string(), "/v1/chat/completions"),
         ModelProviderId::Minimax => ("api.minimaxi.com".to_string(), "/v1/chat/completions"),
+        ModelProviderId::Ollama => ("127.0.0.1".to_string(), "/v1/chat/completions"),
         ModelProviderId::Qwen => {
             let default = QwenProviderConfiguration {
                 region: QwenDeploymentRegion::China,
@@ -1142,6 +1158,12 @@ fn provider_endpoint(
     Ok(ProviderEndpoint {
         host: endpoint.0,
         path: endpoint.1.to_string(),
+        port: if configuration.provider_id == ModelProviderId::Ollama {
+            11_434
+        } else {
+            443
+        },
+        use_tls: configuration.provider_id != ModelProviderId::Ollama,
     })
 }
 
@@ -1175,7 +1197,9 @@ fn build_request_body(
     ]);
     if let Some(maximum) = request.max_output_tokens {
         let field = match provider_id {
-            ModelProviderId::Deepseek | ModelProviderId::Kimi => "max_tokens",
+            ModelProviderId::Deepseek | ModelProviderId::Kimi | ModelProviderId::Ollama => {
+                "max_tokens"
+            }
             ModelProviderId::Qwen | ModelProviderId::Minimax => "max_completion_tokens",
         };
         body.insert(field.into(), Value::from(maximum));
@@ -1300,6 +1324,17 @@ fn apply_reasoning_dialect(
                 );
             }
         }
+        ModelProviderId::Ollama => {
+            let effort = match (reasoning.mode, reasoning.effort) {
+                (ReasoningMode::Disabled, _) => Some("none"),
+                (_, Some(effort)) => Some(effort.as_str()),
+                (ReasoningMode::Enabled, None) => Some("medium"),
+                (ReasoningMode::Adaptive, None) => None,
+            };
+            if let Some(effort) = effort {
+                body.insert("reasoning_effort".into(), Value::String(effort.into()));
+            }
+        }
         ModelProviderId::Minimax => unreachable!("handled above"),
     }
 }
@@ -1324,7 +1359,7 @@ enum StreamContentMode {
 struct StreamingGatewaySink<'a> {
     request_id: String,
     provider_id: ModelProviderId,
-    secret: &'a str,
+    secret: Option<&'a str>,
     emit: &'a mut dyn FnMut(ModelStreamEvent) -> Result<(), ModelGatewayError>,
     head: Option<ModelHttpResponseHead>,
     error_body: Vec<u8>,
@@ -1342,7 +1377,7 @@ impl<'a> StreamingGatewaySink<'a> {
     fn new(
         request_id: String,
         provider_id: ModelProviderId,
-        secret: &'a str,
+        secret: Option<&'a str>,
         emit: &'a mut dyn FnMut(ModelStreamEvent) -> Result<(), ModelGatewayError>,
     ) -> Self {
         Self {
@@ -1461,7 +1496,12 @@ impl<'a> StreamingGatewaySink<'a> {
                 delta.get("reasoning_content"),
                 "delta.reasoning_content",
                 self.provider_id,
-            )?;
+            )?
+            .or(optional_nullable_string(
+                delta.get("reasoning"),
+                "delta.reasoning",
+                self.provider_id,
+            )?);
             reasoning_details =
                 parse_reasoning_details(delta.get("reasoning_details"), self.provider_id)?;
             tool_calls = parse_tool_call_deltas(delta.get("tool_calls"), self.provider_id)?;
@@ -1769,7 +1809,7 @@ fn provider_http_error(
     provider_id: ModelProviderId,
     head: &ModelHttpResponseHead,
     body: &[u8],
-    secret: &str,
+    secret: Option<&str>,
 ) -> ModelGatewayError {
     let payload = serde_json::from_slice::<Value>(body).ok();
     let nested = payload
@@ -1811,9 +1851,10 @@ fn provider_http_error(
         provider_id.label(),
         head.status
     );
-    let message = remote_message
-        .unwrap_or(default_message)
-        .replace(secret, "[REDACTED]");
+    let mut message = remote_message.unwrap_or(default_message);
+    if let Some(secret) = secret.filter(|value| !value.is_empty()) {
+        message = message.replace(secret, "[REDACTED]");
+    }
     let retry_after_ms = head.header("retry-after").and_then(parse_retry_after);
     let remote_request_id = ["x-request-id", "request-id", "x-dashscope-request-id"]
         .iter()
@@ -1991,13 +2032,15 @@ mod tests {
         fn execute(
             &self,
             request: &PreparedModelRequest,
-            secret: &SecretValue,
+            secret: Option<&SecretValue>,
             _cancellation: &ModelCancellation,
             sink: &mut dyn ModelResponseSink,
         ) -> Result<(), ModelGatewayError> {
             self.calls.fetch_add(1, Ordering::Relaxed);
-            self.saw_expected_secret
-                .store(secret.expose_secret() == "host-only-key", Ordering::Relaxed);
+            self.saw_expected_secret.store(
+                secret.is_some_and(|value| value.expose_secret() == "host-only-key"),
+                Ordering::Relaxed,
+            );
             *self.captured.lock().unwrap() = Some(request.clone());
             sink.begin(self.head.clone())?;
             for chunk in &self.chunks {
@@ -2015,7 +2058,7 @@ mod tests {
         fn execute(
             &self,
             request: &PreparedModelRequest,
-            _secret: &SecretValue,
+            _secret: Option<&SecretValue>,
             cancellation: &ModelCancellation,
             _sink: &mut dyn ModelResponseSink,
         ) -> Result<(), ModelGatewayError> {
@@ -2042,6 +2085,7 @@ mod tests {
                 ModelProviderId::Qwen => "qwen-plus",
                 ModelProviderId::Kimi => "kimi-k2.6",
                 ModelProviderId::Minimax => "MiniMax-M3",
+                ModelProviderId::Ollama => "qwen3:8b",
             }
             .into(),
             credential_ref: format!("secret://providers/{provider_id}/default"),
@@ -2160,6 +2204,24 @@ mod tests {
         assert_eq!(body["reasoning_split"], true);
         assert_eq!(body["thinking"], json!({ "type": "disabled" }));
         assert_eq!(body["max_completion_tokens"], 512);
+
+        let mut ollama = model_request(ModelProviderId::Ollama);
+        ollama.request.reasoning = Some(ReasoningOptions {
+            mode: ReasoningMode::Disabled,
+            effort: None,
+            preserve: None,
+        });
+        ollama.request.response_format = Some(ModelResponseFormat::JsonObject);
+        let prepared = prepare_request(&ollama).unwrap();
+        assert_eq!(prepared.host(), "127.0.0.1");
+        assert_eq!(prepared.port(), 11_434);
+        assert!(!prepared.use_tls());
+        assert_eq!(prepared.path(), "/v1/chat/completions");
+        let body: Value = serde_json::from_slice(prepared.body()).unwrap();
+        assert_eq!(body["model"], "qwen3:8b");
+        assert_eq!(body["max_tokens"], 512);
+        assert_eq!(body["reasoning_effort"], "none");
+        assert_eq!(body["response_format"], json!({ "type": "json_object" }));
     }
 
     #[test]
@@ -2270,6 +2332,38 @@ mod tests {
             prepare_request(&invalid).unwrap_err().code(),
             "PROVIDER_CONFIGURATION"
         );
+    }
+
+    #[test]
+    fn ollama_executes_on_fixed_loopback_without_resolving_a_secret() {
+        let frames = concat!(
+            "data: {\"id\":\"ollama-1\",\"model\":\"qwen3:8b\",\"choices\":[{",
+            "\"delta\":{\"reasoning\":\"本地推理\",\"content\":\"本地结果\"},",
+            "\"finish_reason\":\"stop\"}],",
+            "\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2,\"total_tokens\":6}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let transport = Arc::new(ScriptedTransport::sse(vec![frames.as_bytes().to_vec()]));
+        let host = ModelExecutionHost::with_transport(
+            Arc::new(MemorySecretStore::default()),
+            transport.clone(),
+        );
+
+        let summary = host
+            .execute_stream(model_request(ModelProviderId::Ollama), |_| Ok(()))
+            .unwrap();
+
+        assert_eq!(summary.provider_id, ModelProviderId::Ollama);
+        assert_eq!(summary.model, "qwen3:8b");
+        assert_eq!(summary.content, "本地结果");
+        assert_eq!(summary.reasoning_content, "本地推理");
+        assert_eq!(summary.usage.unwrap().total_tokens, 6);
+        assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
+        assert!(!transport.saw_expected_secret.load(Ordering::Relaxed));
+        let prepared = transport.captured.lock().unwrap().clone().unwrap();
+        assert_eq!(prepared.host(), "127.0.0.1");
+        assert_eq!(prepared.port(), 11_434);
+        assert!(!prepared.use_tls());
     }
 
     #[test]

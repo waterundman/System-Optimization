@@ -11,7 +11,7 @@ export type ContextPacketId = Brand<string, "ContextPacketId">;
 export type PatchProposalId = Brand<string, "PatchProposalId">;
 export type EventId = Brand<string, "EventId">;
 export type CredentialRef = Brand<string, "CredentialRef">;
-export type ModelProviderId = "deepseek" | "qwen" | "kimi" | "minimax";
+export type ModelProviderId = "deepseek" | "qwen" | "kimi" | "minimax" | "ollama";
 export type QwenDeploymentRegion = "china" | "singapore" | "us" | "germany" | "japan";
 
 export type OperationType =

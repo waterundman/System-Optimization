@@ -16,6 +16,7 @@ export const deepSeekProfile: ProviderProfile = freezeProfile({
   dialect: "deepseek",
   locality: "remote",
   baseUrl: "https://api.deepseek.com",
+  authentication: "bearer",
   apiKeyEnvironmentVariable: "DEEPSEEK_API_KEY",
   defaultModel: "deepseek-v4-flash",
   knownModels: ["deepseek-v4-flash", "deepseek-v4-pro"],
@@ -32,6 +33,7 @@ export const kimiProfile: ProviderProfile = freezeProfile({
   dialect: "kimi",
   locality: "remote",
   baseUrl: "https://api.moonshot.cn/v1",
+  authentication: "bearer",
   apiKeyEnvironmentVariable: "MOONSHOT_API_KEY",
   defaultModel: "kimi-k2.6",
   knownModels: ["kimi-k2.6", "kimi-k2.7-code"],
@@ -48,6 +50,7 @@ export const miniMaxProfile: ProviderProfile = freezeProfile({
   dialect: "minimax",
   locality: "remote",
   baseUrl: "https://api.minimaxi.com/v1",
+  authentication: "bearer",
   apiKeyEnvironmentVariable: "MINIMAX_API_KEY",
   defaultModel: "MiniMax-M3",
   knownModels: [
@@ -85,6 +88,7 @@ export function createQwenProfile(options: {
     dialect: "qwen",
     locality: "remote",
     baseUrl,
+    authentication: "bearer",
     apiKeyEnvironmentVariable: "DASHSCOPE_API_KEY",
     defaultModel: "qwen-plus",
     knownModels: ["qwen-plus", "qwen3.7-plus", "qwen3.7-flash"],
@@ -98,11 +102,28 @@ export function createQwenProfile(options: {
 
 export const qwenProfile = createQwenProfile();
 
+export const ollamaProfile: ProviderProfile = freezeProfile({
+  id: "ollama",
+  label: "Ollama (local)",
+  dialect: "ollama",
+  locality: "local",
+  baseUrl: "http://127.0.0.1:11434/v1",
+  authentication: "none",
+  defaultModel: "qwen3:8b",
+  knownModels: ["qwen3:8b", "llama3.2"],
+  maxOutputTokenField: "max_tokens",
+  streamContentMode: "delta",
+  capabilities: { ...commonCapabilities, jsonObject: true },
+  documentationUrl: "https://docs.ollama.com/api/openai-compatibility",
+  verifiedAt: "2026-07-15",
+});
+
 export const officialProviderProfiles: Readonly<Record<ProviderProfile["id"], ProviderProfile>> = Object.freeze({
   deepseek: deepSeekProfile,
   qwen: qwenProfile,
   kimi: kimiProfile,
   minimax: miniMaxProfile,
+  ollama: ollamaProfile,
 });
 
 function qwenBaseUrl(region: QwenRegion, workspaceId?: string): string {
