@@ -3,12 +3,16 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 mod operation_commands;
+mod secrets;
 
 pub use operation_commands::{
     ArtifactAudit, ContextPacketAudit, FailureAudit, LifecycleEventAudit, ModelUsageAudit,
     OperationAuditResponse, OperationCommandError, OperationCommandHost, PersistOperationResponse,
     PersistReviewResponse, ReviewAudit, ReviewEventAudit, RunAudit,
 };
+#[cfg(windows)]
+pub use secrets::WindowsCredentialStore;
+pub use secrets::{MemorySecretStore, SecretReference, SecretStore, SecretStoreError, SecretValue};
 
 #[derive(Debug)]
 pub enum HostError {

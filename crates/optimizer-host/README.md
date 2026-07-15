@@ -11,7 +11,9 @@ Rust 宿主安全边界与跨语言命令适配层。
 - 所有输入 DTO 使用 `deny_unknown_fields`，协议版本不匹配或嵌套未知字段会在写库前失败；
 - ContextPacket、Artifact 与 review 的开放 JSON payload 会递归拒绝 credential、API key、Authorization 和原始 Header 字段；
 - TypeScript 与 Rust 读取同一份 `packages/protocol/fixtures/operation-persistence-bundle.v1.json` 夹具，避免边界字段漂移。
+- `SecretStore` 只接受协议一致的 `secret://` 引用；`SecretValue` Debug 固定脱敏并在释放时清零。
+- Windows 使用 Credential Manager Generic Credential 后端，Secret 不写入 SQLite、配置文件或日志。
 
-下一阶段在这些无框架 API 外注册 Tauri commands/capabilities，并加入 OS Keychain。Provider 网络域名策略与 WASM 插件资源限制仍属于后续宿主能力。
+Tauri Adapter 已在 `apps/optimizer-desktop` 注册最小权限 commands/capabilities。Provider 网络请求移入宿主、macOS Keychain/Linux Secret Service 后端与 WASM 插件资源限制仍属于后续宿主能力。
 
 任何文件命令都必须先经过 `ProjectRoot`，不得接受未经校验的绝对路径或 `..`。宿主命令不得接收 API Key 或原始 HTTP Header，只接收协议允许的审计数据。

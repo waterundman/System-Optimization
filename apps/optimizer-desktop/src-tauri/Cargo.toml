@@ -1,0 +1,22 @@
+[package]
+name = "optimizer-desktop"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Tauri IPC adapter for the Optimizer System"
+build = "build.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.6.2", default-features = false }
+
+[dependencies]
+optimizer-host = { path = "../../../crates/optimizer-host" }
+serde = { version = "1.0.228", features = ["derive"] }
+tauri = { version = "2.11.2", default-features = false }
+
+[dev-dependencies]
+optimizer-store = { path = "../../../crates/optimizer-store" }
+serde_json = "1.0.150"
+
+[lib]
+path = "src/lib.rs"

@@ -6,4 +6,4 @@
 
 - M0：协议、中文 diff/WAL/编辑器等风险验证。
 - M1：Optimizer Kernel Foundation。
-- M2（进行中）：多模型网关、Operation 执行闭环、模型产物与审查审计存储。
+- M2（进行中）：多模型网关、Operation 执行闭环、模型产物与审查审计存储、Tauri IPC 与 Secret Store。

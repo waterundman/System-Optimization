@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-local",
+  "description": "Local bundled editor access to auditable operations and provider credential management.",
+  "windows": ["main"],
+  "permissions": [
+    "allow-operation-write",
+    "allow-operation-audit-read",
+    "allow-provider-secret-manage"
+  ]
+}

@@ -38,6 +38,34 @@ impl fmt::Display for OperationCommandError {
 
 impl std::error::Error for OperationCommandError {}
 
+impl OperationCommandError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Json(_) => "INVALID_COMMAND_JSON",
+            Self::UnsupportedSchema { .. } => "UNSUPPORTED_SCHEMA",
+            Self::SensitiveField { .. } => "SENSITIVE_FIELD_FORBIDDEN",
+            Self::Store(error) => match error {
+                StoreError::Validation(_) => "VALIDATION_FAILED",
+                StoreError::NotFound { .. } => "NOT_FOUND",
+                StoreError::Conflict { .. } | StoreError::StateConflict { .. } => "CONFLICT",
+                StoreError::UnsafeSqliteVersion { .. } => "UNSAFE_STORAGE_VERSION",
+                StoreError::Snapshot(_) => "SNAPSHOT_FAILED",
+                StoreError::Sqlite(_) | StoreError::InvariantViolation(_) => "STORAGE_FAILED",
+            },
+        }
+    }
+
+    pub fn public_message(&self) -> String {
+        match self {
+            Self::Store(StoreError::Sqlite(_)) => "Storage operation failed".into(),
+            Self::Store(StoreError::InvariantViolation(_)) => {
+                "Stored operation data failed an integrity check".into()
+            }
+            _ => self.to_string(),
+        }
+    }
+}
+
 impl From<serde_json::Error> for OperationCommandError {
     fn from(value: serde_json::Error) -> Self {
         Self::Json(value)

@@ -1,3 +1,7 @@
 [workspace]
-members = ["crates/optimizer-host", "crates/optimizer-store"]
+members = [
+  "apps/optimizer-desktop/src-tauri",
+  "crates/optimizer-host",
+  "crates/optimizer-store",
+]
 resolver = "3"

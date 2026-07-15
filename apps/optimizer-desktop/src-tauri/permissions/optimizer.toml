@@ -1,0 +1,14 @@
+[[permission]]
+identifier = "allow-operation-write"
+description = "Allows the bundled editor to persist final operation bundles and append optimistic review events."
+commands.allow = ["persist_operation_bundle", "append_review_event"]
+
+[[permission]]
+identifier = "allow-operation-audit-read"
+description = "Allows the bundled editor to read the complete audit record for one operation run."
+commands.allow = ["get_operation_audit"]
+
+[[permission]]
+identifier = "allow-provider-secret-manage"
+description = "Allows write, presence check and deletion of provider secrets without exposing plaintext reads."
+commands.allow = ["store_provider_secret", "has_provider_secret", "delete_provider_secret"]
