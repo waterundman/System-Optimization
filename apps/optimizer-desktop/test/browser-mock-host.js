@@ -134,6 +134,16 @@
     if (command === "delete_provider_secret") {
       return { schemaVersion: 1, reference: args.reference, changed: true, exists: false };
     }
+    if (command === "list_ollama_models") {
+      return {
+        schemaVersion: 1,
+        endpoint: "127.0.0.1:11434/v1",
+        models: [
+          { id: "qwen3:8b", created: 2, ownedBy: "library" },
+          { id: "llama3.2", created: 1, ownedBy: "library" },
+        ],
+      };
+    }
     if (command === "execute_model_stream") {
       const output = JSON.stringify({
         schemaVersion: 1,

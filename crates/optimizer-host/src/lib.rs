@@ -12,7 +12,7 @@ mod workspace_commands;
 pub use model_gateway::{
     CancelModelRequestResponse, ModelExecutionHost, ModelExecutionRequest, ModelExecutionSummary,
     ModelGatewayError, ModelProviderConfiguration, ModelProviderId, ModelStreamEvent,
-    ModelTransport, NativeModelTransport,
+    ModelTransport, NativeModelTransport, OllamaModelInfo, OllamaModelList,
 };
 pub use operation_commands::{
     ArtifactAudit, ContextPacketAudit, FailureAudit, LifecycleEventAudit, ModelUsageAudit,

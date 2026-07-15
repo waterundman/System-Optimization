@@ -94,7 +94,7 @@ mod windows {
                 request,
                 cancellation,
             )?;
-            let verb = wide_null("POST");
+            let verb = wide_null(request.method());
             let path = wide_null(request.path());
             let request_handle = unsafe {
                 WinHttpOpenRequest(
@@ -123,21 +123,27 @@ mod windows {
                 headers.extend(secret.expose_secret().encode_utf16());
                 headers.extend("\r\n".encode_utf16());
             }
-            headers.extend(
-                "Content-Type: application/json\r\nAccept: text/event-stream\r\n".encode_utf16(),
-            );
+            if !request.body().is_empty() {
+                headers.extend("Content-Type: application/json\r\n".encode_utf16());
+            }
+            headers.extend("Accept: application/json, text/event-stream\r\n".encode_utf16());
             let header_length = u32::try_from(headers.len()).map_err(|_| {
                 ModelGatewayError::transport("provider request headers are too large", false)
             })?;
             let body_length = u32::try_from(request.body().len()).map_err(|_| {
                 ModelGatewayError::transport("provider request body is too large", false)
             })?;
+            let body = if request.body().is_empty() {
+                ptr::null_mut()
+            } else {
+                request.body().as_ptr().cast_mut().cast()
+            };
             let send_result = unsafe {
                 WinHttpSendRequest(
                     request_handle,
                     headers.as_ptr(),
                     header_length,
-                    request.body().as_ptr().cast(),
+                    body,
                     body_length,
                     body_length,
                     0,

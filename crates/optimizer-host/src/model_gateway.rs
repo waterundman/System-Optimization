@@ -20,6 +20,8 @@ const MAX_RESPONSE_BYTES: usize = 67_108_864;
 const MAX_ERROR_BYTES: usize = 65_536;
 const MAX_SSE_EVENT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
+const OLLAMA_DISCOVERY_TIMEOUT_MS: u32 = 3_000;
+const OLLAMA_DISCOVERY_MAX_BYTES: usize = 1024 * 1024;
 const CONTROL_ACTIVE: u8 = 0;
 const CONTROL_CANCELLED: u8 = 1;
 const CONTROL_TIMED_OUT: u8 = 2;
@@ -373,6 +375,24 @@ pub struct ModelExecutionSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct OllamaModelInfo {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owned_by: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OllamaModelList {
+    pub schema_version: u32,
+    pub endpoint: String,
+    pub models: Vec<OllamaModelInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CancelModelRequestResponse {
     pub schema_version: u32,
     pub request_id: String,
@@ -507,6 +527,7 @@ pub struct PreparedModelRequest {
     path: String,
     port: u16,
     use_tls: bool,
+    method: ModelHttpMethod,
     body: Vec<u8>,
     timeout_ms: u32,
     max_response_bytes: usize,
@@ -537,6 +558,10 @@ impl PreparedModelRequest {
         self.use_tls
     }
 
+    pub fn method(&self) -> &'static str {
+        self.method.as_str()
+    }
+
     pub fn body(&self) -> &[u8] {
         &self.body
     }
@@ -547,6 +572,21 @@ impl PreparedModelRequest {
 
     pub fn max_response_bytes(&self) -> usize {
         self.max_response_bytes
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelHttpMethod {
+    Get,
+    Post,
+}
+
+impl ModelHttpMethod {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
+        }
     }
 }
 
@@ -702,6 +742,36 @@ impl ModelExecutionHost {
             transport,
             active: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub fn list_ollama_models(&self) -> Result<OllamaModelList, ModelGatewayError> {
+        let prepared = PreparedModelRequest {
+            request_id: "ollama-model-list".into(),
+            provider_id: ModelProviderId::Ollama,
+            host: "127.0.0.1".into(),
+            path: "/v1/models".into(),
+            port: 11_434,
+            use_tls: false,
+            method: ModelHttpMethod::Get,
+            body: Vec::new(),
+            timeout_ms: OLLAMA_DISCOVERY_TIMEOUT_MS,
+            max_response_bytes: OLLAMA_DISCOVERY_MAX_BYTES,
+        };
+        let control = ModelCancellation::new();
+        let mut sink = CollectingResponseSink::new(prepared.max_response_bytes());
+        self.transport
+            .execute(&prepared, None, &control, &mut sink)
+            .map_err(|error| error.for_provider(ModelProviderId::Ollama))?;
+        let (head, body) = sink.finish(ModelProviderId::Ollama)?;
+        if !(200..300).contains(&head.status) {
+            return Err(provider_http_error(
+                ModelProviderId::Ollama,
+                &head,
+                &body,
+                None,
+            ));
+        }
+        parse_ollama_models(&body)
     }
 
     pub fn execute_stream<F>(
@@ -872,6 +942,7 @@ fn prepare_request(
         path: endpoint.path,
         port: endpoint.port,
         use_tls: endpoint.use_tls,
+        method: ModelHttpMethod::Post,
         body,
         timeout_ms: input.configuration.default_timeout_ms,
         max_response_bytes: MAX_RESPONSE_BYTES,
@@ -1348,6 +1419,132 @@ fn configuration_error(
     message: impl Into<String>,
 ) -> ModelGatewayError {
     ModelGatewayError::new("PROVIDER_CONFIGURATION", message).for_provider(provider_id)
+}
+
+struct CollectingResponseSink {
+    head: Option<ModelHttpResponseHead>,
+    body: Vec<u8>,
+    maximum: usize,
+}
+
+impl CollectingResponseSink {
+    fn new(maximum: usize) -> Self {
+        Self {
+            head: None,
+            body: Vec::new(),
+            maximum,
+        }
+    }
+
+    fn finish(
+        self,
+        provider_id: ModelProviderId,
+    ) -> Result<(ModelHttpResponseHead, Vec<u8>), ModelGatewayError> {
+        let head = self.head.ok_or_else(|| {
+            ModelGatewayError::new(
+                "PROVIDER_PROTOCOL",
+                "provider transport ended before response headers",
+            )
+            .for_provider(provider_id)
+        })?;
+        Ok((head, self.body))
+    }
+}
+
+impl ModelResponseSink for CollectingResponseSink {
+    fn begin(&mut self, head: ModelHttpResponseHead) -> Result<(), ModelGatewayError> {
+        if self.head.replace(head).is_some() {
+            return Err(ModelGatewayError::new(
+                "PROVIDER_PROTOCOL",
+                "provider returned response headers twice",
+            ));
+        }
+        Ok(())
+    }
+
+    fn chunk(&mut self, chunk: &[u8]) -> Result<(), ModelGatewayError> {
+        if self.body.len().saturating_add(chunk.len()) > self.maximum {
+            return Err(ModelGatewayError::new(
+                "PROVIDER_PROTOCOL",
+                "Ollama model list exceeded the configured size limit",
+            ));
+        }
+        self.body.extend_from_slice(chunk);
+        Ok(())
+    }
+}
+
+fn parse_ollama_models(body: &[u8]) -> Result<OllamaModelList, ModelGatewayError> {
+    let root: Value = serde_json::from_slice(body)
+        .map_err(|_| ollama_protocol_error("Ollama model list is not valid JSON"))?;
+    let models = root
+        .as_object()
+        .and_then(|value| value.get("data"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| ollama_protocol_error("Ollama model list must contain a data array"))?;
+    if models.len() > 10_000 {
+        return Err(ollama_protocol_error(
+            "Ollama model list contains too many entries",
+        ));
+    }
+    let mut normalized = BTreeMap::new();
+    for (index, value) in models.iter().enumerate() {
+        let model = value
+            .as_object()
+            .ok_or_else(|| ollama_protocol_error(format!("data[{index}] must be an object")))?;
+        let id = model
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control))
+            .ok_or_else(|| {
+                ollama_protocol_error(format!("data[{index}].id must be a safe model ID"))
+            })?
+            .to_string();
+        let created = match model.get("created") {
+            Some(value) => Some(value.as_u64().ok_or_else(|| {
+                ollama_protocol_error(format!("data[{index}].created must be an integer"))
+            })?),
+            None => None,
+        };
+        let owned_by = match model.get("owned_by") {
+            Some(value) => {
+                let value = value
+                    .as_str()
+                    .filter(|value| value.len() <= 128)
+                    .ok_or_else(|| {
+                        ollama_protocol_error(format!(
+                            "data[{index}].owned_by must be a short string"
+                        ))
+                    })?;
+                Some(value.to_string())
+            }
+            None => None,
+        };
+        if normalized
+            .insert(
+                id.clone(),
+                OllamaModelInfo {
+                    id,
+                    created,
+                    owned_by,
+                },
+            )
+            .is_some()
+        {
+            return Err(ollama_protocol_error(
+                "Ollama model list contains duplicate IDs",
+            ));
+        }
+    }
+    Ok(OllamaModelList {
+        schema_version: REQUEST_SCHEMA_VERSION,
+        endpoint: "127.0.0.1:11434/v1".into(),
+        models: normalized.into_values().collect(),
+    })
+}
+
+fn ollama_protocol_error(message: impl Into<String>) -> ModelGatewayError {
+    ModelGatewayError::new("PROVIDER_PROTOCOL", message).for_provider(ModelProviderId::Ollama)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2364,6 +2561,49 @@ mod tests {
         assert_eq!(prepared.host(), "127.0.0.1");
         assert_eq!(prepared.port(), 11_434);
         assert!(!prepared.use_tls());
+    }
+
+    #[test]
+    fn discovers_and_validates_sorted_ollama_models_over_fixed_get() {
+        let transport = Arc::new(ScriptedTransport {
+            head: ModelHttpResponseHead {
+                status: 200,
+                headers: BTreeMap::from([("content-type".into(), "application/json".into())]),
+            },
+            chunks: vec![
+                br#"{"data":[{"id":"zeta:latest","created":2,"owned_by":"library"},{"id":"alpha:8b","created":1}]}"#
+                    .to_vec(),
+            ],
+            calls: AtomicUsize::new(0),
+            saw_expected_secret: AtomicBool::new(false),
+            captured: Mutex::new(None),
+        });
+        let host = ModelExecutionHost::with_transport(
+            Arc::new(MemorySecretStore::default()),
+            transport.clone(),
+        );
+
+        let response = host.list_ollama_models().unwrap();
+
+        assert_eq!(response.schema_version, 1);
+        assert_eq!(response.endpoint, "127.0.0.1:11434/v1");
+        assert_eq!(
+            response
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha:8b", "zeta:latest"]
+        );
+        assert_eq!(response.models[1].owned_by.as_deref(), Some("library"));
+        let prepared = transport.captured.lock().unwrap().clone().unwrap();
+        assert_eq!(prepared.method(), "GET");
+        assert_eq!(prepared.host(), "127.0.0.1");
+        assert_eq!(prepared.port(), 11_434);
+        assert_eq!(prepared.path(), "/v1/models");
+        assert!(prepared.body().is_empty());
+        assert!(!prepared.use_tls());
+        assert!(!transport.saw_expected_secret.load(Ordering::Relaxed));
     }
 
     #[test]

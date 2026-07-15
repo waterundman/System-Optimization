@@ -19,6 +19,8 @@ WebView 不存在“读取 secret 明文”命令。云端模型请求由 Rust �
 
 Ollama 是无凭据的显式本地 Provider：宿主只连接 `127.0.0.1:11434/v1/chat/completions` 并禁用系统代理，不接受页面提交的地址。模型需由用户预先在 Ollama 中拉取；运行失败不会自动把本地 Context Packet 发往云端。
 
+用户可在 Provider 抽屉显式执行一次本地模型检测。`list_ollama_models` 仍在 Rust 内固定请求 `/v1/models`，限制响应体并校验 model ID；WebView 只获得安全的建议列表，不能提交探测 URL。
+
 ## 项目会话
 
 - `create_project` 在安全父目录内原子创建 `.optimizer` 项目包并打开；

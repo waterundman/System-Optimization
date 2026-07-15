@@ -56,7 +56,7 @@ scripts/               工程约束检查
 ## 下一步
 
 1. 将 Context 编译与模型请求授权进一步收紧为宿主 Operation capability，强制 compromised WebView 也不能绕过 `never_send`。
-2. Ollama `/v1/models` 可用性探测、已安装模型选择与缺失模型引导。
+2. Ollama 缺失模型拉取指引、版本兼容提示与可选上下文窗口配置。
 3. 依赖源可用后将正文输入适配器替换为 Tiptap，并提供行内 decoration 审查。
 4. 显式成本策略下的重试、Provider fallback 与费用上限。
 5. 最近项目、章节改名/移动/删除，以及结构化摘要失效队列。
@@ -74,6 +74,7 @@ scripts/               工程约束检查
 
 - DeepSeek、Qwen、Kimi、MiniMax 通过 Rust WinHTTP 固定官方端点执行；Qwen 支持区域/workspace，四家 reasoning、token 与流式差异统一为同一事件协议。
 - Ollama 通过固定 `127.0.0.1:11434/v1/chat/completions` 执行，无需凭据并禁用系统代理；界面和项目内容都不能改写目标地址，且不会失败后隐式回退云端。
+- 模型设置可按需探测固定 `/v1/models`，只把经过 Rust 校验和排序的本地模型 ID 返回界面，不开放通用 GET 或 WebView 网络权限。
 - API Key 只在 Rust 中从系统 Secret Store 解析，WebView 只能管理 opaque `credentialRef` 的写入、存在性和删除。
 - AI 工具栏支持续写、润色、压缩、扩写、批评；当前选区为空时使用当前 Block，续写使用光标位置。
 - 用户可把正文选区固定为项目风格样本，在专用抽屉中归档或恢复；风格与正文/事实分层，不会把归档样本重新召回。

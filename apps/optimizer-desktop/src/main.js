@@ -33,6 +33,7 @@ const state = {
   styleSamples: [],
   selectedProviderId: "deepseek",
   providerSettings: loadProviderSettings(),
+  ollamaDiscovery: null,
   versionHistory: null,
   saveTimers: new Map(),
   pendingText: new Map(),
@@ -1171,7 +1172,9 @@ function providerDrawer() {
       }),
     ]),
     checkboxField("启用此供应商", "enabled", settings.enabled),
-    labeledInput("默认模型", "defaultModel", PROVIDER_PRESETS[providerId].defaultModel, true, settings.defaultModel),
+    ...(providerId === "ollama"
+      ? ollamaProviderFields(settings)
+      : [labeledInput("默认模型", "defaultModel", PROVIDER_PRESETS[providerId].defaultModel, true, settings.defaultModel)]),
     ...(providerId === "qwen" ? qwenProviderFields(settings) : []),
     ...(credentialRequired ? [
       passwordField("API Key", "apiKey", settings.credentialExists ? "留空则保持现有凭据" : "仅发送到 Rust 宿主"),
@@ -1219,6 +1222,60 @@ function qwenProviderFields(settings) {
     element("label", { className: "field" }, [element("span", { text: "部署区域" }), select]),
     labeledInput("Workspace ID（部分区域必填）", "qwenWorkspaceId", "仅允许字母、数字、_ 和 -", false, settings.qwenWorkspaceId),
   ];
+}
+
+function ollamaProviderFields(settings) {
+  const discovery = state.ollamaDiscovery;
+  const input = element("input", {
+    name: "defaultModel",
+    value: settings.defaultModel,
+    placeholder: PROVIDER_PRESETS.ollama.defaultModel,
+    attrs: { list: "ollama-model-list", autocomplete: "off" },
+  });
+  const models = discovery?.state === "success" ? discovery.models : [];
+  const status = discovery?.state === "loading"
+    ? "正在连接本机 Ollama…"
+    : discovery?.state === "success"
+      ? (models.length > 0 ? `已发现 ${models.length} 个本地模型。` : "Ollama 可达，但尚未安装模型。")
+      : discovery?.state === "error"
+        ? discovery.message
+        : "尚未检测本机 Ollama。";
+  return [
+    element("label", { className: "field" }, [element("span", { text: "默认模型" }), input]),
+    element("datalist", { attrs: { id: "ollama-model-list" } },
+      models.map((model) => element("option", { value: model.id }))),
+    button(
+      discovery?.state === "loading" ? "检测中…" : "检测本地模型",
+      "quiet-button",
+      probeOllamaModels,
+      { disabled: discovery?.state === "loading" },
+    ),
+    element("p", { className: "form-hint", text: status, attrs: { role: "status" } }),
+  ];
+}
+
+async function probeOllamaModels(event) {
+  const pendingModel = formValue(event.currentTarget.closest("form"), "defaultModel");
+  state.providerSettings.ollama = {
+    ...state.providerSettings.ollama,
+    defaultModel: pendingModel,
+  };
+  state.ollamaDiscovery = { state: "loading", models: [] };
+  renderWorkspace();
+  try {
+    const response = await invokeHost("list_ollama_models");
+    const models = Array.isArray(response.models)
+      ? response.models.filter((model) => model && typeof model.id === "string")
+      : [];
+    state.ollamaDiscovery = { state: "success", models };
+  } catch (error) {
+    state.ollamaDiscovery = {
+      state: "error",
+      models: [],
+      message: `Ollama 不可用：${normalizeHostError(error).message}`,
+    };
+  }
+  renderWorkspace();
 }
 
 async function saveProviderSettings(event) {

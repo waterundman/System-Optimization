@@ -4,12 +4,12 @@ use optimizer_host::{
     ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, CancelModelRequestResponse,
     CheckpointSummary, CreateDocumentResponse, CreateDocumentSpec, CreateStyleSampleSpec,
     ExportMarkdownResponse, ModelExecutionHost, ModelExecutionRequest, ModelExecutionSummary,
-    ModelGatewayError, ModelProviderId, ModelStreamEvent, NewProjectSpec, OpenedProject,
-    OperationAuditResponse, OperationCommandError, PersistOperationResponse, PersistReviewResponse,
-    ProjectInfo, ProjectPackageError, ProjectWorkspace, RestoreCheckpointResponse,
-    RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec, SecretReference, SecretStore,
-    SecretStoreError, SecretValue, SetStyleSampleStatusSpec, StyleSample, VersionHistory,
-    WorkspaceCommandError,
+    ModelGatewayError, ModelProviderId, ModelStreamEvent, NewProjectSpec, OllamaModelList,
+    OpenedProject, OperationAuditResponse, OperationCommandError, PersistOperationResponse,
+    PersistReviewResponse, ProjectInfo, ProjectPackageError, ProjectWorkspace,
+    RestoreCheckpointResponse, RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec,
+    SecretReference, SecretStore, SecretStoreError, SecretValue, SetStyleSampleStatusSpec,
+    StyleSample, VersionHistory, WorkspaceCommandError,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Runtime, State, ipc::Channel};
@@ -292,6 +292,10 @@ impl DesktopState {
         request_id: String,
     ) -> CommandResult<CancelModelRequestResponse> {
         Ok(self.models.cancel(request_id))
+    }
+
+    pub fn list_ollama_models(&self) -> CommandResult<OllamaModelList> {
+        self.models.list_ollama_models().map_err(CommandError::from)
     }
 
     fn project_session(&self) -> CommandResult<MutexGuard<'_, Option<OpenedProject>>> {
@@ -673,6 +677,7 @@ pub fn attach<R: Runtime>(builder: tauri::Builder<R>, state: DesktopState) -> ta
             delete_provider_secret,
             execute_model_stream,
             cancel_model_request,
+            list_ollama_models,
         ])
 }
 
@@ -851,6 +856,11 @@ async fn cancel_model_request(
     state: State<'_, DesktopState>,
 ) -> CommandResult<CancelModelRequestResponse> {
     spawn_host_task(state, move |state| state.cancel_model_request(request_id)).await
+}
+
+#[tauri::command]
+async fn list_ollama_models(state: State<'_, DesktopState>) -> CommandResult<OllamaModelList> {
+    spawn_host_task(state, DesktopState::list_ollama_models).await
 }
 
 async fn spawn_host_task<T, F>(state: State<'_, DesktopState>, task: F) -> CommandResult<T>

@@ -22,4 +22,5 @@ pub const REGISTERED_COMMANDS: &[&str] = &[
     "delete_provider_secret",
     "execute_model_stream",
     "cancel_model_request",
+    "list_ollama_models",
 ];

@@ -36,6 +36,8 @@ await page.screenshot({ path: resolve(screenshotDirectory, "provider-settings.pn
 await page.getByRole("button", { name: "Ollama / 本地" }).click();
 await page.getByText("固定本地端点 · 无需 API Key").waitFor();
 await page.getByText(/127\.0\.0\.1:11434\/v1/).waitFor();
+await page.getByRole("button", { name: "检测本地模型" }).click();
+await page.getByText("已发现 2 个本地模型。").waitFor();
 await page.getByRole("checkbox", { name: "启用此供应商" }).check();
 await page.getByRole("button", { name: "保存模型设置" }).click();
 await page.getByText(/请求只会发往固定回环端点/).waitFor();
