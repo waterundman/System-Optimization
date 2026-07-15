@@ -7,4 +7,4 @@ target/
 *.sqlite3-wal
 *.sqlite3-shm
 .optimizer-cache/
-
+apps/optimizer-desktop/src-tauri/icons/icon.png

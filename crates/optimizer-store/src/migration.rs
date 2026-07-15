@@ -2,7 +2,7 @@ use rusqlite::{Connection, TransactionBehavior};
 
 use crate::error::{StoreError, StoreResult};
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 2;
+pub const CURRENT_SCHEMA_VERSION: i64 = 3;
 
 pub(crate) const MIGRATION_1: &str = r#"
 CREATE TABLE schema_migration (
@@ -351,6 +351,24 @@ BEGIN
 END;
 "#;
 
+const MIGRATION_3: &str = r#"
+CREATE TABLE style_sample (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES project(id),
+  title TEXT NOT NULL,
+  content TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('canonical', 'archived')),
+  sensitivity TEXT NOT NULL CHECK(sensitivity IN ('local_sensitive', 'never_send')),
+  revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX style_sample_project_status_idx
+  ON style_sample(project_id, status, updated_at, id);
+"#;
+
 pub fn migrate(connection: &mut Connection) -> StoreResult<()> {
     let current: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if current > CURRENT_SCHEMA_VERSION {
@@ -378,6 +396,14 @@ pub fn migrate(connection: &mut Connection) -> StoreResult<()> {
             [],
         )?;
         transaction.pragma_update(None, "user_version", 2)?;
+    }
+    if current < 3 {
+        transaction.execute_batch(MIGRATION_3)?;
+        transaction.execute(
+            "INSERT INTO schema_migration(version, applied_at) VALUES (3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+            [],
+        )?;
+        transaction.pragma_update(None, "user_version", 3)?;
     }
     transaction.commit()?;
     Ok(())
@@ -420,6 +446,14 @@ mod tests {
             .unwrap();
         assert_eq!(version, CURRENT_SCHEMA_VERSION);
         assert_eq!(operation_table, "operation_run");
-        assert_eq!(applied, 2);
+        let style_table: String = connection
+            .query_row(
+                "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'style_sample'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(style_table, "style_sample");
+        assert_eq!(applied, 3);
     }
 }

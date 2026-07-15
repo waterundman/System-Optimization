@@ -11,12 +11,15 @@ use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
 use crate::workspace_commands::{
-    block_content_hash, create_checkpoint, load_project_workspace, load_version_history,
-    project_root_hash, restore_checkpoint, save_block,
+    apply_reviewed_proposal, block_content_hash, create_checkpoint, create_document,
+    create_style_sample, list_style_samples, load_project_workspace, load_version_history,
+    project_root_hash, restore_checkpoint, save_block, set_style_sample_status,
 };
 use crate::{
-    CheckpointSummary, HostError, OperationCommandHost, ProjectRoot, ProjectWorkspace,
-    RestoreCheckpointResponse, RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec,
+    ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, CheckpointSummary,
+    CreateDocumentResponse, CreateDocumentSpec, CreateStyleSampleSpec, HostError,
+    OperationCommandHost, ProjectRoot, ProjectWorkspace, RestoreCheckpointResponse,
+    RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec, SetStyleSampleStatusSpec, StyleSample,
     VersionHistory, WorkspaceCommandError,
 };
 
@@ -58,6 +61,15 @@ pub struct ProjectInfo {
     pub revision: i64,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportMarkdownResponse {
+    pub schema_version: u32,
+    pub path: String,
+    pub bytes: usize,
+    pub documents: usize,
 }
 
 pub struct OpenedProject {
@@ -177,6 +189,76 @@ impl OpenedProject {
         ))
     }
 
+    pub fn export_markdown(&self) -> Result<ExportMarkdownResponse, ProjectPackageError> {
+        let project = self
+            .operations
+            .store()
+            .get_project(&self.project_id)
+            .map_err(ProjectPackageError::Store)?;
+        let documents = self
+            .operations
+            .store()
+            .list_documents(&self.project_id)
+            .map_err(ProjectPackageError::Store)?;
+        let blocks = self
+            .operations
+            .store()
+            .list_blocks(&self.project_id)
+            .map_err(ProjectPackageError::Store)?;
+        let mut markdown = String::new();
+        markdown.push_str("# ");
+        markdown.push_str(&project.title);
+        markdown.push_str("\n\n");
+        for document in &documents {
+            markdown.push_str("## ");
+            markdown.push_str(&document.title);
+            markdown.push_str("\n\n");
+            for block in blocks
+                .iter()
+                .filter(|block| block.document_id == document.id)
+            {
+                markdown.push_str(&block.plain_text);
+                markdown.push_str("\n\n");
+            }
+        }
+
+        let exports = self
+            .root
+            .resolve_for_create("exports")
+            .map_err(ProjectPackageError::Host)?;
+        fs::create_dir_all(&exports).map_err(|source| ProjectPackageError::Io {
+            operation: "create exports directory",
+            source,
+        })?;
+        let file_name = format!("optimizer-export-{}.md", Uuid::new_v4().simple());
+        let relative = Path::new("exports").join(&file_name);
+        let final_path = self
+            .root
+            .resolve_for_create(&relative)
+            .map_err(ProjectPackageError::Host)?;
+        let temporary = self
+            .root
+            .resolve_for_create(Path::new("exports").join(format!(".{file_name}.tmp")))
+            .map_err(ProjectPackageError::Host)?;
+        fs::write(&temporary, markdown.as_bytes()).map_err(|source| ProjectPackageError::Io {
+            operation: "write Markdown export",
+            source,
+        })?;
+        if let Err(source) = fs::rename(&temporary, &final_path) {
+            let _ = fs::remove_file(&temporary);
+            return Err(ProjectPackageError::Io {
+                operation: "publish Markdown export",
+                source,
+            });
+        }
+        Ok(ExportMarkdownResponse {
+            schema_version: 1,
+            path: final_path.to_string_lossy().into_owned(),
+            bytes: markdown.len(),
+            documents: documents.len(),
+        })
+    }
+
     pub fn operations(&self) -> &OperationCommandHost {
         &self.operations
     }
@@ -193,11 +275,53 @@ impl OpenedProject {
         )
     }
 
+    pub fn create_document(
+        &mut self,
+        spec: &CreateDocumentSpec,
+    ) -> Result<CreateDocumentResponse, WorkspaceCommandError> {
+        create_document(
+            self.operations.store_mut(),
+            &self.project_id,
+            &self.main_branch_id,
+            spec,
+        )
+    }
+
+    pub fn style_samples(&self) -> Result<Vec<StyleSample>, WorkspaceCommandError> {
+        list_style_samples(self.operations.store(), &self.project_id)
+    }
+
+    pub fn create_style_sample(
+        &mut self,
+        spec: &CreateStyleSampleSpec,
+    ) -> Result<StyleSample, WorkspaceCommandError> {
+        create_style_sample(self.operations.store_mut(), &self.project_id, spec)
+    }
+
+    pub fn set_style_sample_status(
+        &mut self,
+        spec: &SetStyleSampleStatusSpec,
+    ) -> Result<StyleSample, WorkspaceCommandError> {
+        set_style_sample_status(self.operations.store_mut(), &self.project_id, spec)
+    }
+
     pub fn save_block(
         &mut self,
         spec: &SaveBlockSpec,
     ) -> Result<SaveBlockResponse, WorkspaceCommandError> {
         save_block(
+            self.operations.store_mut(),
+            &self.project_id,
+            &self.main_branch_id,
+            spec,
+        )
+    }
+
+    pub fn apply_reviewed_proposal(
+        &mut self,
+        spec: &ApplyReviewedProposalSpec,
+    ) -> Result<ApplyReviewedProposalResponse, WorkspaceCommandError> {
+        apply_reviewed_proposal(
             self.operations.store_mut(),
             &self.project_id,
             &self.main_branch_id,
@@ -493,6 +617,8 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use sha2::{Digest, Sha256};
+
     use super::*;
 
     struct TempParent(PathBuf);
@@ -601,6 +727,142 @@ mod tests {
             }),
             Err(WorkspaceCommandError::Store(StoreError::Conflict { .. }))
         ));
+    }
+
+    #[test]
+    fn atomically_applies_a_reviewed_proposal_as_an_ai_accept_commit() {
+        let parent = TempParent::new();
+        let mut project = OpenedProject::create(&parent.0, &spec()).unwrap();
+        let workspace = project.workspace().unwrap();
+        let block = &workspace.blocks[0];
+        let run_id = "run-apply-test";
+        let intent_id = "intent-apply-test";
+        let proposal_id = "proposal-apply-test";
+        let created_at = "2026-07-15T00:00:00Z";
+        let mut proposal = serde_json::json!({
+            "schemaVersion": 2,
+            "id": proposal_id,
+            "operationRunId": run_id,
+            "baseCommitId": workspace.head_commit_id,
+            "target": {
+                "documentId": block.document_id,
+                "blockId": block.id,
+                "baseRevision": block.revision,
+                "baseHash": block.content_hash,
+                "from": { "blockId": block.id, "offset": 0 },
+                "to": { "blockId": block.id, "offset": 0 }
+            },
+            "hunks": [{
+                "id": "proposal-apply-test:h1",
+                "from": { "blockId": block.id, "offset": 0, "affinity": "after" },
+                "to": { "blockId": block.id, "offset": 0, "affinity": "before" },
+                "original": "",
+                "replacement": "你好，世界",
+                "granularity": "token"
+            }],
+            "warnings": [],
+            "status": "review",
+            "createdAt": created_at
+        });
+        let proposal_hash = format!(
+            "sha256:{:x}",
+            Sha256::digest(serde_json::to_vec(&proposal).unwrap())
+        );
+        proposal["proposalHash"] = serde_json::json!(proposal_hash);
+        let transitions = [
+            ("draft", "compiling"),
+            ("compiling", "preflight"),
+            ("preflight", "queued"),
+            ("queued", "streaming"),
+            ("streaming", "validating"),
+            ("validating", "review"),
+        ]
+        .map(|(from, to)| {
+            serde_json::json!({
+                "fromState": from,
+                "toState": to,
+                "occurredAt": created_at
+            })
+        });
+        let bundle = serde_json::json!({
+            "schemaVersion": 1,
+            "run": {
+                "id": run_id,
+                "operationIntentId": intent_id,
+                "projectId": workspace.project_id,
+                "baseCommitId": workspace.head_commit_id,
+                "providerId": "deepseek",
+                "model": "deepseek-v4-flash",
+                "state": "review",
+                "responseId": "response-apply-test",
+                "finishReason": "stop",
+                "startedAt": created_at,
+                "updatedAt": created_at
+            },
+            "contextPacket": {
+                "id": "context-apply-test",
+                "operationIntentId": intent_id,
+                "projectId": workspace.project_id,
+                "baseCommitId": workspace.head_commit_id,
+                "packetHash": "sha256:context-apply-test",
+                "payload": { "schemaVersion": 1, "kind": "test" },
+                "createdAt": created_at
+            },
+            "lifecycleEvents": transitions,
+            "artifact": {
+                "id": proposal_id,
+                "kind": "patch_proposal",
+                "bindingHash": proposal_hash,
+                "payload": proposal,
+                "createdAt": created_at
+            }
+        });
+        project
+            .operations_mut()
+            .persist_operation_bundle_json(&bundle.to_string())
+            .unwrap();
+        project
+            .operations_mut()
+            .append_review_event_json(
+                &serde_json::json!({
+                    "schemaVersion": 1,
+                    "id": "review-decision-apply-test",
+                    "proposalId": proposal_id,
+                    "expectedRevision": 0,
+                    "expectedStatus": "review",
+                    "kind": "decision",
+                    "nextStatus": "ready",
+                    "hunkId": "proposal-apply-test:h1",
+                    "decision": "accepted",
+                    "occurredAt": created_at
+                })
+                .to_string(),
+            )
+            .unwrap();
+
+        let applied = project
+            .apply_reviewed_proposal(&ApplyReviewedProposalSpec {
+                proposal_id: proposal_id.into(),
+                expected_review_revision: 1,
+            })
+            .unwrap();
+        assert_eq!(applied.accepted_hunks, 1);
+        assert_eq!(applied.rejected_hunks, 0);
+        assert_eq!(applied.review_revision, 2);
+        assert_eq!(applied.save.block.plain_text, "你好，世界");
+        let commit = project
+            .version_history()
+            .unwrap()
+            .commits
+            .into_iter()
+            .find(|commit| commit.id == applied.save.commit_id)
+            .unwrap();
+        assert_eq!(commit.reason, "ai_accept");
+        assert_eq!(commit.actor_type, "model");
+        assert_eq!(commit.actor_id.as_deref(), Some(run_id));
+        let audit = project.operations().get_operation_audit(run_id).unwrap();
+        assert_eq!(audit.run.state, "accepted");
+        assert_eq!(audit.review.unwrap().status, "applied");
     }
 
     #[test]

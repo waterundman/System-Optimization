@@ -45,4 +45,4 @@ Block 内容哈希绑定 `kind + content + plainText + locked`，不绑定稳定
 
 每次 debounce 保存一个 Commit 简单、可审计且便于恢复，但高频输入会增加 Commit 数量。前端应采用停顿/失焦 debounce；后续可增加明确的 coalescing 策略，但不得删除已经被 AI 操作、检查点或用户命名版本引用的 Commit。
 
-当前命令只支持替换一个既有 Block。新增/删除/移动 Block、文档 CRUD、导入导出和命名版本仍待实现。AI Runner 接入宿主后，发起可修改正文的 Operation 前必须调用检查点能力并把检查点 ID 写入审计关联。
+本文最初的“只支持替换既有 Block”限制已被 ADR 0016 部分取代：现在支持顶层章节创建、单文件 Markdown 导入、项目内 Markdown 导出和跨章节创建点的结构恢复。章节改名/移动/删除、Block 拆分合并与命名版本仍待实现。

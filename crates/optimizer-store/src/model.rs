@@ -66,6 +66,73 @@ pub struct DocumentRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StyleSampleRecord {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub content: String,
+    pub content_hash: String,
+    pub status: String,
+    pub sensitivity: String,
+    pub revision: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateStyleSample {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub content: String,
+    pub content_hash: String,
+    pub sensitivity: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetStyleSampleStatus {
+    pub project_id: String,
+    pub id: String,
+    pub expected_revision: i64,
+    pub status: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateDocumentWithBlock {
+    pub document_id: String,
+    pub document_parent_id: Option<String>,
+    pub document_kind: String,
+    pub document_title: String,
+    pub document_order_key: String,
+    pub block_id: String,
+    pub block_kind: String,
+    pub block_order_key: String,
+    pub block_content_json: String,
+    pub block_plain_text: String,
+    pub block_content_hash: String,
+    pub block_locked: bool,
+    pub commit_id: String,
+    pub branch_id: String,
+    pub expected_head_commit_id: String,
+    pub expected_project_revision: i64,
+    pub new_root_hash: String,
+    pub actor_type: String,
+    pub actor_id: Option<String>,
+    pub occurred_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateDocumentReceipt {
+    pub document_id: String,
+    pub block_id: String,
+    pub commit_id: String,
+    pub previous_head_commit_id: String,
+    pub project_revision: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockRecord {
     pub id: String,
     pub document_id: String,
@@ -96,6 +163,7 @@ pub struct ApplyBlockEdit {
     pub actor_type: String,
     pub actor_id: Option<String>,
     pub occurred_at: String,
+    pub review_event: Option<AppendReviewEvent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

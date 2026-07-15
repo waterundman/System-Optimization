@@ -1,0 +1,11 @@
+{
+  "name": "@optimizer/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node ../../scripts/build-desktop.mjs",
+    "pretest": "npm run build",
+    "test": "node --test test/frontend-state.test.js test/operation-client.test.js"
+  }
+}

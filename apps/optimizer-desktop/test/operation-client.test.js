@@ -1,0 +1,150 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  credentialReference,
+  defaultProviderSettings,
+  providerConfiguration,
+  runDesktopOperation,
+} from "../dist/operation-client.js";
+
+test("builds fixed credential-bound configurations for all supported providers", () => {
+  const settings = defaultProviderSettings();
+  assert.deepEqual(Object.keys(settings), ["deepseek", "qwen", "kimi", "minimax"]);
+  for (const providerId of Object.keys(settings)) {
+    settings[providerId].enabled = true;
+    const configuration = providerConfiguration(
+      settings[providerId],
+      "2026-07-15T00:00:00.000Z",
+    );
+    assert.equal(configuration.providerId, providerId);
+    assert.equal(configuration.credentialRef, credentialReference(providerId));
+    assert.equal("apiKey" in configuration, false);
+  }
+});
+
+test("runs Context Compiler to host stream to persisted patch proposal without plaintext secrets", async () => {
+  const persisted = [];
+  let confirmedContext = null;
+  const providerSettings = defaultProviderSettings().deepseek;
+  providerSettings.enabled = true;
+  providerSettings.credentialExists = true;
+  const block = {
+    id: "block-1",
+    documentId: "document-1",
+    kind: "paragraph",
+    orderKey: "a0",
+    content: { type: "paragraph", content: [] },
+    plainText: "",
+    contentHash: `sha256:${"0".repeat(64)}`,
+    revision: 0,
+    locked: false,
+  };
+  const workspace = {
+    schemaVersion: 1,
+    projectId: "project-1",
+    mainBranchId: "branch-1",
+    headCommitId: "commit-1",
+    revision: 0,
+    documents: [{
+      id: "document-1",
+      parentId: null,
+      kind: "chapter",
+      title: "正文",
+      orderKey: "a0",
+      revision: 0,
+    }],
+    blocks: [block],
+  };
+  const invokeHost = async (command, args) => {
+    if (command === "execute_model_stream") {
+      assert.ok(confirmedContext, "context must be confirmed before the billable host request");
+      const output = JSON.stringify({
+        schemaVersion: 1,
+        kind: "replacement",
+        replacementText: "你好，世界",
+        summary: "插入开场句",
+      });
+      for (const event of [
+        { type: "start", requestId: args.input.requestId, id: "response-1", providerId: "deepseek", model: "deepseek-v4-flash" },
+        { type: "text_delta", text: output },
+        { type: "finish", reason: "stop" },
+      ]) args.onEvent.onmessage(event);
+      return {
+        schemaVersion: 1,
+        requestId: args.input.requestId,
+        responseId: "response-1",
+        providerId: "deepseek",
+        model: "deepseek-v4-flash",
+        content: output,
+        reasoningContent: "",
+        finishReason: "stop",
+      };
+    }
+    if (command === "persist_operation_bundle") {
+      persisted.push(args.input);
+      return { schemaVersion: 1, state: "review" };
+    }
+    throw new Error(`Unexpected host command: ${command}`);
+  };
+
+  const execution = await runDesktopOperation({
+    invokeHost,
+    createChannel: () => ({ onmessage: null }),
+    providerSettings,
+    workspace,
+    projectTitle: "测试项目",
+    block,
+    from: 0,
+    to: 0,
+    operationType: "continue_scene",
+    styleSamples: [
+      {
+        id: "style-canonical",
+        title: "短句",
+        content: "雨很轻。灯还亮着。",
+        status: "canonical",
+        sensitivity: "local_sensitive",
+      },
+      {
+        id: "style-archived",
+        title: "废弃样本",
+        content: "不应被重新召回。",
+        status: "archived",
+        sensitivity: "local_sensitive",
+      },
+      {
+        id: "style-local-only",
+        title: "仅本地",
+        content: "远程调用不可发送。",
+        status: "canonical",
+        sensitivity: "never_send",
+      },
+    ],
+    confirmContext: async (packet) => {
+      confirmedContext = packet;
+    },
+  });
+
+  assert.equal(confirmedContext.operationIntentId, execution.intent.id);
+  assert.ok(confirmedContext.items.length >= 1);
+  assert.ok(confirmedContext.items.some((item) => item.sourceRef === "style:style-canonical"));
+  assert.deepEqual(
+    Object.fromEntries(confirmedContext.exclusions
+      .filter((item) => item.sourceRef.startsWith("style:"))
+      .map((item) => [item.sourceRef, item.reason])),
+    {
+      "style:style-archived": "INELIGIBLE_STATUS",
+      "style:style-local-only": "POLICY_DENIED",
+    },
+  );
+  assert.equal(execution.result.kind, "patch_proposal");
+  assert.equal(execution.result.proposal.hunks.length, 1);
+  assert.equal(execution.result.proposal.hunks[0].replacement, "你好，世界");
+  assert.equal(persisted.length, 1);
+  const bundle = JSON.parse(persisted[0]);
+  assert.equal(bundle.run.state, "review");
+  assert.equal(bundle.artifact.kind, "patch_proposal");
+  assert.equal(persisted[0].includes("apiKey"), false);
+  assert.equal(persisted[0].includes("secret-never"), false);
+});

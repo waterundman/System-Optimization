@@ -1,14 +1,18 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use optimizer_host::{
-    CheckpointSummary, NewProjectSpec, OpenedProject, OperationAuditResponse,
-    OperationCommandError, PersistOperationResponse, PersistReviewResponse, ProjectInfo,
-    ProjectPackageError, ProjectWorkspace, RestoreCheckpointResponse, RestoreCheckpointSpec,
-    SaveBlockResponse, SaveBlockSpec, SecretReference, SecretStore, SecretStoreError, SecretValue,
-    VersionHistory, WorkspaceCommandError,
+    ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, CancelModelRequestResponse,
+    CheckpointSummary, CreateDocumentResponse, CreateDocumentSpec, CreateStyleSampleSpec,
+    ExportMarkdownResponse, ModelExecutionHost, ModelExecutionRequest, ModelExecutionSummary,
+    ModelGatewayError, ModelProviderId, ModelStreamEvent, NewProjectSpec, OpenedProject,
+    OperationAuditResponse, OperationCommandError, PersistOperationResponse, PersistReviewResponse,
+    ProjectInfo, ProjectPackageError, ProjectWorkspace, RestoreCheckpointResponse,
+    RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec, SecretReference, SecretStore,
+    SecretStoreError, SecretValue, SetStyleSampleStatusSpec, StyleSample, VersionHistory,
+    WorkspaceCommandError,
 };
 use serde::{Deserialize, Serialize};
-use tauri::{Runtime, State};
+use tauri::{Runtime, State, ipc::Channel};
 
 mod command_manifest;
 
@@ -18,13 +22,16 @@ pub use command_manifest::REGISTERED_COMMANDS;
 pub struct DesktopState {
     session: Arc<Mutex<Option<OpenedProject>>>,
     secrets: Arc<dyn SecretStore>,
+    models: ModelExecutionHost,
 }
 
 impl DesktopState {
     pub fn new(secrets: Arc<dyn SecretStore>) -> Self {
+        let models = ModelExecutionHost::new(secrets.clone());
         Self {
             session: Arc::new(Mutex::new(None)),
             secrets,
+            models,
         }
     }
 
@@ -64,6 +71,7 @@ impl DesktopState {
     }
 
     pub fn close_project(&self) -> CommandResult<ProjectSessionResponse> {
+        self.models.cancel_all();
         self.project_session()?.take();
         Ok(ProjectSessionResponse::closed())
     }
@@ -84,6 +92,62 @@ impl DesktopState {
             .map_err(CommandError::from)
     }
 
+    pub fn create_document(
+        &self,
+        input: CreateDocumentRequest,
+    ) -> CommandResult<CreateDocumentResponse> {
+        input.validate()?;
+        let mut project = self.current_project()?;
+        project
+            .create_document(&CreateDocumentSpec {
+                title: input.title,
+                initial_text: input.initial_text,
+            })
+            .map_err(CommandError::from)
+    }
+
+    pub fn export_markdown(&self) -> CommandResult<ExportMarkdownResponse> {
+        self.current_project()?
+            .export_markdown()
+            .map_err(CommandError::from)
+    }
+
+    pub fn list_style_samples(&self) -> CommandResult<Vec<StyleSample>> {
+        self.current_project()?
+            .style_samples()
+            .map_err(CommandError::from)
+    }
+
+    pub fn create_style_sample(
+        &self,
+        input: CreateStyleSampleRequest,
+    ) -> CommandResult<StyleSample> {
+        input.validate()?;
+        let mut project = self.current_project()?;
+        project
+            .create_style_sample(&CreateStyleSampleSpec {
+                title: input.title,
+                content: input.content,
+                sensitivity: input.sensitivity,
+            })
+            .map_err(CommandError::from)
+    }
+
+    pub fn set_style_sample_status(
+        &self,
+        input: SetStyleSampleStatusRequest,
+    ) -> CommandResult<StyleSample> {
+        input.validate()?;
+        let mut project = self.current_project()?;
+        project
+            .set_style_sample_status(&SetStyleSampleStatusSpec {
+                id: input.id,
+                expected_revision: input.expected_revision,
+                status: input.status,
+            })
+            .map_err(CommandError::from)
+    }
+
     pub fn save_block(&self, input: SaveBlockRequest) -> CommandResult<SaveBlockResponse> {
         input.validate()?;
         let mut project = self.current_project()?;
@@ -94,6 +158,20 @@ impl DesktopState {
                 expected_hash: input.expected_hash,
                 content: input.content,
                 plain_text: input.plain_text,
+            })
+            .map_err(CommandError::from)
+    }
+
+    pub fn apply_reviewed_proposal(
+        &self,
+        input: ApplyReviewedProposalRequest,
+    ) -> CommandResult<ApplyReviewedProposalResponse> {
+        input.validate()?;
+        let mut project = self.current_project()?;
+        project
+            .apply_reviewed_proposal(&ApplyReviewedProposalSpec {
+                proposal_id: input.proposal_id,
+                expected_review_revision: input.expected_review_revision,
             })
             .map_err(CommandError::from)
     }
@@ -193,6 +271,29 @@ impl DesktopState {
         })
     }
 
+    pub fn execute_model_stream<F>(
+        &self,
+        input: ModelExecutionRequest,
+        emit: F,
+    ) -> CommandResult<ModelExecutionSummary>
+    where
+        F: FnMut(ModelStreamEvent) -> Result<(), ModelGatewayError>,
+    {
+        if self.project_session()?.is_none() {
+            return Err(CommandError::no_project_open());
+        }
+        self.models
+            .execute_stream(input, emit)
+            .map_err(CommandError::from)
+    }
+
+    pub fn cancel_model_request(
+        &self,
+        request_id: String,
+    ) -> CommandResult<CancelModelRequestResponse> {
+        Ok(self.models.cancel(request_id))
+    }
+
     fn project_session(&self) -> CommandResult<MutexGuard<'_, Option<OpenedProject>>> {
         self.session
             .lock()
@@ -241,77 +342,105 @@ pub type CommandResult<T> = Result<T, CommandError>;
 pub struct CommandError {
     pub code: String,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<CommandErrorDetails>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandErrorDetails {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<ModelProviderId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+    pub retriable: bool,
 }
 
 impl CommandError {
-    fn state_unavailable() -> Self {
+    fn basic(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
-            code: "HOST_STATE_UNAVAILABLE".into(),
-            message: "Desktop host state is unavailable".into(),
+            code: code.into(),
+            message: message.into(),
+            details: None,
         }
+    }
+
+    fn state_unavailable() -> Self {
+        Self::basic(
+            "HOST_STATE_UNAVAILABLE",
+            "Desktop host state is unavailable",
+        )
     }
 
     fn task_failed() -> Self {
-        Self {
-            code: "HOST_TASK_FAILED".into(),
-            message: "Desktop host task failed".into(),
-        }
+        Self::basic("HOST_TASK_FAILED", "Desktop host task failed")
     }
 
     fn no_project_open() -> Self {
-        Self {
-            code: "NO_PROJECT_OPEN".into(),
-            message: "Open a project before using this command".into(),
-        }
+        Self::basic(
+            "NO_PROJECT_OPEN",
+            "Open a project before using this command",
+        )
     }
 
     fn project_already_open() -> Self {
-        Self {
-            code: "PROJECT_ALREADY_OPEN".into(),
-            message: "Close the current project before opening another one".into(),
-        }
+        Self::basic(
+            "PROJECT_ALREADY_OPEN",
+            "Close the current project before opening another one",
+        )
     }
 
     fn unsupported_request_schema(actual: u32) -> Self {
-        Self {
-            code: "UNSUPPORTED_SCHEMA".into(),
-            message: format!("Unsupported project command schema version {actual}"),
-        }
+        Self::basic(
+            "UNSUPPORTED_SCHEMA",
+            format!("Unsupported project command schema version {actual}"),
+        )
     }
 }
 
 impl From<OperationCommandError> for CommandError {
     fn from(error: OperationCommandError) -> Self {
-        Self {
-            code: error.code().into(),
-            message: error.public_message(),
-        }
+        Self::basic(error.code(), error.public_message())
     }
 }
 
 impl From<ProjectPackageError> for CommandError {
     fn from(error: ProjectPackageError) -> Self {
-        Self {
-            code: error.code().into(),
-            message: error.public_message(),
-        }
+        Self::basic(error.code(), error.public_message())
     }
 }
 
 impl From<SecretStoreError> for CommandError {
     fn from(error: SecretStoreError) -> Self {
-        Self {
-            code: error.code().into(),
-            message: error.to_string(),
-        }
+        Self::basic(error.code(), error.to_string())
     }
 }
 
 impl From<WorkspaceCommandError> for CommandError {
     fn from(error: WorkspaceCommandError) -> Self {
+        Self::basic(error.code(), error.public_message())
+    }
+}
+
+impl From<ModelGatewayError> for CommandError {
+    fn from(error: ModelGatewayError) -> Self {
         Self {
             code: error.code().into(),
             message: error.public_message(),
+            details: Some(CommandErrorDetails {
+                provider_id: error.provider_id(),
+                status: error.status(),
+                remote_code: error.remote_code().map(str::to_owned),
+                remote_request_id: error.remote_request_id().map(str::to_owned),
+                retry_after_ms: error.retry_after_ms(),
+                retriable: error.retriable(),
+            }),
         }
     }
 }
@@ -355,7 +484,86 @@ pub struct SaveBlockRequest {
     pub plain_text: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateDocumentRequest {
+    pub schema_version: u32,
+    pub title: String,
+    #[serde(default)]
+    pub initial_text: String,
+}
+
+impl CreateDocumentRequest {
+    fn validate(&self) -> CommandResult<()> {
+        if self.schema_version != 1 {
+            return Err(CommandError::unsupported_request_schema(
+                self.schema_version,
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateStyleSampleRequest {
+    pub schema_version: u32,
+    pub title: String,
+    pub content: String,
+    pub sensitivity: String,
+}
+
+impl CreateStyleSampleRequest {
+    fn validate(&self) -> CommandResult<()> {
+        if self.schema_version != 1 {
+            return Err(CommandError::unsupported_request_schema(
+                self.schema_version,
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetStyleSampleStatusRequest {
+    pub schema_version: u32,
+    pub id: String,
+    pub expected_revision: i64,
+    pub status: String,
+}
+
+impl SetStyleSampleStatusRequest {
+    fn validate(&self) -> CommandResult<()> {
+        if self.schema_version != 1 {
+            return Err(CommandError::unsupported_request_schema(
+                self.schema_version,
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl SaveBlockRequest {
+    fn validate(&self) -> CommandResult<()> {
+        if self.schema_version != 1 {
+            return Err(CommandError::unsupported_request_schema(
+                self.schema_version,
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplyReviewedProposalRequest {
+    pub schema_version: u32,
+    pub proposal_id: String,
+    pub expected_review_revision: i64,
+}
+
+impl ApplyReviewedProposalRequest {
     fn validate(&self) -> CommandResult<()> {
         if self.schema_version != 1 {
             return Err(CommandError::unsupported_request_schema(
@@ -447,7 +655,13 @@ pub fn attach<R: Runtime>(builder: tauri::Builder<R>, state: DesktopState) -> ta
             close_project,
             get_project_session,
             get_project_workspace,
+            create_document,
+            export_markdown,
+            list_style_samples,
+            create_style_sample,
+            set_style_sample_status,
             save_block,
+            apply_reviewed_proposal,
             get_version_history,
             create_checkpoint,
             restore_checkpoint,
@@ -457,6 +671,8 @@ pub fn attach<R: Runtime>(builder: tauri::Builder<R>, state: DesktopState) -> ta
             store_provider_secret,
             has_provider_secret,
             delete_provider_secret,
+            execute_model_stream,
+            cancel_model_request,
         ])
 }
 
@@ -494,11 +710,53 @@ async fn get_project_workspace(state: State<'_, DesktopState>) -> CommandResult<
 }
 
 #[tauri::command]
+async fn create_document(
+    input: CreateDocumentRequest,
+    state: State<'_, DesktopState>,
+) -> CommandResult<CreateDocumentResponse> {
+    spawn_host_task(state, move |state| state.create_document(input)).await
+}
+
+#[tauri::command]
+async fn export_markdown(state: State<'_, DesktopState>) -> CommandResult<ExportMarkdownResponse> {
+    spawn_host_task(state, DesktopState::export_markdown).await
+}
+
+#[tauri::command]
+async fn list_style_samples(state: State<'_, DesktopState>) -> CommandResult<Vec<StyleSample>> {
+    spawn_host_task(state, DesktopState::list_style_samples).await
+}
+
+#[tauri::command]
+async fn create_style_sample(
+    input: CreateStyleSampleRequest,
+    state: State<'_, DesktopState>,
+) -> CommandResult<StyleSample> {
+    spawn_host_task(state, move |state| state.create_style_sample(input)).await
+}
+
+#[tauri::command]
+async fn set_style_sample_status(
+    input: SetStyleSampleStatusRequest,
+    state: State<'_, DesktopState>,
+) -> CommandResult<StyleSample> {
+    spawn_host_task(state, move |state| state.set_style_sample_status(input)).await
+}
+
+#[tauri::command]
 async fn save_block(
     input: SaveBlockRequest,
     state: State<'_, DesktopState>,
 ) -> CommandResult<SaveBlockResponse> {
     spawn_host_task(state, move |state| state.save_block(input)).await
+}
+
+#[tauri::command]
+async fn apply_reviewed_proposal(
+    input: ApplyReviewedProposalRequest,
+    state: State<'_, DesktopState>,
+) -> CommandResult<ApplyReviewedProposalResponse> {
+    spawn_host_task(state, move |state| state.apply_reviewed_proposal(input)).await
 }
 
 #[tauri::command]
@@ -569,6 +827,30 @@ async fn delete_provider_secret(
     state: State<'_, DesktopState>,
 ) -> CommandResult<SecretMutationResponse> {
     spawn_host_task(state, move |state| state.delete_provider_secret(reference)).await
+}
+
+#[tauri::command]
+async fn execute_model_stream(
+    input: ModelExecutionRequest,
+    on_event: Channel<ModelStreamEvent>,
+    state: State<'_, DesktopState>,
+) -> CommandResult<ModelExecutionSummary> {
+    spawn_host_task(state, move |state| {
+        state.execute_model_stream(input, |event| {
+            on_event
+                .send(event)
+                .map_err(|_| ModelGatewayError::event_delivery_failed())
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+async fn cancel_model_request(
+    request_id: String,
+    state: State<'_, DesktopState>,
+) -> CommandResult<CancelModelRequestResponse> {
+    spawn_host_task(state, move |state| state.cancel_model_request(request_id)).await
 }
 
 async fn spawn_host_task<T, F>(state: State<'_, DesktopState>, task: F) -> CommandResult<T>
@@ -778,6 +1060,83 @@ mod tests {
     }
 
     #[test]
+    fn style_library_is_project_scoped_and_uses_optimistic_status_updates() {
+        let (state, _, parent) = state();
+        assert_eq!(
+            state.list_style_samples().unwrap_err().code,
+            "NO_PROJECT_OPEN"
+        );
+        open_test_project(&state, &parent);
+        let created = state
+            .create_style_sample(CreateStyleSampleRequest {
+                schema_version: 1,
+                title: "克制短句".into(),
+                content: "风停了。灯还亮着。".into(),
+                sensitivity: "local_sensitive".into(),
+            })
+            .unwrap();
+        assert_eq!(created.status, "canonical");
+        assert_eq!(state.list_style_samples().unwrap(), vec![created.clone()]);
+
+        let archived = state
+            .set_style_sample_status(SetStyleSampleStatusRequest {
+                schema_version: 1,
+                id: created.id.clone(),
+                expected_revision: 0,
+                status: "archived".into(),
+            })
+            .unwrap();
+        assert_eq!(archived.revision, 1);
+        assert_eq!(archived.status, "archived");
+        assert_eq!(
+            state
+                .set_style_sample_status(SetStyleSampleStatusRequest {
+                    schema_version: 1,
+                    id: created.id,
+                    expected_revision: 0,
+                    status: "canonical".into(),
+                })
+                .unwrap_err()
+                .code,
+            "CONFLICT"
+        );
+    }
+
+    #[test]
+    fn creates_a_versioned_chapter_through_the_current_session() {
+        let (state, _, parent) = state();
+        let info = open_test_project(&state, &parent);
+        let created = state
+            .create_document(CreateDocumentRequest {
+                schema_version: 1,
+                title: "第二章".into(),
+                initial_text: "雾从海面升起。".into(),
+            })
+            .unwrap();
+        assert_eq!(created.document.title, "第二章");
+        assert_eq!(created.block.plain_text, "雾从海面升起。");
+        assert_eq!(created.project_revision, 1);
+        let workspace = state.get_project_workspace().unwrap();
+        assert_eq!(workspace.documents.len(), 2);
+        assert_eq!(workspace.blocks.len(), 2);
+        assert_eq!(workspace.head_commit_id, created.commit_id);
+        assert!(
+            state
+                .get_version_history()
+                .unwrap()
+                .commits
+                .iter()
+                .any(|commit| commit.reason == "document_create")
+        );
+        let exported = state.export_markdown().unwrap();
+        assert!(Path::new(&exported.path).starts_with(&info.directory));
+        let markdown = fs::read_to_string(&exported.path).unwrap();
+        assert!(markdown.contains("# Desktop Test"));
+        assert!(markdown.contains("## 第二章"));
+        assert!(markdown.contains("雾从海面升起。"));
+    }
+
+    #[test]
     fn command_errors_are_structured_and_do_not_echo_secret_values() {
         let (state, _, parent) = state();
         let info = open_test_project(&state, &parent);
@@ -821,6 +1180,72 @@ mod tests {
     }
 
     #[test]
+    fn model_execution_requires_a_project_and_reports_safe_provider_details() {
+        let (state, _, parent) = state();
+        let input: ModelExecutionRequest = serde_json::from_value(json!({
+            "schemaVersion": 1,
+            "requestId": "desktop-deepseek-test",
+            "configuration": {
+                "schemaVersion": 1,
+                "id": "provider-deepseek-default",
+                "providerId": "deepseek",
+                "enabled": true,
+                "defaultModel": "deepseek-chat",
+                "credentialRef": "secret://providers/deepseek/default",
+                "qwen": null,
+                "defaultTimeoutMs": 60_000,
+                "maxRequestBytes": 16 * 1024 * 1024,
+                "updatedAt": "2026-07-15T00:00:00Z"
+            },
+            "request": {
+                "model": null,
+                "messages": [{
+                    "role": "user",
+                    "content": "优化这段文字",
+                    "name": null,
+                    "reasoningContent": null,
+                    "toolCallId": null,
+                    "toolCalls": null
+                }],
+                "maxOutputTokens": 512,
+                "temperature": null,
+                "topP": null,
+                "stop": null,
+                "responseFormat": null,
+                "reasoning": null,
+                "tools": null,
+                "toolChoice": null
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            state
+                .execute_model_stream(input.clone(), |_| Ok(()))
+                .unwrap_err()
+                .code,
+            "NO_PROJECT_OPEN"
+        );
+        open_test_project(&state, &parent);
+        let error = state.execute_model_stream(input, |_| Ok(())).unwrap_err();
+        assert_eq!(error.code, "PROVIDER_CREDENTIAL_MISSING");
+        assert_eq!(
+            error.details.as_ref().unwrap().provider_id,
+            Some(ModelProviderId::Deepseek)
+        );
+        assert!(!error.details.as_ref().unwrap().retriable);
+        let serialized = serde_json::to_string(&error).unwrap();
+        assert!(!serialized.contains("apiKey"));
+        assert!(!serialized.contains("Authorization"));
+
+        let cancelled = state
+            .cancel_model_request("not-active".to_string())
+            .unwrap();
+        assert_eq!(cancelled.request_id, "not-active");
+        assert!(!cancelled.cancelled);
+    }
+
+    #[test]
     fn tauri_security_configuration_is_local_and_covers_every_registered_command() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let capability: serde_json::Value = serde_json::from_str(
@@ -834,12 +1259,15 @@ mod tests {
             json!([
                 "allow-project-session",
                 "allow-workspace-read",
+                "allow-style-library",
                 "allow-workspace-write",
+                "allow-project-export",
                 "allow-version-read",
                 "allow-version-write",
                 "allow-operation-write",
                 "allow-operation-audit-read",
-                "allow-provider-secret-manage"
+                "allow-provider-secret-manage",
+                "allow-model-execution"
             ])
         );
 
@@ -850,6 +1278,7 @@ mod tests {
             config["app"]["security"]["capabilities"],
             json!(["main-local"])
         );
+        assert_eq!(config["app"]["windows"][0]["create"], json!(false));
         assert!(config["app"]["security"]["csp"].as_str().is_some());
 
         let permissions = fs::read_to_string(root.join("permissions/optimizer.toml")).unwrap();

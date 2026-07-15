@@ -9,9 +9,19 @@ description = "Allows the bundled editor to read the document tree and blocks fr
 commands.allow = ["get_project_workspace"]
 
 [[permission]]
+identifier = "allow-style-library"
+description = "Allows the bundled editor to list, create, archive and restore project style samples without direct database access."
+commands.allow = ["list_style_samples", "create_style_sample", "set_style_sample_status"]
+
+[[permission]]
 identifier = "allow-workspace-write"
-description = "Allows the bundled editor to save a block through optimistic concurrency and create an audit commit."
-commands.allow = ["save_block"]
+description = "Allows the bundled editor to create a chapter, save a block through optimistic concurrency and create audit commits."
+commands.allow = ["create_document", "save_block", "apply_reviewed_proposal"]
+
+[[permission]]
+identifier = "allow-project-export"
+description = "Allows the bundled editor to atomically export the current project as Markdown inside its project package."
+commands.allow = ["export_markdown"]
 
 [[permission]]
 identifier = "allow-version-read"
@@ -37,3 +47,8 @@ commands.allow = ["get_operation_audit"]
 identifier = "allow-provider-secret-manage"
 description = "Allows write, presence check and deletion of provider secrets without exposing plaintext reads."
 commands.allow = ["store_provider_secret", "has_provider_secret", "delete_provider_secret"]
+
+[[permission]]
+identifier = "allow-model-execution"
+description = "Allows the bundled editor to stream one fixed-endpoint provider request and cancel active model requests."
+commands.allow = ["execute_model_stream", "cancel_model_request"]

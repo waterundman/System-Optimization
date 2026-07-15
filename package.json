@@ -12,15 +12,19 @@
     "node": ">=24"
   },
   "scripts": {
+    "pretest": "npm run desktop:build",
     "test": "node --test test/all.test.ts",
     "test:protocol": "node --test packages/protocol/test/protocol.test.ts",
     "test:kernel": "node --test packages/kernel/test/context-compiler.test.ts packages/kernel/test/operation-state-machine.test.ts",
     "test:patch": "node --test packages/patch-engine/test/patch-engine.test.ts",
     "test:models": "node --test packages/model-gateway/test/model-gateway.test.ts",
     "test:operations": "node --test packages/operation-runner/test/operation-runner.test.ts packages/operation-runner/test/persistence.test.ts",
+    "test:desktop": "node --test apps/optimizer-desktop/test/frontend-state.test.js",
     "check:schemas": "node scripts/check-protocol-schemas.mjs",
     "check:architecture": "node scripts/check-architecture.mjs",
-    "check": "npm run check:schemas && npm run check:architecture && npm test",
-    "lab": "node apps/kernel-lab/src/index.ts"
+    "check": "npm run check:schemas && npm run check:architecture && npm run desktop:build && npm test",
+    "lab": "node apps/kernel-lab/src/index.ts",
+    "desktop:build": "node scripts/build-desktop.mjs",
+    "desktop:dev": "npm run desktop:build && cargo run -p optimizer-desktop --bin optimizer-desktop --offline"
   }
 }

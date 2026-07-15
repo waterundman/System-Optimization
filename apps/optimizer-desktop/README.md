@@ -1,6 +1,6 @@
 # optimizer-desktop
 
-Optimizer System 的 Tauri 2 桌面适配层。当前提供可编译的 IPC command 注册、main window capability、结构化错误、项目 Session 与 Secret Store 命令；前端编辑器将在后续阶段接入。
+Optimizer System 的 Tauri 2 桌面应用。当前已经具备可运行的中文入口、项目创建/打开、文档树、Block 编辑与自动保存、冲突草稿保护、检查点、版本历史和恢复交互；所有持久化仍通过 Rust IPC 安全边界完成。
 
 WebView 只允许：
 
@@ -9,6 +9,11 @@ WebView 只允许：
 - 写入 Patch review 事件；
 - 读取 Operation 审计；
 - 写入、检查和删除 provider secret。
+- 通过 Rust Host 执行 DeepSeek、Qwen、Kimi、MiniMax 固定端点的流式请求与取消。
+- 复用 Kernel/Operation Runner/Patch Engine 完成 AI 操作、Findings 与逐 hunk 审查。
+- 原子应用已审查 Proposal，同时写入 `ai_accept` Commit 与完整 Operation/Review 审计。
+- 读取文档树并用版本基线保存 Block；
+- 建立检查点、浏览版本元数据并恢复为新 Commit。
 
 WebView 不存在“读取 secret 明文”命令。模型请求执行器后续应在 Rust 信任边界内解析 `credentialRef`，或使用一次性宿主网络命令，不能把 API Key 返回 JavaScript。
 
@@ -20,7 +25,7 @@ WebView 不存在“读取 secret 明文”命令。模型请求执行器后续�
 - `get_project_session` 返回当前项目、主分支、HEAD、revision 与数据库 schema；
 - Operation 写入和审计命令在无项目时统一返回 `NO_PROJECT_OPEN`。
 
-四个命令位于独立的 `allow-project-session` permission 中，只授权给本地 `main` window。前端项目选择器和编辑器壳仍待接入。
+四个命令位于独立的 `allow-project-session` permission 中，只授权给本地 `main` window。入口表单只提交用户明确填写的绝对路径，创建与打开规则由 Host 再次校验。
 
 ## 工作区与版本
 
@@ -30,4 +35,19 @@ WebView 不存在“读取 secret 明文”命令。模型请求执行器后续�
 - `get_version_history` 只返回 Commit/检查点元数据；
 - `restore_checkpoint` 校验快照并“恢复为新 Commit”，不会覆盖历史节点。
 
-工作区读写和版本读写分别拥有独立 permission。前端应对 `CONFLICT` 重新加载工作区，对 `NO_CHANGES` 静默结束保存状态。
+工作区读写和版本读写分别拥有独立 permission。前端以 900ms 停顿触发串行保存，对 `CONFLICT` 保留本地草稿并重新加载权威工作区，对 `NO_CHANGES` 静默结束保存状态。未处理冲突会阻止建立检查点与恢复；关闭项目需要用户再次确认。
+
+风格库使用独立 `allow-style-library` permission。选中的正文可固定为项目样本；启用样本作为 L4 Context 候选，归档样本和远程调用中的 `never_send` 样本由 Context Compiler 在模型调用前排除。实际入选内容始终出现在发送确认弹窗中。
+
+文档侧栏可创建版本化章节。原生文件选择器可把最大 2 MiB 的 Markdown/Text 文件导入为一个章节；宿主不接受任意读取路径。导出由独立 `allow-project-export` permission 写入项目包 `exports/`，采用临时文件加原子 rename。检查点恢复支持在章节创建前后软归档与复活结构。
+
+## 前端与运行
+
+当前前端使用浏览器原生 DOM 与 `contenteditable="plaintext-only"`，没有第三方 npm 运行时依赖。`frontend-state.js` 是编辑器无关的状态/协议适配层，保存请求只包含 Block 基线和新内容，不允许 WebView 生成 Commit ID、时间戳或权威 hash。依赖源可用后，正文输入面可以替换为 Tiptap，而不改变 Host 命令和版本协议。
+
+```powershell
+npm.cmd run desktop:build
+npm.cmd run desktop:dev
+```
+
+Tauri main window 由 Rust 从配置显式创建，并设置独立 WebView 数据目录。调试构建默认把浏览器缓存放在 `target` 内；正式构建使用系统应用数据目录。自动化或便携调试可通过绝对路径环境变量 `OPTIMIZER_WEBVIEW_DATA_DIR` 覆盖，系统会拒绝相对路径。

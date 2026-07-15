@@ -279,87 +279,12 @@ impl OptimizerStore {
         &mut self,
         command: &AppendReviewEvent,
     ) -> StoreResult<ReviewSessionRecord> {
-        validate_review_event(command)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (run_id, actual_revision, actual_status_value): (String, i64, String) = transaction
-            .query_row(
-                "SELECT run_id, revision, status FROM patch_review_head WHERE proposal_id = ?1",
-                [&command.proposal_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?
-            .ok_or_else(|| StoreError::NotFound {
-                entity: "patch_review",
-                id: command.proposal_id.clone(),
-            })?;
-        let actual_status = parse_review_status(&actual_status_value)?;
-        if actual_revision != command.expected_revision || actual_status != command.expected_status
-        {
-            return Err(StoreError::StateConflict {
-                entity: "patch_review",
-                id: command.proposal_id.clone(),
-                expected_revision: command.expected_revision,
-                actual_revision,
-                expected_state: command.expected_status.as_str().into(),
-                actual_state: actual_status.as_str().into(),
-            });
-        }
-        assert_review_transition(command)?;
-        let new_revision = actual_revision + 1;
-        let sequence: i64 = transaction.query_row(
-            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM patch_review_event WHERE proposal_id = ?1",
-            [&command.proposal_id],
-            |row| row.get(0),
-        )?;
-        transaction.execute(
-            "INSERT INTO patch_review_event(
-               id, proposal_id, sequence, base_revision, new_revision, kind,
-               previous_status, next_status, hunk_id, decision, payload_json, occurred_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![
-                command.id,
-                command.proposal_id,
-                sequence,
-                actual_revision,
-                new_revision,
-                command.kind.as_str(),
-                actual_status.as_str(),
-                command.next_status.as_str(),
-                command.hunk_id,
-                command.decision.map(ReviewDecision::as_str),
-                command.payload_json,
-                command.occurred_at,
-            ],
-        )?;
-        let updated = transaction.execute(
-            "UPDATE patch_review_head
-             SET revision = ?1, status = ?2, updated_at = ?3
-             WHERE proposal_id = ?4 AND revision = ?5 AND status = ?6",
-            params![
-                new_revision,
-                command.next_status.as_str(),
-                command.occurred_at,
-                command.proposal_id,
-                actual_revision,
-                actual_status.as_str(),
-            ],
-        )?;
-        if updated != 1 {
-            return Err(StoreError::InvariantViolation(
-                "review head update changed an unexpected row count".into(),
-            ));
-        }
-        update_operation_state_for_review(
-            &transaction,
-            &run_id,
-            command.next_status,
-            &command.occurred_at,
-            command.kind.as_str(),
-        )?;
+        let session = append_review_event_in_transaction(&transaction, command)?;
         transaction.commit()?;
-        self.get_review_session(&command.proposal_id)
+        Ok(session)
     }
 
     pub fn list_review_events(&self, proposal_id: &str) -> StoreResult<Vec<ReviewEventRecord>> {
@@ -503,6 +428,94 @@ impl OptimizerStore {
         }
         Ok(())
     }
+}
+
+pub(crate) fn append_review_event_in_transaction(
+    transaction: &Transaction<'_>,
+    command: &AppendReviewEvent,
+) -> StoreResult<ReviewSessionRecord> {
+    validate_review_event(command)?;
+    let (run_id, actual_revision, actual_status_value): (String, i64, String) = transaction
+        .query_row(
+            "SELECT run_id, revision, status FROM patch_review_head WHERE proposal_id = ?1",
+            [&command.proposal_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?
+        .ok_or_else(|| StoreError::NotFound {
+            entity: "patch_review",
+            id: command.proposal_id.clone(),
+        })?;
+    let actual_status = parse_review_status(&actual_status_value)?;
+    if actual_revision != command.expected_revision || actual_status != command.expected_status {
+        return Err(StoreError::StateConflict {
+            entity: "patch_review",
+            id: command.proposal_id.clone(),
+            expected_revision: command.expected_revision,
+            actual_revision,
+            expected_state: command.expected_status.as_str().into(),
+            actual_state: actual_status.as_str().into(),
+        });
+    }
+    assert_review_transition(command)?;
+    let new_revision = actual_revision + 1;
+    let sequence: i64 = transaction.query_row(
+        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM patch_review_event WHERE proposal_id = ?1",
+        [&command.proposal_id],
+        |row| row.get(0),
+    )?;
+    transaction.execute(
+        "INSERT INTO patch_review_event(
+           id, proposal_id, sequence, base_revision, new_revision, kind,
+           previous_status, next_status, hunk_id, decision, payload_json, occurred_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            command.id,
+            command.proposal_id,
+            sequence,
+            actual_revision,
+            new_revision,
+            command.kind.as_str(),
+            actual_status.as_str(),
+            command.next_status.as_str(),
+            command.hunk_id,
+            command.decision.map(ReviewDecision::as_str),
+            command.payload_json,
+            command.occurred_at,
+        ],
+    )?;
+    let updated = transaction.execute(
+        "UPDATE patch_review_head
+         SET revision = ?1, status = ?2, updated_at = ?3
+         WHERE proposal_id = ?4 AND revision = ?5 AND status = ?6",
+        params![
+            new_revision,
+            command.next_status.as_str(),
+            command.occurred_at,
+            command.proposal_id,
+            actual_revision,
+            actual_status.as_str(),
+        ],
+    )?;
+    if updated != 1 {
+        return Err(StoreError::InvariantViolation(
+            "review head update changed an unexpected row count".into(),
+        ));
+    }
+    update_operation_state_for_review(
+        transaction,
+        &run_id,
+        command.next_status,
+        &command.occurred_at,
+        command.kind.as_str(),
+    )?;
+    Ok(ReviewSessionRecord {
+        proposal_id: command.proposal_id.clone(),
+        run_id,
+        revision: new_revision,
+        status: command.next_status,
+        updated_at: command.occurred_at.clone(),
+    })
 }
 
 struct RawOperationRun {

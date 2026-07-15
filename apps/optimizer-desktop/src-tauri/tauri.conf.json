@@ -4,12 +4,15 @@
   "version": "0.1.0",
   "identifier": "local.optimizer.desktop",
   "build": {
+    "beforeBuildCommand": "npm.cmd run build",
     "frontendDist": "../dist"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "Optimizer System",
         "width": 1280,
         "height": 800,
@@ -19,10 +22,11 @@
     ],
     "security": {
       "capabilities": ["main-local"],
-      "csp": "default-src 'self'; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; script-src 'self'; img-src 'self' asset: data:; style-src 'self'; connect-src ipc: http://ipc.localhost"
     }
   },
   "bundle": {
-    "active": false
+    "active": false,
+    "icon": []
   }
 }

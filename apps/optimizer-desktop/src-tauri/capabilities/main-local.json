@@ -6,11 +6,14 @@
   "permissions": [
     "allow-project-session",
     "allow-workspace-read",
+    "allow-style-library",
     "allow-workspace-write",
+    "allow-project-export",
     "allow-version-read",
     "allow-version-write",
     "allow-operation-write",
     "allow-operation-audit-read",
-    "allow-provider-secret-manage"
+    "allow-provider-secret-manage",
+    "allow-model-execution"
   ]
 }

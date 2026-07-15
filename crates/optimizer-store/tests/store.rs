@@ -3,12 +3,12 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use optimizer_store::{
-    AppendReviewEvent, ApplyBlockEdit, CURRENT_SCHEMA_VERSION, CreateSnapshot,
-    MINIMUM_SQLITE_VERSION, ModelUsageRecord, NewContextPacket, NewOperationArtifact,
-    NewOperationLifecycleEvent, NewOperationRun, OperationArtifactKind, OperationFailureRecord,
-    OperationState, OptimizerStore, PersistOperationBundle, ProjectSeed, RestoreSnapshot,
-    ReviewDecision, ReviewEventKind, ReviewSessionStatus, SeedBlock, SeedDocument, StoreError,
-    encode_snapshot,
+    AppendReviewEvent, ApplyBlockEdit, CURRENT_SCHEMA_VERSION, CreateDocumentWithBlock,
+    CreateSnapshot, CreateStyleSample, MINIMUM_SQLITE_VERSION, ModelUsageRecord, NewContextPacket,
+    NewOperationArtifact, NewOperationLifecycleEvent, NewOperationRun, OperationArtifactKind,
+    OperationFailureRecord, OperationState, OptimizerStore, PersistOperationBundle, ProjectSeed,
+    RestoreSnapshot, ReviewDecision, ReviewEventKind, ReviewSessionStatus, SeedBlock, SeedDocument,
+    SetStyleSampleStatus, StoreError, encode_snapshot,
 };
 
 struct TempDatabase {
@@ -91,6 +91,7 @@ fn edit(commit_id: &str, expected_revision: i64, expected_hash: &str) -> ApplyBl
         actor_type: "human".into(),
         actor_id: Some("user-local".into()),
         occurred_at: "2026-07-14T00:01:00.000Z".into(),
+        review_event: None,
     }
 }
 
@@ -166,6 +167,177 @@ fn opens_with_safe_bundled_sqlite_and_migrates_once() {
     assert_eq!(diagnostics.journal_mode.to_ascii_lowercase(), "wal");
     assert!(diagnostics.foreign_keys);
     assert_eq!(diagnostics.synchronous, 2);
+}
+
+#[test]
+fn stores_style_samples_separately_and_archives_with_optimistic_concurrency() {
+    let temp = TempDatabase::new();
+    let mut store = open_seeded(&temp.database);
+    let created = store
+        .create_style_sample(&CreateStyleSample {
+            id: "style-1".into(),
+            project_id: "project-1".into(),
+            title: "短句节奏".into(),
+            content: "雨停了。她仍然没有回头。".into(),
+            content_hash: "sha256:style-1".into(),
+            sensitivity: "local_sensitive".into(),
+            created_at: "2026-07-15T01:00:00.000Z".into(),
+        })
+        .unwrap();
+    assert_eq!(created.status, "canonical");
+    assert_eq!(created.revision, 0);
+    assert_eq!(
+        store.list_style_samples("project-1").unwrap(),
+        vec![created.clone()]
+    );
+
+    let archived = store
+        .set_style_sample_status(&SetStyleSampleStatus {
+            project_id: "project-1".into(),
+            id: created.id,
+            expected_revision: 0,
+            status: "archived".into(),
+            updated_at: "2026-07-15T01:01:00.000Z".into(),
+        })
+        .unwrap();
+    assert_eq!(archived.status, "archived");
+    assert_eq!(archived.revision, 1);
+
+    let stale = store
+        .set_style_sample_status(&SetStyleSampleStatus {
+            project_id: "project-1".into(),
+            id: archived.id,
+            expected_revision: 0,
+            status: "canonical".into(),
+            updated_at: "2026-07-15T01:02:00.000Z".into(),
+        })
+        .unwrap_err();
+    assert!(matches!(stale, StoreError::StateConflict { .. }));
+}
+
+#[test]
+fn creates_a_document_block_and_commit_atomically() {
+    let temp = TempDatabase::new();
+    let mut store = open_seeded(&temp.database);
+    let command = CreateDocumentWithBlock {
+        document_id: "document-2".into(),
+        document_parent_id: None,
+        document_kind: "chapter".into(),
+        document_title: "第二章".into(),
+        document_order_key: "z-document-2".into(),
+        block_id: "block-2".into(),
+        block_kind: "paragraph".into(),
+        block_order_key: "a0".into(),
+        block_content_json: r#"{"type":"paragraph","content":[]}"#.into(),
+        block_plain_text: String::new(),
+        block_content_hash: "sha256:block-2".into(),
+        block_locked: false,
+        commit_id: "commit-document-2".into(),
+        branch_id: "branch-main".into(),
+        expected_head_commit_id: "commit-initial".into(),
+        expected_project_revision: 0,
+        new_root_hash: "sha256:root-document-2".into(),
+        actor_type: "user".into(),
+        actor_id: None,
+        occurred_at: "2026-07-15T02:00:00.000Z".into(),
+    };
+    let receipt = store.create_document_with_block(&command).unwrap();
+    assert_eq!(receipt.project_revision, 1);
+    assert_eq!(store.list_documents("project-1").unwrap().len(), 2);
+    assert_eq!(store.list_blocks("project-1").unwrap().len(), 2);
+    assert_eq!(
+        store.get_project("project-1").unwrap().head_commit_id,
+        command.commit_id
+    );
+
+    let stale = store.create_document_with_block(&CreateDocumentWithBlock {
+        document_id: "document-stale".into(),
+        block_id: "block-stale".into(),
+        commit_id: "commit-stale".into(),
+        ..command
+    });
+    assert!(matches!(stale, Err(StoreError::StateConflict { .. })));
+    assert_eq!(store.list_documents("project-1").unwrap().len(), 2);
+}
+
+#[test]
+fn restores_across_document_creation_by_archiving_and_reviving_structure() {
+    let temp = TempDatabase::new();
+    let mut store = open_seeded(&temp.database);
+    let before = store
+        .create_head_snapshot(
+            "snapshot-before-document",
+            "project-1",
+            "2026-07-15T02:00:00.000Z",
+        )
+        .unwrap();
+    store
+        .create_document_with_block(&CreateDocumentWithBlock {
+            document_id: "document-2".into(),
+            document_parent_id: None,
+            document_kind: "chapter".into(),
+            document_title: "第二章".into(),
+            document_order_key: "z-document-2".into(),
+            block_id: "block-2".into(),
+            block_kind: "paragraph".into(),
+            block_order_key: "a0".into(),
+            block_content_json:
+                r#"{"type":"paragraph","content":[{"type":"text","text":"new chapter"}]}"#.into(),
+            block_plain_text: "new chapter".into(),
+            block_content_hash: "sha256:block-2".into(),
+            block_locked: false,
+            commit_id: "commit-document-2".into(),
+            branch_id: "branch-main".into(),
+            expected_head_commit_id: "commit-initial".into(),
+            expected_project_revision: 0,
+            new_root_hash: "sha256:root-document-2".into(),
+            actor_type: "user".into(),
+            actor_id: None,
+            occurred_at: "2026-07-15T02:01:00.000Z".into(),
+        })
+        .unwrap();
+    let after = store
+        .create_head_snapshot(
+            "snapshot-after-document",
+            "project-1",
+            "2026-07-15T02:02:00.000Z",
+        )
+        .unwrap();
+
+    let back = store
+        .restore_snapshot(&RestoreSnapshot {
+            snapshot_id: before.id,
+            branch_id: "branch-main".into(),
+            new_commit_id: "commit-restore-before".into(),
+            edit_id_prefix: "edit-restore-before".into(),
+            actor_type: "user".into(),
+            actor_id: None,
+            occurred_at: "2026-07-15T02:03:00.000Z".into(),
+        })
+        .unwrap();
+    assert_eq!(back.changed_blocks, 1);
+    assert_eq!(store.list_documents("project-1").unwrap().len(), 1);
+    assert_eq!(store.list_blocks("project-1").unwrap().len(), 1);
+
+    let forward = store
+        .restore_snapshot(&RestoreSnapshot {
+            snapshot_id: after.id,
+            branch_id: "branch-main".into(),
+            new_commit_id: "commit-restore-after".into(),
+            edit_id_prefix: "edit-restore-after".into(),
+            actor_type: "user".into(),
+            actor_id: None,
+            occurred_at: "2026-07-15T02:04:00.000Z".into(),
+        })
+        .unwrap();
+    assert_eq!(forward.changed_blocks, 1);
+    assert_eq!(store.list_documents("project-1").unwrap().len(), 2);
+    assert_eq!(store.list_blocks("project-1").unwrap().len(), 2);
+    assert_eq!(
+        store.get_block("block-2").unwrap().plain_text,
+        "new chapter"
+    );
+    store.verify_invariants().unwrap();
 }
 
 #[test]

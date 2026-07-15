@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -8,10 +8,12 @@ use rusqlite::{Connection, MAIN_DB, OptionalExtension, Transaction, TransactionB
 use crate::error::{StoreError, StoreResult};
 use crate::migration::{CURRENT_SCHEMA_VERSION, migrate};
 use crate::model::{
-    ApplyBlockEdit, BlockRecord, BlockSearchHit, BranchRecord, CommitRecord, CreateSnapshot,
-    DocumentRecord, EditReceipt, ProjectRecord, ProjectSeed, RestoreReceipt, RestoreSnapshot,
-    SnapshotRecord,
+    ApplyBlockEdit, BlockRecord, BlockSearchHit, BranchRecord, CommitRecord, CreateDocumentReceipt,
+    CreateDocumentWithBlock, CreateSnapshot, CreateStyleSample, DocumentRecord, EditReceipt,
+    ProjectRecord, ProjectSeed, RestoreReceipt, RestoreSnapshot, ReviewEventKind,
+    ReviewSessionStatus, SetStyleSampleStatus, SnapshotRecord, StyleSampleRecord,
 };
+use crate::operation::append_review_event_in_transaction;
 use crate::snapshot::{
     ProjectSnapshotV1, SNAPSHOT_CODEC, SNAPSHOT_CODEC_VERSION, SNAPSHOT_SCHEMA_VERSION,
     SnapshotBlock, SnapshotBranch, SnapshotCommit, SnapshotDocument, SnapshotProject,
@@ -220,6 +222,259 @@ impl OptimizerStore {
                 entity: "branch",
                 id: branch_id.to_owned(),
             })
+    }
+
+    pub fn list_style_samples(&self, project_id: &str) -> StoreResult<Vec<StyleSampleRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, project_id, title, content, content_hash, status, sensitivity,
+                    revision, created_at, updated_at
+             FROM style_sample
+             WHERE project_id = ?1
+             ORDER BY status, updated_at DESC, id",
+        )?;
+        statement
+            .query_map([project_id], map_style_sample)?
+            .collect::<Result<_, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn create_style_sample(
+        &mut self,
+        command: &CreateStyleSample,
+    ) -> StoreResult<StyleSampleRecord> {
+        validate_create_style_sample(command)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let project_exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM project WHERE id = ?1)",
+            [&command.project_id],
+            |row| row.get(0),
+        )?;
+        if !project_exists {
+            return Err(StoreError::NotFound {
+                entity: "project",
+                id: command.project_id.clone(),
+            });
+        }
+        transaction.execute(
+            "INSERT INTO style_sample(
+               id, project_id, title, content, content_hash, status, sensitivity,
+               revision, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'canonical', ?6, 0, ?7, ?7)",
+            params![
+                command.id,
+                command.project_id,
+                command.title,
+                command.content,
+                command.content_hash,
+                command.sensitivity,
+                command.created_at,
+            ],
+        )?;
+        let result = read_style_sample(&transaction, &command.project_id, &command.id)?;
+        transaction.commit()?;
+        Ok(result)
+    }
+
+    pub fn set_style_sample_status(
+        &mut self,
+        command: &SetStyleSampleStatus,
+    ) -> StoreResult<StyleSampleRecord> {
+        validate_set_style_sample_status(command)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = read_style_sample(&transaction, &command.project_id, &command.id)?;
+        if current.revision != command.expected_revision {
+            return Err(StoreError::StateConflict {
+                entity: "style_sample",
+                id: command.id.clone(),
+                expected_revision: command.expected_revision,
+                actual_revision: current.revision,
+                expected_state: command.status.clone(),
+                actual_state: current.status,
+            });
+        }
+        if current.status == command.status {
+            transaction.commit()?;
+            return Ok(current);
+        }
+        let updated = transaction.execute(
+            "UPDATE style_sample
+             SET status = ?1, revision = revision + 1, updated_at = ?2
+             WHERE project_id = ?3 AND id = ?4 AND revision = ?5",
+            params![
+                command.status,
+                command.updated_at,
+                command.project_id,
+                command.id,
+                command.expected_revision,
+            ],
+        )?;
+        if updated != 1 {
+            return Err(StoreError::InvariantViolation(
+                "style sample status update changed an unexpected row count".into(),
+            ));
+        }
+        let result = read_style_sample(&transaction, &command.project_id, &command.id)?;
+        transaction.commit()?;
+        Ok(result)
+    }
+
+    pub fn create_document_with_block(
+        &mut self,
+        command: &CreateDocumentWithBlock,
+    ) -> StoreResult<CreateDocumentReceipt> {
+        validate_create_document(command)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (project_id, previous_head, project_revision): (String, String, i64) = transaction
+            .query_row(
+                "SELECT b.project_id, b.head_commit_id, p.revision
+                 FROM branch AS b JOIN project AS p ON p.id = b.project_id
+                 WHERE b.id = ?1",
+                [&command.branch_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NotFound {
+                entity: "branch",
+                id: command.branch_id.clone(),
+            })?;
+        if previous_head != command.expected_head_commit_id
+            || project_revision != command.expected_project_revision
+        {
+            return Err(StoreError::StateConflict {
+                entity: "branch",
+                id: command.branch_id.clone(),
+                expected_revision: command.expected_project_revision,
+                actual_revision: project_revision,
+                expected_state: command.expected_head_commit_id.clone(),
+                actual_state: previous_head,
+            });
+        }
+        if let Some(parent_id) = &command.document_parent_id {
+            let parent_exists: bool = transaction.query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM document
+                   WHERE id = ?1 AND project_id = ?2 AND deleted_at IS NULL
+                 )",
+                params![parent_id, project_id],
+                |row| row.get(0),
+            )?;
+            if !parent_exists {
+                return Err(StoreError::NotFound {
+                    entity: "document",
+                    id: parent_id.clone(),
+                });
+            }
+        }
+        transaction.execute(
+            "INSERT INTO document(id, project_id, parent_id, kind, title, order_key, revision)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+            params![
+                command.document_id,
+                project_id,
+                command.document_parent_id,
+                command.document_kind,
+                command.document_title,
+                command.document_order_key,
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO block(
+               id, document_id, kind, order_key, content_json, plain_text,
+               content_hash, revision, locked
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)",
+            params![
+                command.block_id,
+                command.document_id,
+                command.block_kind,
+                command.block_order_key,
+                command.block_content_json,
+                command.block_plain_text,
+                command.block_content_hash,
+                i64::from(command.block_locked),
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO commit_node(id, project_id, root_hash, reason, actor_type, actor_id, created_at)
+             VALUES (?1, ?2, ?3, 'document_create', ?4, ?5, ?6)",
+            params![
+                command.commit_id,
+                project_id,
+                command.new_root_hash,
+                command.actor_type,
+                command.actor_id,
+                command.occurred_at,
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO commit_parent(commit_id, parent_id, position) VALUES (?1, ?2, 0)",
+            params![command.commit_id, previous_head],
+        )?;
+        transaction.execute(
+            "INSERT INTO change_set(
+               commit_id, position, entity_type, entity_id, operation,
+               before_hash, after_hash, edit_journal_id
+             ) VALUES (?1, 0, 'document', ?2, 'create', NULL, NULL, NULL)",
+            params![command.commit_id, command.document_id],
+        )?;
+        transaction.execute(
+            "INSERT INTO change_set(
+               commit_id, position, entity_type, entity_id, operation,
+               before_hash, after_hash, edit_journal_id
+             ) VALUES (?1, 1, 'block', ?2, 'create', NULL, ?3, NULL)",
+            params![
+                command.commit_id,
+                command.block_id,
+                command.block_content_hash
+            ],
+        )?;
+        let branch_updated = transaction.execute(
+            "UPDATE branch SET head_commit_id = ?1, updated_at = ?2
+             WHERE id = ?3 AND head_commit_id = ?4",
+            params![
+                command.commit_id,
+                command.occurred_at,
+                command.branch_id,
+                previous_head,
+            ],
+        )?;
+        if branch_updated != 1 {
+            return Err(StoreError::InvariantViolation(
+                "document creation branch update changed an unexpected row count".into(),
+            ));
+        }
+        let next_revision = project_revision + 1;
+        let project_updated = transaction.execute(
+            "UPDATE project
+             SET head_commit_id = ?1, revision = ?2, updated_at = ?3
+             WHERE id = ?4 AND head_commit_id = ?5 AND revision = ?6",
+            params![
+                command.commit_id,
+                next_revision,
+                command.occurred_at,
+                project_id,
+                previous_head,
+                project_revision,
+            ],
+        )?;
+        if project_updated != 1 {
+            return Err(StoreError::InvariantViolation(
+                "document creation project update changed an unexpected row count".into(),
+            ));
+        }
+        transaction.commit()?;
+        Ok(CreateDocumentReceipt {
+            document_id: command.document_id.clone(),
+            block_id: command.block_id.clone(),
+            commit_id: command.commit_id.clone(),
+            previous_head_commit_id: previous_head,
+            project_revision: next_revision,
+        })
     }
 
     pub fn list_documents(&self, project_id: &str) -> StoreResult<Vec<DocumentRecord>> {
@@ -439,6 +694,21 @@ impl OptimizerStore {
             return Err(StoreError::InvariantViolation(
                 "project head update changed an unexpected row count".into(),
             ));
+        }
+        if let Some(review_event) = &command.review_event {
+            if review_event.kind != ReviewEventKind::Apply
+                || review_event.expected_status != ReviewSessionStatus::Ready
+                || review_event.next_status != ReviewSessionStatus::Applied
+                || review_event.occurred_at != command.occurred_at
+                || command.reason != "ai_accept"
+                || command.actor_type != "model"
+            {
+                return Err(StoreError::Validation(
+                    "reviewed edit must atomically apply one ready proposal as a model ai_accept commit"
+                        .into(),
+                ));
+            }
+            append_review_event_in_transaction(&transaction, review_event)?;
         }
         transaction.commit()?;
 
@@ -706,24 +976,246 @@ impl OptimizerStore {
             ));
         }
 
-        let current_structure = read_structure_signature(&transaction, &branch_project_id)?;
-        let snapshot_structure = snapshot_structure_signature(&snapshot);
-        if current_structure != snapshot_structure {
-            return Err(StoreError::Validation(
-                "document or block structure changed; structural restore is not supported by codec v1"
-                    .into(),
-            ));
-        }
-
         struct RestoredChange {
-            edit_id: String,
-            block_id: String,
-            before_hash: String,
-            after_hash: String,
+            entity_type: &'static str,
+            entity_id: String,
+            operation: &'static str,
+            before_hash: Option<String>,
+            after_hash: Option<String>,
+            edit_id: Option<String>,
         }
         let mut changes = Vec::new();
         let mut changed_documents = BTreeSet::new();
+        let mut revised_documents = BTreeSet::new();
+        let current_documents = read_active_documents(&transaction, &branch_project_id)?;
+        let current_blocks = read_active_snapshot_blocks(&transaction, &branch_project_id)?;
+        let current_document_map: BTreeMap<_, _> = current_documents
+            .iter()
+            .map(|document| (document.id.as_str(), document))
+            .collect();
+        let snapshot_document_map: BTreeMap<_, _> = snapshot
+            .documents
+            .iter()
+            .map(|document| (document.id.as_str(), document))
+            .collect();
+        let current_block_map: BTreeMap<_, _> = current_blocks
+            .iter()
+            .map(|block| (block.id.as_str(), block))
+            .collect();
+        let snapshot_block_map: BTreeMap<_, _> = snapshot
+            .blocks
+            .iter()
+            .map(|block| (block.id.as_str(), block))
+            .collect();
+
+        for (id, target) in &snapshot_document_map {
+            let Some(current) = current_document_map.get(id) else {
+                continue;
+            };
+            if current.parent_id != target.parent_id
+                || current.kind != target.kind
+                || current.title != target.title
+                || current.order_key != target.order_key
+            {
+                return Err(StoreError::Validation(format!(
+                    "document metadata changed and cannot be structurally restored: {id}"
+                )));
+            }
+        }
+        for (id, target) in &snapshot_block_map {
+            let Some(current) = current_block_map.get(id) else {
+                continue;
+            };
+            if current.document_id != target.document_id
+                || current.kind != target.kind
+                || current.order_key != target.order_key
+                || current.locked != target.locked
+            {
+                return Err(StoreError::Validation(format!(
+                    "block metadata changed and cannot be structurally restored: {id}"
+                )));
+            }
+        }
+
+        for block in current_blocks
+            .iter()
+            .filter(|block| !snapshot_block_map.contains_key(block.id.as_str()))
+        {
+            let updated = transaction.execute(
+                "UPDATE block SET deleted_at = ?1
+                 WHERE id = ?2 AND deleted_at IS NULL",
+                params![command.occurred_at, block.id],
+            )?;
+            if updated != 1 {
+                return Err(StoreError::InvariantViolation(
+                    "structural restore could not archive a block".into(),
+                ));
+            }
+            changes.push(RestoredChange {
+                entity_type: "block",
+                entity_id: block.id.clone(),
+                operation: "archive",
+                before_hash: Some(block.content_hash.clone()),
+                after_hash: None,
+                edit_id: None,
+            });
+            changed_documents.insert(block.document_id.clone());
+        }
+        for document in current_documents
+            .iter()
+            .filter(|document| !snapshot_document_map.contains_key(document.id.as_str()))
+        {
+            let updated = transaction.execute(
+                "UPDATE document SET deleted_at = ?1, revision = revision + 1
+                 WHERE id = ?2 AND project_id = ?3 AND deleted_at IS NULL",
+                params![command.occurred_at, document.id, branch_project_id],
+            )?;
+            if updated != 1 {
+                return Err(StoreError::InvariantViolation(
+                    "structural restore could not archive a document".into(),
+                ));
+            }
+            revised_documents.insert(document.id.clone());
+            changes.push(RestoredChange {
+                entity_type: "document",
+                entity_id: document.id.clone(),
+                operation: "archive",
+                before_hash: None,
+                after_hash: None,
+                edit_id: None,
+            });
+        }
+
+        for document in snapshot
+            .documents
+            .iter()
+            .filter(|document| !current_document_map.contains_key(document.id.as_str()))
+        {
+            let existing: Option<(String, i64)> = transaction
+                .query_row(
+                    "SELECT project_id, revision FROM document WHERE id = ?1",
+                    [&document.id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            match existing {
+                Some((existing_project_id, revision)) => {
+                    if existing_project_id != branch_project_id {
+                        return Err(StoreError::Validation(
+                            "snapshot document id belongs to another project".into(),
+                        ));
+                    }
+                    transaction.execute(
+                        "UPDATE document
+                         SET parent_id = ?1, kind = ?2, title = ?3, order_key = ?4,
+                             revision = ?5, deleted_at = NULL
+                         WHERE id = ?6",
+                        params![
+                            document.parent_id,
+                            document.kind,
+                            document.title,
+                            document.order_key,
+                            revision,
+                            document.id,
+                        ],
+                    )?;
+                }
+                None => {
+                    transaction.execute(
+                        "INSERT INTO document(
+                           id, project_id, parent_id, kind, title, order_key, revision, deleted_at
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+                        params![
+                            document.id,
+                            branch_project_id,
+                            document.parent_id,
+                            document.kind,
+                            document.title,
+                            document.order_key,
+                            document.revision,
+                        ],
+                    )?;
+                }
+            }
+            revised_documents.insert(document.id.clone());
+            changes.push(RestoredChange {
+                entity_type: "document",
+                entity_id: document.id.clone(),
+                operation: "restore",
+                before_hash: None,
+                after_hash: None,
+                edit_id: None,
+            });
+        }
+
+        for block in snapshot
+            .blocks
+            .iter()
+            .filter(|block| !current_block_map.contains_key(block.id.as_str()))
+        {
+            let existing: Option<i64> = transaction
+                .query_row(
+                    "SELECT revision FROM block WHERE id = ?1",
+                    [&block.id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            match existing {
+                Some(revision) => {
+                    transaction.execute(
+                        "UPDATE block
+                         SET document_id = ?1, kind = ?2, order_key = ?3, content_json = ?4,
+                             plain_text = ?5, content_hash = ?6, revision = ?7, locked = ?8,
+                             deleted_at = NULL
+                         WHERE id = ?9",
+                        params![
+                            block.document_id,
+                            block.kind,
+                            block.order_key,
+                            block.content_json,
+                            block.plain_text,
+                            block.content_hash,
+                            revision,
+                            i64::from(block.locked),
+                            block.id,
+                        ],
+                    )?;
+                }
+                None => {
+                    transaction.execute(
+                        "INSERT INTO block(
+                           id, document_id, kind, order_key, content_json, plain_text,
+                           content_hash, revision, locked, deleted_at
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL)",
+                        params![
+                            block.id,
+                            block.document_id,
+                            block.kind,
+                            block.order_key,
+                            block.content_json,
+                            block.plain_text,
+                            block.content_hash,
+                            block.revision,
+                            i64::from(block.locked),
+                        ],
+                    )?;
+                }
+            }
+            changes.push(RestoredChange {
+                entity_type: "block",
+                entity_id: block.id.clone(),
+                operation: "restore",
+                before_hash: None,
+                after_hash: Some(block.content_hash.clone()),
+                edit_id: None,
+            });
+            changed_documents.insert(block.document_id.clone());
+        }
+
         for block in &snapshot.blocks {
+            if !current_block_map.contains_key(block.id.as_str()) {
+                continue;
+            }
             let current = read_block_for_edit(&transaction, &block.id)?;
             if current.content_hash == block.content_hash
                 && current.content_json == block.content_json
@@ -773,10 +1265,12 @@ impl OptimizerStore {
                 ],
             )?;
             changes.push(RestoredChange {
-                edit_id,
-                block_id: block.id.clone(),
-                before_hash: current.content_hash,
-                after_hash: block.content_hash.clone(),
+                entity_type: "block",
+                entity_id: block.id.clone(),
+                operation: "restore",
+                before_hash: Some(current.content_hash),
+                after_hash: Some(block.content_hash.clone()),
+                edit_id: Some(edit_id),
             });
             changed_documents.insert(current.document_id);
         }
@@ -785,13 +1279,13 @@ impl OptimizerStore {
                 "snapshot already matches the current project state".into(),
             ));
         }
-        for document_id in changed_documents {
+        for document_id in changed_documents.difference(&revised_documents) {
             let updated = transaction.execute(
                 "UPDATE document SET revision = revision + 1
                  WHERE id = ?1 AND deleted_at IS NULL",
-                [&document_id],
+                [document_id],
             )?;
-            if updated != 1 {
+            if updated > 1 {
                 return Err(StoreError::InvariantViolation(
                     "restore document revision update changed an unexpected row count".into(),
                 ));
@@ -817,11 +1311,13 @@ impl OptimizerStore {
         for (position, change) in changes.iter().enumerate() {
             transaction.execute(
                 "INSERT INTO change_set(commit_id, position, entity_type, entity_id, operation, before_hash, after_hash, edit_journal_id)
-                 VALUES (?1, ?2, 'block', ?3, 'restore', ?4, ?5, ?6)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     command.new_commit_id,
                     position as i64,
-                    change.block_id,
+                    change.entity_type,
+                    change.entity_id,
+                    change.operation,
                     change.before_hash,
                     change.after_hash,
                     change.edit_id
@@ -861,7 +1357,10 @@ impl OptimizerStore {
             commit_id: command.new_commit_id.clone(),
             previous_head_commit_id: previous_head,
             restored_root_hash: snapshot.commit.root_hash,
-            changed_blocks: changes.len(),
+            changed_blocks: changes
+                .iter()
+                .filter(|change| change.entity_type == "block")
+                .count(),
         })
     }
 
@@ -1154,6 +1653,123 @@ fn validate_edit(command: &ApplyBlockEdit) -> StoreResult<()> {
     Ok(())
 }
 
+fn validate_create_style_sample(command: &CreateStyleSample) -> StoreResult<()> {
+    for (field, value) in [
+        ("id", command.id.as_str()),
+        ("project_id", command.project_id.as_str()),
+        ("title", command.title.as_str()),
+        ("content", command.content.as_str()),
+        ("content_hash", command.content_hash.as_str()),
+        ("sensitivity", command.sensitivity.as_str()),
+        ("created_at", command.created_at.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(StoreError::Validation(format!("{field} must not be empty")));
+        }
+    }
+    if !matches!(
+        command.sensitivity.as_str(),
+        "local_sensitive" | "never_send"
+    ) {
+        return Err(StoreError::Validation(
+            "style sample sensitivity is unsupported".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_create_document(command: &CreateDocumentWithBlock) -> StoreResult<()> {
+    for (field, value) in [
+        ("document_id", command.document_id.as_str()),
+        ("document_kind", command.document_kind.as_str()),
+        ("document_title", command.document_title.as_str()),
+        ("document_order_key", command.document_order_key.as_str()),
+        ("block_id", command.block_id.as_str()),
+        ("block_kind", command.block_kind.as_str()),
+        ("block_order_key", command.block_order_key.as_str()),
+        ("block_content_json", command.block_content_json.as_str()),
+        ("block_content_hash", command.block_content_hash.as_str()),
+        ("commit_id", command.commit_id.as_str()),
+        ("branch_id", command.branch_id.as_str()),
+        (
+            "expected_head_commit_id",
+            command.expected_head_commit_id.as_str(),
+        ),
+        ("new_root_hash", command.new_root_hash.as_str()),
+        ("actor_type", command.actor_type.as_str()),
+        ("occurred_at", command.occurred_at.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(StoreError::Validation(format!("{field} must not be empty")));
+        }
+    }
+    if command.expected_project_revision < 0 {
+        return Err(StoreError::Validation(
+            "expected_project_revision must be non-negative".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_set_style_sample_status(command: &SetStyleSampleStatus) -> StoreResult<()> {
+    if command.expected_revision < 0 {
+        return Err(StoreError::Validation(
+            "expected_revision must be non-negative".into(),
+        ));
+    }
+    for (field, value) in [
+        ("project_id", command.project_id.as_str()),
+        ("id", command.id.as_str()),
+        ("status", command.status.as_str()),
+        ("updated_at", command.updated_at.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(StoreError::Validation(format!("{field} must not be empty")));
+        }
+    }
+    if !matches!(command.status.as_str(), "canonical" | "archived") {
+        return Err(StoreError::Validation(
+            "style sample status is unsupported".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn map_style_sample(row: &rusqlite::Row<'_>) -> rusqlite::Result<StyleSampleRecord> {
+    Ok(StyleSampleRecord {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        title: row.get(2)?,
+        content: row.get(3)?,
+        content_hash: row.get(4)?,
+        status: row.get(5)?,
+        sensitivity: row.get(6)?,
+        revision: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+    })
+}
+
+fn read_style_sample(
+    transaction: &Transaction<'_>,
+    project_id: &str,
+    id: &str,
+) -> StoreResult<StyleSampleRecord> {
+    transaction
+        .query_row(
+            "SELECT id, project_id, title, content, content_hash, status, sensitivity,
+                    revision, created_at, updated_at
+             FROM style_sample WHERE project_id = ?1 AND id = ?2",
+            params![project_id, id],
+            map_style_sample,
+        )
+        .optional()?
+        .ok_or_else(|| StoreError::NotFound {
+            entity: "style_sample",
+            id: id.to_owned(),
+        })
+}
+
 fn map_block_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<BlockRecord> {
     Ok(BlockRecord {
         id: row.get(0)?,
@@ -1287,72 +1903,6 @@ fn read_active_snapshot_blocks(
             })
         })?
         .collect::<Result<_, _>>()?)
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct StructureSignature {
-    documents: Vec<(String, Option<String>, String, String)>,
-    blocks: Vec<(String, String, String, String, bool)>,
-}
-
-fn read_structure_signature(
-    transaction: &Transaction<'_>,
-    project_id: &str,
-) -> StoreResult<StructureSignature> {
-    let documents = read_active_documents(transaction, project_id)?
-        .into_iter()
-        .map(|document| {
-            (
-                document.id,
-                document.parent_id,
-                document.kind,
-                document.order_key,
-            )
-        })
-        .collect();
-    let blocks = read_active_snapshot_blocks(transaction, project_id)?
-        .into_iter()
-        .map(|block| {
-            (
-                block.id,
-                block.document_id,
-                block.kind,
-                block.order_key,
-                block.locked,
-            )
-        })
-        .collect();
-    Ok(StructureSignature { documents, blocks })
-}
-
-fn snapshot_structure_signature(snapshot: &ProjectSnapshotV1) -> StructureSignature {
-    StructureSignature {
-        documents: snapshot
-            .documents
-            .iter()
-            .map(|document| {
-                (
-                    document.id.clone(),
-                    document.parent_id.clone(),
-                    document.kind.clone(),
-                    document.order_key.clone(),
-                )
-            })
-            .collect(),
-        blocks: snapshot
-            .blocks
-            .iter()
-            .map(|block| {
-                (
-                    block.id.clone(),
-                    block.document_id.clone(),
-                    block.kind.clone(),
-                    block.order_key.clone(),
-                    block.locked,
-                )
-            })
-            .collect(),
-    }
 }
 
 #[cfg(test)]

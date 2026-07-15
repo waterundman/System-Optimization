@@ -1,11 +1,14 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fmt::Write as _;
 
 use optimizer_store::{
-    ApplyBlockEdit, BlockRecord, CommitRecord, DocumentRecord, EditReceipt, OptimizerStore,
-    RestoreSnapshot, SnapshotRecord, StoreError,
+    AppendReviewEvent, ApplyBlockEdit, BlockRecord, CommitRecord, CreateDocumentWithBlock,
+    CreateStyleSample, DocumentRecord, EditReceipt, OperationArtifactKind, OptimizerStore,
+    RestoreSnapshot, ReviewDecision, ReviewEventKind, ReviewSessionStatus, SetStyleSampleStatus,
+    SnapshotRecord, StoreError, StyleSampleRecord,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
@@ -15,6 +18,8 @@ use uuid::Uuid;
 const WORKSPACE_SCHEMA_VERSION: u32 = 1;
 const MAX_CONTENT_JSON_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PLAIN_TEXT_BYTES: usize = 2 * 1024 * 1024;
+const MAX_STYLE_SAMPLE_BYTES: usize = 64 * 1024;
+const MAX_STYLE_TITLE_CHARS: usize = 120;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,6 +58,52 @@ pub struct WorkspaceBlock {
     pub locked: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StyleSample {
+    pub schema_version: u32,
+    pub id: String,
+    pub title: String,
+    pub content: String,
+    pub content_hash: String,
+    pub status: String,
+    pub sensitivity: String,
+    pub revision: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateStyleSampleSpec {
+    pub title: String,
+    pub content: String,
+    pub sensitivity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetStyleSampleStatusSpec {
+    pub id: String,
+    pub expected_revision: i64,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateDocumentSpec {
+    pub title: String,
+    pub initial_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateDocumentResponse {
+    pub schema_version: u32,
+    pub commit_id: String,
+    pub previous_head_commit_id: String,
+    pub project_revision: i64,
+    pub document: WorkspaceDocument,
+    pub block: WorkspaceBlock,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SaveBlockSpec {
     pub block_id: String,
@@ -72,6 +123,24 @@ pub struct SaveBlockResponse {
     pub head_commit_id: String,
     pub project_revision: i64,
     pub block: WorkspaceBlock,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyReviewedProposalSpec {
+    pub proposal_id: String,
+    pub expected_review_revision: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyReviewedProposalResponse {
+    pub schema_version: u32,
+    pub proposal_id: String,
+    pub run_id: String,
+    pub review_revision: i64,
+    pub accepted_hunks: usize,
+    pub rejected_hunks: usize,
+    pub save: SaveBlockResponse,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -128,6 +197,8 @@ pub struct RestoreCheckpointResponse {
 #[derive(Debug)]
 pub enum WorkspaceCommandError {
     Validation(String),
+    DocumentValidation(String),
+    StyleValidation(String),
     NoChanges,
     StoredContent {
         block_id: String,
@@ -142,6 +213,8 @@ impl WorkspaceCommandError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Validation(_) => "INVALID_BLOCK_EDIT",
+            Self::DocumentValidation(_) => "INVALID_DOCUMENT",
+            Self::StyleValidation(_) => "INVALID_STYLE_SAMPLE",
             Self::NoChanges => "NO_CHANGES",
             Self::StoredContent { .. } => "PROJECT_CONTENT_INVALID",
             Self::Json(_) => "BLOCK_CONTENT_INVALID",
@@ -160,6 +233,8 @@ impl WorkspaceCommandError {
     pub fn public_message(&self) -> String {
         match self {
             Self::Validation(message) => message.clone(),
+            Self::DocumentValidation(message) => message.clone(),
+            Self::StyleValidation(message) => message.clone(),
             Self::NoChanges => "Block content has not changed".into(),
             Self::StoredContent { block_id, .. } => {
                 format!("Stored content is invalid for block {block_id}")
@@ -186,7 +261,11 @@ impl std::error::Error for WorkspaceCommandError {
         match self {
             Self::StoredContent { source, .. } | Self::Json(source) => Some(source),
             Self::Store(error) => Some(error),
-            Self::Validation(_) | Self::NoChanges | Self::Clock => None,
+            Self::Validation(_)
+            | Self::DocumentValidation(_)
+            | Self::StyleValidation(_)
+            | Self::NoChanges
+            | Self::Clock => None,
         }
     }
 }
@@ -228,6 +307,153 @@ pub(crate) fn load_project_workspace(
         documents,
         blocks,
     })
+}
+
+pub(crate) fn create_document(
+    store: &mut OptimizerStore,
+    project_id: &str,
+    main_branch_id: &str,
+    spec: &CreateDocumentSpec,
+) -> Result<CreateDocumentResponse, WorkspaceCommandError> {
+    let title = spec.title.trim();
+    if title.is_empty() || title.chars().count() > 200 {
+        return Err(WorkspaceCommandError::DocumentValidation(
+            "Document title must contain 1 to 200 characters".into(),
+        ));
+    }
+    if spec.initial_text.len() > MAX_PLAIN_TEXT_BYTES {
+        return Err(WorkspaceCommandError::DocumentValidation(format!(
+            "Initial document text exceeds {MAX_PLAIN_TEXT_BYTES} bytes"
+        )));
+    }
+    let project = store.get_project(project_id)?;
+    let document_id = generated_id("document");
+    let block_id = generated_id("block");
+    let commit_id = generated_id("commit");
+    let content = json!({
+        "type": "paragraph",
+        "content": if spec.initial_text.is_empty() {
+            Vec::<Value>::new()
+        } else {
+            vec![json!({ "type": "text", "text": spec.initial_text })]
+        },
+    });
+    let content_json = serde_json::to_string(&content).map_err(WorkspaceCommandError::Json)?;
+    let content_hash = block_content_hash("paragraph", &content, &spec.initial_text, false)?;
+    let mut blocks = store.list_blocks(project_id)?;
+    blocks.push(BlockRecord {
+        id: block_id.clone(),
+        document_id: document_id.clone(),
+        kind: "paragraph".into(),
+        order_key: "a0".into(),
+        content_json: content_json.clone(),
+        plain_text: spec.initial_text.clone(),
+        content_hash: content_hash.clone(),
+        revision: 0,
+        locked: false,
+    });
+    let root_hash = project_root_hash(
+        blocks
+            .iter()
+            .map(|block| (block.id.as_str(), block.content_hash.as_str())),
+    );
+    let receipt = store.create_document_with_block(&CreateDocumentWithBlock {
+        document_id: document_id.clone(),
+        document_parent_id: None,
+        document_kind: "chapter".into(),
+        document_title: title.to_owned(),
+        document_order_key: format!("z-{document_id}"),
+        block_id: block_id.clone(),
+        block_kind: "paragraph".into(),
+        block_order_key: "a0".into(),
+        block_content_json: content_json,
+        block_plain_text: spec.initial_text.clone(),
+        block_content_hash: content_hash,
+        block_locked: false,
+        commit_id,
+        branch_id: main_branch_id.to_owned(),
+        expected_head_commit_id: project.head_commit_id,
+        expected_project_revision: project.revision,
+        new_root_hash: root_hash,
+        actor_type: "user".into(),
+        actor_id: None,
+        occurred_at: now()?,
+    })?;
+    let document = store
+        .list_documents(project_id)?
+        .into_iter()
+        .find(|item| item.id == receipt.document_id)
+        .ok_or_else(|| {
+            WorkspaceCommandError::Store(StoreError::InvariantViolation(
+                "created document is missing".into(),
+            ))
+        })?;
+    let block = store.get_project_block(project_id, &receipt.block_id)?;
+    Ok(CreateDocumentResponse {
+        schema_version: WORKSPACE_SCHEMA_VERSION,
+        commit_id: receipt.commit_id,
+        previous_head_commit_id: receipt.previous_head_commit_id,
+        project_revision: receipt.project_revision,
+        document: workspace_document(document),
+        block: workspace_block(block)?,
+    })
+}
+
+pub(crate) fn list_style_samples(
+    store: &OptimizerStore,
+    project_id: &str,
+) -> Result<Vec<StyleSample>, WorkspaceCommandError> {
+    store
+        .list_style_samples(project_id)?
+        .into_iter()
+        .map(style_sample)
+        .collect::<Result<Vec<_>, _>>()
+}
+
+pub(crate) fn create_style_sample(
+    store: &mut OptimizerStore,
+    project_id: &str,
+    spec: &CreateStyleSampleSpec,
+) -> Result<StyleSample, WorkspaceCommandError> {
+    validate_style_sample(spec)?;
+    let title = spec.title.trim().to_owned();
+    let content = spec.content.trim().to_owned();
+    let content_hash = sha256(content.as_bytes());
+    let record = store.create_style_sample(&CreateStyleSample {
+        id: generated_id("style"),
+        project_id: project_id.to_owned(),
+        title,
+        content,
+        content_hash,
+        sensitivity: spec.sensitivity.clone(),
+        created_at: now()?,
+    })?;
+    style_sample(record)
+}
+
+pub(crate) fn set_style_sample_status(
+    store: &mut OptimizerStore,
+    project_id: &str,
+    spec: &SetStyleSampleStatusSpec,
+) -> Result<StyleSample, WorkspaceCommandError> {
+    if spec.id.trim().is_empty() || spec.expected_revision < 0 {
+        return Err(WorkspaceCommandError::StyleValidation(
+            "Style sample id and non-negative revision are required".into(),
+        ));
+    }
+    if !matches!(spec.status.as_str(), "canonical" | "archived") {
+        return Err(WorkspaceCommandError::StyleValidation(
+            "Style sample status must be canonical or archived".into(),
+        ));
+    }
+    let record = store.set_style_sample_status(&SetStyleSampleStatus {
+        project_id: project_id.to_owned(),
+        id: spec.id.clone(),
+        expected_revision: spec.expected_revision,
+        status: spec.status.clone(),
+        updated_at: now()?,
+    })?;
+    style_sample(record)
 }
 
 pub(crate) fn save_block(
@@ -295,9 +521,232 @@ pub(crate) fn save_block(
         actor_type: "user".into(),
         actor_id: None,
         occurred_at: now()?,
+        review_event: None,
     };
     let receipt = store.apply_block_edit(&command)?;
     save_response(store, project_id, receipt)
+}
+
+pub(crate) fn apply_reviewed_proposal(
+    store: &mut OptimizerStore,
+    project_id: &str,
+    main_branch_id: &str,
+    spec: &ApplyReviewedProposalSpec,
+) -> Result<ApplyReviewedProposalResponse, WorkspaceCommandError> {
+    if spec.proposal_id.trim().is_empty()
+        || spec.proposal_id.len() > 200
+        || spec.expected_review_revision < 0
+    {
+        return Err(WorkspaceCommandError::Validation(
+            "Proposal id and expected review revision are invalid".into(),
+        ));
+    }
+    let session = store.get_review_session(&spec.proposal_id)?;
+    if session.revision != spec.expected_review_revision
+        || session.status != ReviewSessionStatus::Ready
+    {
+        return Err(WorkspaceCommandError::Store(StoreError::StateConflict {
+            entity: "patch_review",
+            id: spec.proposal_id.clone(),
+            expected_revision: spec.expected_review_revision,
+            actual_revision: session.revision,
+            expected_state: ReviewSessionStatus::Ready.as_str().into(),
+            actual_state: session.status.as_str().into(),
+        }));
+    }
+    let run = store.get_operation_run(&session.run_id)?;
+    if run.project_id != project_id {
+        return Err(WorkspaceCommandError::Validation(
+            "Proposal belongs to another project".into(),
+        ));
+    }
+    let artifact = store.get_operation_artifact(&run.id)?;
+    if artifact.id != spec.proposal_id || artifact.kind != OperationArtifactKind::PatchProposal {
+        return Err(WorkspaceCommandError::Validation(
+            "Proposal artifact binding is invalid".into(),
+        ));
+    }
+    let payload: Value =
+        serde_json::from_str(&artifact.payload_json).map_err(WorkspaceCommandError::Json)?;
+    verify_stored_proposal_hash(&payload, &artifact.binding_hash)?;
+    let proposal: StoredPatchProposal =
+        serde_json::from_value(payload).map_err(WorkspaceCommandError::Json)?;
+    if proposal.schema_version != 2
+        || proposal.id != spec.proposal_id
+        || proposal.operation_run_id != run.id
+        || proposal.base_commit_id != run.base_commit_id
+        || proposal.proposal_hash != artifact.binding_hash
+        || proposal.status != "review"
+    {
+        return Err(WorkspaceCommandError::Validation(
+            "Stored proposal metadata is not bound to its operation".into(),
+        ));
+    }
+
+    let project = store.get_project(project_id)?;
+    if project.head_commit_id != run.base_commit_id {
+        return Err(WorkspaceCommandError::Store(StoreError::StateConflict {
+            entity: "operation_base_commit",
+            id: run.id.clone(),
+            expected_revision: spec.expected_review_revision,
+            actual_revision: session.revision,
+            expected_state: run.base_commit_id.clone(),
+            actual_state: project.head_commit_id,
+        }));
+    }
+    let current = store.get_project_block(project_id, &proposal.target.block_id)?;
+    if current.document_id != proposal.target.document_id
+        || current.revision != proposal.target.base_revision
+        || current.content_hash != proposal.target.base_hash
+        || current.locked
+        || proposal.target.from.block_id != current.id
+        || proposal.target.to.block_id != current.id
+        || proposal.target.from.offset > proposal.target.to.offset
+    {
+        return Err(WorkspaceCommandError::Store(StoreError::Conflict {
+            entity: "proposal_target",
+            id: current.id,
+            expected_revision: proposal.target.base_revision,
+            actual_revision: current.revision,
+            expected_hash: proposal.target.base_hash,
+            actual_hash: current.content_hash,
+        }));
+    }
+
+    let events = store.list_review_events(&spec.proposal_id)?;
+    validate_proposal_hunks(&current.plain_text, &proposal.target, &proposal.hunks)?;
+    let mut decisions = BTreeMap::new();
+    for event in events {
+        if event.kind == ReviewEventKind::Decision {
+            let hunk_id = event.hunk_id.ok_or_else(|| {
+                WorkspaceCommandError::Validation("Decision event has no hunk id".into())
+            })?;
+            let decision = event.decision.ok_or_else(|| {
+                WorkspaceCommandError::Validation("Decision event has no decision".into())
+            })?;
+            decisions.insert(hunk_id, decision);
+        }
+    }
+    let hunk_ids = proposal
+        .hunks
+        .iter()
+        .map(|hunk| hunk.id.as_str())
+        .collect::<BTreeSet<_>>();
+    if decisions.len() != proposal.hunks.len()
+        || decisions.keys().any(|id| !hunk_ids.contains(id.as_str()))
+    {
+        return Err(WorkspaceCommandError::Validation(
+            "Review decisions do not cover exactly every proposal hunk".into(),
+        ));
+    }
+    validate_atomic_decisions(&proposal.hunks, &decisions)?;
+
+    let mut accepted = Vec::new();
+    let mut rejected = Vec::new();
+    for hunk in &proposal.hunks {
+        match decisions.get(&hunk.id) {
+            Some(ReviewDecision::Accepted) => accepted.push(hunk),
+            Some(ReviewDecision::Rejected) => rejected.push(hunk.id.clone()),
+            None => unreachable!("coverage checked above"),
+        }
+    }
+    if accepted.is_empty() {
+        return Err(WorkspaceCommandError::Validation(
+            "A proposal with no accepted hunks must be rejected, not applied".into(),
+        ));
+    }
+    let next_plain_text = apply_proposal_hunks(&current.plain_text, &accepted)?;
+    if next_plain_text.len() > MAX_PLAIN_TEXT_BYTES {
+        return Err(WorkspaceCommandError::Validation(format!(
+            "Block plain text exceeds {MAX_PLAIN_TEXT_BYTES} bytes"
+        )));
+    }
+    let mut next_content: Value =
+        serde_json::from_str(&current.content_json).map_err(WorkspaceCommandError::Json)?;
+    let content = next_content.as_object_mut().ok_or_else(|| {
+        WorkspaceCommandError::Validation("Stored Block content must be an object".into())
+    })?;
+    content.remove("text");
+    content.insert(
+        "content".into(),
+        if next_plain_text.is_empty() {
+            Value::Array(Vec::new())
+        } else {
+            json!([{ "type": "text", "text": next_plain_text }])
+        },
+    );
+    let content_json = serde_json::to_string(&next_content).map_err(WorkspaceCommandError::Json)?;
+    let content_hash = block_content_hash(
+        &current.kind,
+        &next_content,
+        &next_plain_text,
+        current.locked,
+    )?;
+    let blocks = store.list_blocks(project_id)?;
+    let root_hash = project_root_hash(blocks.iter().map(|block| {
+        (
+            block.id.as_str(),
+            if block.id == current.id {
+                content_hash.as_str()
+            } else {
+                block.content_hash.as_str()
+            },
+        )
+    }));
+    let occurred_at = now()?;
+    let commit_id = generated_id("commit");
+    let accepted_ids = accepted
+        .iter()
+        .map(|hunk| hunk.id.clone())
+        .collect::<Vec<_>>();
+    let review_event = AppendReviewEvent {
+        id: generated_id("review-event"),
+        proposal_id: spec.proposal_id.clone(),
+        expected_revision: spec.expected_review_revision,
+        expected_status: ReviewSessionStatus::Ready,
+        kind: ReviewEventKind::Apply,
+        next_status: ReviewSessionStatus::Applied,
+        hunk_id: None,
+        decision: None,
+        payload_json: Some(
+            serde_json::to_string(&json!({
+                "commitId": commit_id,
+                "acceptedHunkIds": accepted_ids.clone(),
+                "rejectedHunkIds": rejected.clone(),
+            }))
+            .map_err(WorkspaceCommandError::Json)?,
+        ),
+        occurred_at: occurred_at.clone(),
+    };
+    let command = ApplyBlockEdit {
+        edit_id: generated_id("edit"),
+        commit_id,
+        branch_id: main_branch_id.into(),
+        expected_head_commit_id: run.base_commit_id,
+        expected_project_revision: project.revision,
+        block_id: current.id,
+        expected_revision: current.revision,
+        expected_hash: current.content_hash,
+        new_content_json: content_json,
+        new_plain_text: next_plain_text,
+        new_content_hash: content_hash,
+        new_root_hash: root_hash,
+        reason: "ai_accept".into(),
+        actor_type: "model".into(),
+        actor_id: Some(run.id.clone()),
+        occurred_at,
+        review_event: Some(review_event),
+    };
+    let receipt = store.apply_block_edit(&command)?;
+    Ok(ApplyReviewedProposalResponse {
+        schema_version: WORKSPACE_SCHEMA_VERSION,
+        proposal_id: spec.proposal_id.clone(),
+        run_id: run.id,
+        review_revision: spec.expected_review_revision + 1,
+        accepted_hunks: accepted_ids.len(),
+        rejected_hunks: rejected.len(),
+        save: save_response(store, project_id, receipt)?,
+    })
 }
 
 pub(crate) fn create_checkpoint(
@@ -365,6 +814,201 @@ pub(crate) fn restore_checkpoint(
     })
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredPatchProposal {
+    schema_version: u32,
+    id: String,
+    operation_run_id: String,
+    base_commit_id: String,
+    target: StoredProposalTarget,
+    hunks: Vec<StoredProposalHunk>,
+    status: String,
+    proposal_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredProposalTarget {
+    document_id: String,
+    block_id: String,
+    base_revision: i64,
+    base_hash: String,
+    from: StoredTextAnchor,
+    to: StoredTextAnchor,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredProposalHunk {
+    id: String,
+    from: StoredTextAnchor,
+    to: StoredTextAnchor,
+    original: String,
+    replacement: String,
+    atomic_group: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredTextAnchor {
+    block_id: String,
+    offset: usize,
+}
+
+fn verify_stored_proposal_hash(
+    payload: &Value,
+    binding_hash: &str,
+) -> Result<(), WorkspaceCommandError> {
+    let mut canonical = payload.clone();
+    let object = canonical.as_object_mut().ok_or_else(|| {
+        WorkspaceCommandError::Validation("Stored proposal payload must be an object".into())
+    })?;
+    let declared = object
+        .remove("proposalHash")
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .ok_or_else(|| {
+            WorkspaceCommandError::Validation("Stored proposal has no proposalHash".into())
+        })?;
+    let encoded = serde_json::to_vec(&canonical).map_err(WorkspaceCommandError::Json)?;
+    let calculated = sha256(&encoded);
+    if declared != binding_hash || calculated != binding_hash {
+        return Err(WorkspaceCommandError::Validation(
+            "Stored proposal hash verification failed".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_proposal_hunks(
+    source: &str,
+    target: &StoredProposalTarget,
+    hunks: &[StoredProposalHunk],
+) -> Result<(), WorkspaceCommandError> {
+    if hunks.is_empty() || hunks.len() > 500 {
+        return Err(WorkspaceCommandError::Validation(
+            "Stored proposal must contain 1..=500 hunks".into(),
+        ));
+    }
+    utf16_to_byte(source, target.from.offset).ok_or_else(|| {
+        WorkspaceCommandError::Validation("Proposal target start is not a UTF-16 boundary".into())
+    })?;
+    utf16_to_byte(source, target.to.offset).ok_or_else(|| {
+        WorkspaceCommandError::Validation("Proposal target end is not a UTF-16 boundary".into())
+    })?;
+    let mut ids = BTreeSet::new();
+    let mut previous_end = target.from.offset;
+    let mut previous_insertion = None;
+    for hunk in hunks {
+        if hunk.id.trim().is_empty() || !ids.insert(hunk.id.as_str()) {
+            return Err(WorkspaceCommandError::Validation(
+                "Proposal hunk ids must be non-empty and unique".into(),
+            ));
+        }
+        if hunk.from.block_id != target.block_id
+            || hunk.to.block_id != target.block_id
+            || hunk.from.offset > hunk.to.offset
+            || hunk.from.offset < target.from.offset
+            || hunk.to.offset > target.to.offset
+            || hunk.from.offset < previous_end
+            || (hunk.from.offset == hunk.to.offset && previous_insertion == Some(hunk.from.offset))
+        {
+            return Err(WorkspaceCommandError::Validation(
+                "Proposal hunks are outside the target, ambiguous or overlapping".into(),
+            ));
+        }
+        let from = utf16_to_byte(source, hunk.from.offset).ok_or_else(|| {
+            WorkspaceCommandError::Validation("Hunk start is not a UTF-16 boundary".into())
+        })?;
+        let to = utf16_to_byte(source, hunk.to.offset).ok_or_else(|| {
+            WorkspaceCommandError::Validation("Hunk end is not a UTF-16 boundary".into())
+        })?;
+        if source.get(from..to) != Some(hunk.original.as_str()) {
+            let actual = source.get(from..to).unwrap_or_default();
+            return Err(WorkspaceCommandError::Store(StoreError::Conflict {
+                entity: "proposal_hunk",
+                id: hunk.id.clone(),
+                expected_revision: target.base_revision,
+                actual_revision: target.base_revision,
+                expected_hash: sha256(hunk.original.as_bytes()),
+                actual_hash: sha256(actual.as_bytes()),
+            }));
+        }
+        previous_end = hunk.to.offset;
+        previous_insertion = (hunk.from.offset == hunk.to.offset).then_some(hunk.from.offset);
+    }
+    Ok(())
+}
+
+fn validate_atomic_decisions(
+    hunks: &[StoredProposalHunk],
+    decisions: &BTreeMap<String, ReviewDecision>,
+) -> Result<(), WorkspaceCommandError> {
+    let mut groups = BTreeMap::new();
+    for hunk in hunks {
+        let Some(group) = hunk.atomic_group.as_deref() else {
+            continue;
+        };
+        if group.trim().is_empty() {
+            return Err(WorkspaceCommandError::Validation(
+                "Atomic proposal group cannot be empty".into(),
+            ));
+        }
+        let decision = decisions[&hunk.id];
+        if groups
+            .insert(group, decision)
+            .is_some_and(|prior| prior != decision)
+        {
+            return Err(WorkspaceCommandError::Validation(
+                "Atomic proposal group has inconsistent decisions".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn apply_proposal_hunks(
+    source: &str,
+    accepted: &[&StoredProposalHunk],
+) -> Result<String, WorkspaceCommandError> {
+    let mut output = source.to_owned();
+    let mut descending = accepted.to_vec();
+    descending.sort_unstable_by(|left, right| {
+        right
+            .from
+            .offset
+            .cmp(&left.from.offset)
+            .then_with(|| right.to.offset.cmp(&left.to.offset))
+    });
+    for hunk in descending {
+        let from = utf16_to_byte(&output, hunk.from.offset).ok_or_else(|| {
+            WorkspaceCommandError::Validation("Hunk start is not a UTF-16 boundary".into())
+        })?;
+        let to = utf16_to_byte(&output, hunk.to.offset).ok_or_else(|| {
+            WorkspaceCommandError::Validation("Hunk end is not a UTF-16 boundary".into())
+        })?;
+        output.replace_range(from..to, &hunk.replacement);
+    }
+    Ok(output)
+}
+
+fn utf16_to_byte(value: &str, target: usize) -> Option<usize> {
+    if target == 0 {
+        return Some(0);
+    }
+    let mut utf16 = 0;
+    for (byte, character) in value.char_indices() {
+        if utf16 == target {
+            return Some(byte);
+        }
+        utf16 += character.len_utf16();
+        if utf16 > target {
+            return None;
+        }
+    }
+    (utf16 == target).then_some(value.len())
+}
+
 pub(crate) fn block_content_hash(
     kind: &str,
     content: &Value,
@@ -425,6 +1069,31 @@ fn workspace_document(record: DocumentRecord) -> WorkspaceDocument {
         order_key: record.order_key,
         revision: record.revision,
     }
+}
+
+fn style_sample(record: StyleSampleRecord) -> Result<StyleSample, WorkspaceCommandError> {
+    if !matches!(record.status.as_str(), "canonical" | "archived")
+        || !matches!(
+            record.sensitivity.as_str(),
+            "local_sensitive" | "never_send"
+        )
+    {
+        return Err(WorkspaceCommandError::Store(
+            StoreError::InvariantViolation("stored style sample policy is invalid".into()),
+        ));
+    }
+    Ok(StyleSample {
+        schema_version: WORKSPACE_SCHEMA_VERSION,
+        id: record.id,
+        title: record.title,
+        content: record.content,
+        content_hash: record.content_hash,
+        status: record.status,
+        sensitivity: record.sensitivity,
+        revision: record.revision,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+    })
 }
 
 fn checkpoint_summary(record: SnapshotRecord) -> CheckpointSummary {
@@ -490,6 +1159,27 @@ fn validate_save_spec(spec: &SaveBlockSpec) -> Result<(), WorkspaceCommandError>
         return Err(WorkspaceCommandError::Validation(format!(
             "Block plain text exceeds {MAX_PLAIN_TEXT_BYTES} bytes"
         )));
+    }
+    Ok(())
+}
+
+fn validate_style_sample(spec: &CreateStyleSampleSpec) -> Result<(), WorkspaceCommandError> {
+    let title = spec.title.trim();
+    let content = spec.content.trim();
+    if title.is_empty() || title.chars().count() > MAX_STYLE_TITLE_CHARS {
+        return Err(WorkspaceCommandError::StyleValidation(format!(
+            "Style sample title must contain 1 to {MAX_STYLE_TITLE_CHARS} characters"
+        )));
+    }
+    if content.is_empty() || content.len() > MAX_STYLE_SAMPLE_BYTES {
+        return Err(WorkspaceCommandError::StyleValidation(format!(
+            "Style sample content must contain 1 to {MAX_STYLE_SAMPLE_BYTES} bytes"
+        )));
+    }
+    if !matches!(spec.sensitivity.as_str(), "local_sensitive" | "never_send") {
+        return Err(WorkspaceCommandError::StyleValidation(
+            "Style sample sensitivity must be local_sensitive or never_send".into(),
+        ));
     }
     Ok(())
 }

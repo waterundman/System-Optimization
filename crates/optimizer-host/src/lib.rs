@@ -2,25 +2,35 @@ use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+mod model_gateway;
+mod model_transport;
 mod operation_commands;
 mod project_package;
 mod secrets;
 mod workspace_commands;
 
+pub use model_gateway::{
+    CancelModelRequestResponse, ModelExecutionHost, ModelExecutionRequest, ModelExecutionSummary,
+    ModelGatewayError, ModelProviderConfiguration, ModelProviderId, ModelStreamEvent,
+    ModelTransport, NativeModelTransport,
+};
 pub use operation_commands::{
     ArtifactAudit, ContextPacketAudit, FailureAudit, LifecycleEventAudit, ModelUsageAudit,
     OperationAuditResponse, OperationCommandError, OperationCommandHost, PersistOperationResponse,
     PersistReviewResponse, ReviewAudit, ReviewEventAudit, RunAudit,
 };
 pub use project_package::{
-    NewProjectSpec, OpenedProject, ProjectInfo, ProjectPackageError, ProjectPackageManifest,
+    ExportMarkdownResponse, NewProjectSpec, OpenedProject, ProjectInfo, ProjectPackageError,
+    ProjectPackageManifest,
 };
 #[cfg(windows)]
 pub use secrets::WindowsCredentialStore;
 pub use secrets::{MemorySecretStore, SecretReference, SecretStore, SecretStoreError, SecretValue};
 pub use workspace_commands::{
-    CheckpointSummary, ProjectWorkspace, RestoreCheckpointResponse, RestoreCheckpointSpec,
-    SaveBlockResponse, SaveBlockSpec, VersionCommit, VersionHistory, WorkspaceBlock,
+    ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, CheckpointSummary,
+    CreateDocumentResponse, CreateDocumentSpec, CreateStyleSampleSpec, ProjectWorkspace,
+    RestoreCheckpointResponse, RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec,
+    SetStyleSampleStatusSpec, StyleSample, VersionCommit, VersionHistory, WorkspaceBlock,
     WorkspaceCommandError, WorkspaceDocument,
 };
 
