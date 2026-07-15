@@ -21,6 +21,10 @@ Rust 宿主安全边界与跨语言命令适配层。
 
 `ProjectInfo` 对上层暴露 `projectId`、`mainBranchId`、HEAD、revision 与数据库 schema，为下一阶段的文档加载、乐观并发自动保存和版本提交提供稳定基线。
 
+## 工作区命令
+
+`OpenedProject` 现在提供结构化工作区读取、单 Block 乐观保存、检查点创建、版本历史和检查点恢复。Host 生成持久化 ID/时间戳与内容/根哈希；Store 同时校验 Block revision/hash 和项目 revision/HEAD，并在一个事务中更新正文、编辑日志、Document revision、Commit DAG 与分支/项目 HEAD。恢复始终形成新 Commit。
+
 Tauri Adapter 已在 `apps/optimizer-desktop` 注册最小权限 commands/capabilities。Provider 网络请求移入宿主、macOS Keychain/Linux Secret Service 后端与 WASM 插件资源限制仍属于后续宿主能力。
 
 任何文件命令都必须先经过 `ProjectRoot`，不得接受未经校验的绝对路径或 `..`。宿主命令不得接收 API Key 或原始 HTTP Header，只接收协议允许的审计数据。

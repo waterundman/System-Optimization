@@ -1,5 +1,4 @@
 use std::fmt;
-use std::fmt::Write as _;
 use std::fs;
 use std::path::{Component, Path};
 
@@ -7,12 +6,19 @@ use optimizer_store::{
     OptimizerStore, ProjectRecord, ProjectSeed, SeedBlock, SeedDocument, StoreError,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
-use crate::{HostError, OperationCommandHost, ProjectRoot};
+use crate::workspace_commands::{
+    block_content_hash, create_checkpoint, load_project_workspace, load_version_history,
+    project_root_hash, restore_checkpoint, save_block,
+};
+use crate::{
+    CheckpointSummary, HostError, OperationCommandHost, ProjectRoot, ProjectWorkspace,
+    RestoreCheckpointResponse, RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec,
+    VersionHistory, WorkspaceCommandError,
+};
 
 const PACKAGE_SCHEMA_VERSION: u32 = 1;
 const DATABASE_FILE: &str = "project.sqlite3";
@@ -178,6 +184,46 @@ impl OpenedProject {
     pub fn operations_mut(&mut self) -> &mut OperationCommandHost {
         &mut self.operations
     }
+
+    pub fn workspace(&self) -> Result<ProjectWorkspace, WorkspaceCommandError> {
+        load_project_workspace(
+            self.operations.store(),
+            &self.project_id,
+            &self.main_branch_id,
+        )
+    }
+
+    pub fn save_block(
+        &mut self,
+        spec: &SaveBlockSpec,
+    ) -> Result<SaveBlockResponse, WorkspaceCommandError> {
+        save_block(
+            self.operations.store_mut(),
+            &self.project_id,
+            &self.main_branch_id,
+            spec,
+        )
+    }
+
+    pub fn create_checkpoint(&mut self) -> Result<CheckpointSummary, WorkspaceCommandError> {
+        create_checkpoint(self.operations.store_mut(), &self.project_id)
+    }
+
+    pub fn version_history(&self) -> Result<VersionHistory, WorkspaceCommandError> {
+        load_version_history(self.operations.store(), &self.project_id)
+    }
+
+    pub fn restore_checkpoint(
+        &mut self,
+        spec: &RestoreCheckpointSpec,
+    ) -> Result<RestoreCheckpointResponse, WorkspaceCommandError> {
+        restore_checkpoint(
+            self.operations.store_mut(),
+            &self.project_id,
+            &self.main_branch_id,
+            spec,
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -193,6 +239,7 @@ pub enum ProjectPackageError {
     ManifestJson(serde_json::Error),
     Store(StoreError),
     Operation(crate::OperationCommandError),
+    Workspace(WorkspaceCommandError),
     Clock,
 }
 
@@ -204,7 +251,7 @@ impl ProjectPackageError {
             Self::InvalidPackage(_) | Self::ManifestJson(_) => "INVALID_PROJECT_PACKAGE",
             Self::Host(_) => "UNSAFE_PROJECT_PATH",
             Self::Io { .. } => "PROJECT_IO_FAILED",
-            Self::Store(_) | Self::Operation(_) => "PROJECT_STORAGE_FAILED",
+            Self::Store(_) | Self::Operation(_) | Self::Workspace(_) => "PROJECT_STORAGE_FAILED",
             Self::Clock => "HOST_CLOCK_FAILED",
         }
     }
@@ -217,7 +264,9 @@ impl ProjectPackageError {
             Self::Host(_) => "Project path is invalid or unavailable".into(),
             Self::Io { operation, .. } => format!("Project file operation failed: {operation}"),
             Self::ManifestJson(_) => "Project manifest is invalid".into(),
-            Self::Store(_) | Self::Operation(_) => "Project storage operation failed".into(),
+            Self::Store(_) | Self::Operation(_) | Self::Workspace(_) => {
+                "Project storage operation failed".into()
+            }
             Self::Clock => "System clock could not create a project timestamp".into(),
         }
     }
@@ -237,6 +286,7 @@ impl std::error::Error for ProjectPackageError {
             Self::ManifestJson(error) => Some(error),
             Self::Store(error) => Some(error),
             Self::Operation(error) => Some(error),
+            Self::Workspace(error) => Some(error),
             Self::Validation(_) | Self::AlreadyExists | Self::InvalidPackage(_) | Self::Clock => {
                 None
             }
@@ -260,9 +310,12 @@ fn create_staged_package(path: &Path, spec: &NewProjectSpec) -> Result<(), Proje
     let block_id = id("block");
     let commit_id = id("commit");
     let branch_id = id("branch");
-    let content_json = r#"{"type":"paragraph","text":""}"#.to_string();
-    let content_hash = sha256(&content_json);
-    let root_hash = sha256(&format!("{block_id}:{content_hash}"));
+    let content = serde_json::json!({ "type": "paragraph", "text": "" });
+    let content_json =
+        serde_json::to_string(&content).map_err(ProjectPackageError::ManifestJson)?;
+    let content_hash = block_content_hash("paragraph", &content, "", false)
+        .map_err(ProjectPackageError::Workspace)?;
+    let root_hash = project_root_hash([(block_id.as_str(), content_hash.as_str())]);
     let seed = ProjectSeed {
         project_id: project_id.clone(),
         title: spec.title.trim().into(),
@@ -413,16 +466,6 @@ fn id(prefix: &str) -> String {
     format!("{prefix}-{}", Uuid::new_v4().simple())
 }
 
-fn sha256(value: &str) -> String {
-    let digest = Sha256::digest(value.as_bytes());
-    let mut encoded = String::with_capacity(71);
-    encoded.push_str("sha256:");
-    for byte in digest {
-        let _ = write!(encoded, "{byte:02x}");
-    }
-    encoded
-}
-
 fn project_info(
     root: &ProjectRoot,
     main_branch_id: &str,
@@ -504,6 +547,60 @@ mod tests {
 
         let reopened = OpenedProject::open(parent.0.join("MyNovel.optimizer")).unwrap();
         assert_eq!(reopened.info().unwrap().project_id, project_id);
+    }
+
+    #[test]
+    fn loads_the_workspace_and_saves_a_block_as_a_versioned_commit() {
+        let parent = TempParent::new();
+        let mut project = OpenedProject::create(&parent.0, &spec()).unwrap();
+        let initial = project.workspace().unwrap();
+        assert_eq!(initial.documents.len(), 1);
+        assert_eq!(initial.blocks.len(), 1);
+        let block = initial.blocks[0].clone();
+        let saved = project
+            .save_block(&SaveBlockSpec {
+                block_id: block.id.clone(),
+                expected_revision: block.revision,
+                expected_hash: block.content_hash.clone(),
+                content: serde_json::json!({
+                    "type": "paragraph",
+                    "content": [{ "type": "text", "text": "第一段正文" }]
+                }),
+                plain_text: "第一段正文".into(),
+            })
+            .unwrap();
+        assert_eq!(saved.project_revision, 1);
+        assert_eq!(saved.block.revision, 1);
+        assert_eq!(saved.block.plain_text, "第一段正文");
+        assert_eq!(saved.head_commit_id, saved.commit_id);
+        assert_ne!(saved.previous_head_commit_id, saved.commit_id);
+        assert!(saved.block.content_hash.starts_with("sha256:"));
+
+        let reloaded = project.workspace().unwrap();
+        assert_eq!(reloaded.revision, 1);
+        assert_eq!(reloaded.documents[0].revision, 1);
+        assert_eq!(reloaded.head_commit_id, saved.commit_id);
+        assert_eq!(reloaded.blocks[0], saved.block);
+        assert!(matches!(
+            project.save_block(&SaveBlockSpec {
+                block_id: saved.block.id.clone(),
+                expected_revision: saved.block.revision,
+                expected_hash: saved.block.content_hash.clone(),
+                content: saved.block.content.clone(),
+                plain_text: saved.block.plain_text.clone(),
+            }),
+            Err(WorkspaceCommandError::NoChanges)
+        ));
+        assert!(matches!(
+            project.save_block(&SaveBlockSpec {
+                block_id: block.id,
+                expected_revision: block.revision,
+                expected_hash: block.content_hash,
+                content: serde_json::json!({ "type": "paragraph", "text": "stale" }),
+                plain_text: "stale".into(),
+            }),
+            Err(WorkspaceCommandError::Store(StoreError::Conflict { .. }))
+        ));
     }
 
     #[test]

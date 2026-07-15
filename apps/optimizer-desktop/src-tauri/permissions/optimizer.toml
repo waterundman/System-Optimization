@@ -4,6 +4,26 @@ description = "Allows the bundled editor to create, open, close and inspect one 
 commands.allow = ["create_project", "open_project", "close_project", "get_project_session"]
 
 [[permission]]
+identifier = "allow-workspace-read"
+description = "Allows the bundled editor to read the document tree and blocks from the current project session."
+commands.allow = ["get_project_workspace"]
+
+[[permission]]
+identifier = "allow-workspace-write"
+description = "Allows the bundled editor to save a block through optimistic concurrency and create an audit commit."
+commands.allow = ["save_block"]
+
+[[permission]]
+identifier = "allow-version-read"
+description = "Allows the bundled editor to list commits and safe checkpoint metadata for the current project."
+commands.allow = ["get_version_history"]
+
+[[permission]]
+identifier = "allow-version-write"
+description = "Allows the bundled editor to create and restore verified project checkpoints."
+commands.allow = ["create_checkpoint", "restore_checkpoint"]
+
+[[permission]]
 identifier = "allow-operation-write"
 description = "Allows the bundled editor to persist final operation bundles and append optimistic review events."
 commands.allow = ["persist_operation_bundle", "append_review_event"]

@@ -5,6 +5,7 @@ use std::path::{Component, Path, PathBuf};
 mod operation_commands;
 mod project_package;
 mod secrets;
+mod workspace_commands;
 
 pub use operation_commands::{
     ArtifactAudit, ContextPacketAudit, FailureAudit, LifecycleEventAudit, ModelUsageAudit,
@@ -17,6 +18,11 @@ pub use project_package::{
 #[cfg(windows)]
 pub use secrets::WindowsCredentialStore;
 pub use secrets::{MemorySecretStore, SecretReference, SecretStore, SecretStoreError, SecretValue};
+pub use workspace_commands::{
+    CheckpointSummary, ProjectWorkspace, RestoreCheckpointResponse, RestoreCheckpointSpec,
+    SaveBlockResponse, SaveBlockSpec, VersionCommit, VersionHistory, WorkspaceBlock,
+    WorkspaceCommandError, WorkspaceDocument,
+};
 
 #[derive(Debug)]
 pub enum HostError {

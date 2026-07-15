@@ -74,6 +74,12 @@ fn edit(commit_id: &str, expected_revision: i64, expected_hash: &str) -> ApplyBl
         edit_id: format!("edit-{commit_id}"),
         commit_id: commit_id.into(),
         branch_id: "branch-main".into(),
+        expected_head_commit_id: if expected_revision == 0 {
+            "commit-initial".into()
+        } else {
+            "commit-after-snapshot".into()
+        },
+        expected_project_revision: 0,
         block_id: "block-1".into(),
         expected_revision,
         expected_hash: expected_hash.into(),
@@ -183,6 +189,7 @@ fn applies_block_edit_journal_commit_and_fts_in_one_transaction() {
     let block = store.get_block("block-1").unwrap();
     assert_eq!(block.revision, 1);
     assert_eq!(block.plain_text, "harbor signal");
+    assert_eq!(store.list_documents("project-1").unwrap()[0].revision, 1);
     assert!(
         store
             .search_blocks("project-1", "station", 10)
@@ -222,6 +229,26 @@ fn optimistic_conflict_has_no_partial_side_effects() {
         1
     );
     store.verify_invariants().unwrap();
+}
+
+#[test]
+fn stale_project_head_rejects_an_otherwise_current_block_edit() {
+    let temp = TempDatabase::new();
+    let mut store = open_seeded(&temp.database);
+    store
+        .apply_block_edit(&edit("commit-first", 0, "sha256:block-initial"))
+        .unwrap();
+    let mut stale = edit("commit-stale-head", 1, "sha256:block-commit-first");
+    stale.expected_head_commit_id = "commit-initial".into();
+    stale.expected_project_revision = 1;
+    assert!(matches!(
+        store.apply_block_edit(&stale),
+        Err(StoreError::StateConflict { .. })
+    ));
+    let block = store.get_block("block-1").unwrap();
+    assert_eq!(block.revision, 1);
+    assert_eq!(block.content_hash, "sha256:block-commit-first");
+    assert_eq!(store.list_commits("project-1").unwrap().len(), 2);
 }
 
 #[test]
@@ -301,6 +328,7 @@ fn creates_deterministic_checked_snapshot_and_restores_it_as_a_new_commit() {
         .unwrap();
     assert_eq!(restored.previous_head_commit_id, "commit-after-snapshot");
     assert_eq!(restored.restored_root_hash, "sha256:root-initial");
+    assert_eq!(store.list_documents("project-1").unwrap()[0].revision, 2);
     assert_eq!(restored.changed_blocks, 1);
 
     let block = store.get_block("block-1").unwrap();

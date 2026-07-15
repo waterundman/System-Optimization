@@ -55,6 +55,17 @@ pub struct BranchRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentRecord {
+    pub id: String,
+    pub project_id: String,
+    pub parent_id: Option<String>,
+    pub kind: String,
+    pub title: String,
+    pub order_key: String,
+    pub revision: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockRecord {
     pub id: String,
     pub document_id: String,
@@ -72,6 +83,8 @@ pub struct ApplyBlockEdit {
     pub edit_id: String,
     pub commit_id: String,
     pub branch_id: String,
+    pub expected_head_commit_id: String,
+    pub expected_project_revision: i64,
     pub block_id: String,
     pub expected_revision: i64,
     pub expected_hash: String,

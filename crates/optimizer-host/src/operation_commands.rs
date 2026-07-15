@@ -88,6 +88,14 @@ impl OperationCommandHost {
         Self { store }
     }
 
+    pub(crate) fn store(&self) -> &OptimizerStore {
+        &self.store
+    }
+
+    pub(crate) fn store_mut(&mut self) -> &mut OptimizerStore {
+        &mut self.store
+    }
+
     pub fn persist_operation_bundle_json(
         &mut self,
         input: &str,

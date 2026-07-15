@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -8,7 +9,8 @@ use crate::error::{StoreError, StoreResult};
 use crate::migration::{CURRENT_SCHEMA_VERSION, migrate};
 use crate::model::{
     ApplyBlockEdit, BlockRecord, BlockSearchHit, BranchRecord, CommitRecord, CreateSnapshot,
-    EditReceipt, ProjectRecord, ProjectSeed, RestoreReceipt, RestoreSnapshot, SnapshotRecord,
+    DocumentRecord, EditReceipt, ProjectRecord, ProjectSeed, RestoreReceipt, RestoreSnapshot,
+    SnapshotRecord,
 };
 use crate::snapshot::{
     ProjectSnapshotV1, SNAPSHOT_CODEC, SNAPSHOT_CODEC_VERSION, SNAPSHOT_SCHEMA_VERSION,
@@ -220,25 +222,70 @@ impl OptimizerStore {
             })
     }
 
+    pub fn list_documents(&self, project_id: &str) -> StoreResult<Vec<DocumentRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, project_id, parent_id, kind, title, order_key, revision
+             FROM document
+             WHERE project_id = ?1 AND deleted_at IS NULL
+             ORDER BY order_key, id",
+        )?;
+        statement
+            .query_map([project_id], |row| {
+                Ok(DocumentRecord {
+                    id: row.get(0)?,
+                    project_id: row.get(1)?,
+                    parent_id: row.get(2)?,
+                    kind: row.get(3)?,
+                    title: row.get(4)?,
+                    order_key: row.get(5)?,
+                    revision: row.get(6)?,
+                })
+            })?
+            .collect::<Result<_, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn list_blocks(&self, project_id: &str) -> StoreResult<Vec<BlockRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT b.id, b.document_id, b.kind, b.order_key, b.content_json, b.plain_text,
+                    b.content_hash, b.revision, b.locked
+             FROM block AS b
+             JOIN document AS d ON d.id = b.document_id
+             WHERE d.project_id = ?1 AND d.deleted_at IS NULL AND b.deleted_at IS NULL
+             ORDER BY d.order_key, d.id, b.order_key, b.id",
+        )?;
+        statement
+            .query_map([project_id], map_block_record)?
+            .collect::<Result<_, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn get_project_block(&self, project_id: &str, block_id: &str) -> StoreResult<BlockRecord> {
+        self.connection
+            .query_row(
+                "SELECT b.id, b.document_id, b.kind, b.order_key, b.content_json, b.plain_text,
+                        b.content_hash, b.revision, b.locked
+                 FROM block AS b
+                 JOIN document AS d ON d.id = b.document_id
+                 WHERE d.project_id = ?1 AND b.id = ?2
+                   AND d.deleted_at IS NULL AND b.deleted_at IS NULL",
+                params![project_id, block_id],
+                map_block_record,
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NotFound {
+                entity: "block",
+                id: block_id.to_owned(),
+            })
+    }
+
     pub fn get_block(&self, block_id: &str) -> StoreResult<BlockRecord> {
         self.connection
             .query_row(
                 "SELECT id, document_id, kind, order_key, content_json, plain_text, content_hash, revision, locked
                  FROM block WHERE id = ?1 AND deleted_at IS NULL",
                 [block_id],
-                |row| {
-                    Ok(BlockRecord {
-                        id: row.get(0)?,
-                        document_id: row.get(1)?,
-                        kind: row.get(2)?,
-                        order_key: row.get(3)?,
-                        content_json: row.get(4)?,
-                        plain_text: row.get(5)?,
-                        content_hash: row.get(6)?,
-                        revision: row.get(7)?,
-                        locked: row.get::<_, i64>(8)? == 1,
-                    })
-                },
+                map_block_record,
             )
             .optional()?
             .ok_or_else(|| StoreError::NotFound { entity: "block", id: block_id.to_owned() })
@@ -269,21 +316,37 @@ impl OptimizerStore {
             });
         }
 
-        let (branch_project_id, previous_head): (String, String) = transaction
-            .query_row(
-                "SELECT project_id, head_commit_id FROM branch WHERE id = ?1",
-                [&command.branch_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?
-            .ok_or_else(|| StoreError::NotFound {
-                entity: "branch",
-                id: command.branch_id.clone(),
-            })?;
+        let (branch_project_id, previous_head, project_revision): (String, String, i64) =
+            transaction
+                .query_row(
+                    "SELECT b.project_id, b.head_commit_id, p.revision
+                 FROM branch AS b
+                 JOIN project AS p ON p.id = b.project_id
+                 WHERE b.id = ?1",
+                    [&command.branch_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?
+                .ok_or_else(|| StoreError::NotFound {
+                    entity: "branch",
+                    id: command.branch_id.clone(),
+                })?;
         if branch_project_id != current.project_id {
             return Err(StoreError::Validation(
                 "branch and block belong to different projects".into(),
             ));
+        }
+        if previous_head != command.expected_head_commit_id
+            || project_revision != command.expected_project_revision
+        {
+            return Err(StoreError::StateConflict {
+                entity: "branch",
+                id: command.branch_id.clone(),
+                expected_revision: command.expected_project_revision,
+                actual_revision: project_revision,
+                expected_state: command.expected_head_commit_id.clone(),
+                actual_state: previous_head,
+            });
         }
 
         let new_revision = current.revision + 1;
@@ -327,6 +390,16 @@ impl OptimizerStore {
                 command.occurred_at
             ],
         )?;
+        let document_updated = transaction.execute(
+            "UPDATE document SET revision = revision + 1
+             WHERE id = ?1 AND deleted_at IS NULL",
+            [&current.document_id],
+        )?;
+        if document_updated != 1 {
+            return Err(StoreError::InvariantViolation(
+                "document revision update changed an unexpected row count".into(),
+            ));
+        }
         transaction.execute(
             "INSERT INTO commit_node(id, project_id, root_hash, reason, actor_type, actor_id, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -481,6 +554,32 @@ impl OptimizerStore {
             .map_err(StoreError::from)
     }
 
+    pub fn list_snapshots(&self, project_id: &str) -> StoreResult<Vec<SnapshotRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, project_id, commit_id, root_hash, codec, codec_version, payload,
+                    checksum, created_at
+             FROM materialized_snapshot
+             WHERE project_id = ?1
+             ORDER BY created_at DESC, id DESC",
+        )?;
+        statement
+            .query_map([project_id], |row| {
+                Ok(SnapshotRecord {
+                    id: row.get(0)?,
+                    project_id: row.get(1)?,
+                    commit_id: row.get(2)?,
+                    root_hash: row.get(3)?,
+                    codec: row.get(4)?,
+                    codec_version: row.get(5)?,
+                    payload: row.get(6)?,
+                    checksum: row.get(7)?,
+                    created_at: row.get(8)?,
+                })
+            })?
+            .collect::<Result<_, _>>()
+            .map_err(StoreError::from)
+    }
+
     pub fn get_snapshot(&self, snapshot_id: &str) -> StoreResult<SnapshotRecord> {
         self.connection
             .query_row(
@@ -623,6 +722,7 @@ impl OptimizerStore {
             after_hash: String,
         }
         let mut changes = Vec::new();
+        let mut changed_documents = BTreeSet::new();
         for block in &snapshot.blocks {
             let current = read_block_for_edit(&transaction, &block.id)?;
             if current.content_hash == block.content_hash
@@ -678,11 +778,24 @@ impl OptimizerStore {
                 before_hash: current.content_hash,
                 after_hash: block.content_hash.clone(),
             });
+            changed_documents.insert(current.document_id);
         }
         if changes.is_empty() {
             return Err(StoreError::Validation(
                 "snapshot already matches the current project state".into(),
             ));
+        }
+        for document_id in changed_documents {
+            let updated = transaction.execute(
+                "UPDATE document SET revision = revision + 1
+                 WHERE id = ?1 AND deleted_at IS NULL",
+                [&document_id],
+            )?;
+            if updated != 1 {
+                return Err(StoreError::InvariantViolation(
+                    "restore document revision update changed an unexpected row count".into(),
+                ));
+            }
         }
 
         transaction.execute(
@@ -879,6 +992,7 @@ impl OptimizerStore {
 
 struct EditableBlock {
     project_id: String,
+    document_id: String,
     revision: i64,
     content_hash: String,
     content_json: String,
@@ -892,23 +1006,28 @@ fn read_block_for_edit(
 ) -> StoreResult<EditableBlock> {
     transaction
         .query_row(
-            "SELECT d.project_id, b.revision, b.content_hash, b.content_json, b.plain_text, b.locked
+            "SELECT d.project_id, b.document_id, b.revision, b.content_hash, b.content_json,
+                    b.plain_text, b.locked
              FROM block b JOIN document d ON d.id = b.document_id
              WHERE b.id = ?1 AND b.deleted_at IS NULL",
             [block_id],
             |row| {
                 Ok(EditableBlock {
                     project_id: row.get(0)?,
-                    revision: row.get(1)?,
-                    content_hash: row.get(2)?,
-                    content_json: row.get(3)?,
-                    plain_text: row.get(4)?,
-                    locked: row.get::<_, i64>(5)? == 1,
+                    document_id: row.get(1)?,
+                    revision: row.get(2)?,
+                    content_hash: row.get(3)?,
+                    content_json: row.get(4)?,
+                    plain_text: row.get(5)?,
+                    locked: row.get::<_, i64>(6)? == 1,
                 })
             },
         )
         .optional()?
-        .ok_or_else(|| StoreError::NotFound { entity: "block", id: block_id.to_owned() })
+        .ok_or_else(|| StoreError::NotFound {
+            entity: "block",
+            id: block_id.to_owned(),
+        })
 }
 
 fn create_pre_migration_backup(
@@ -1011,6 +1130,10 @@ fn validate_edit(command: &ApplyBlockEdit) -> StoreResult<()> {
         ("edit_id", command.edit_id.as_str()),
         ("commit_id", command.commit_id.as_str()),
         ("branch_id", command.branch_id.as_str()),
+        (
+            "expected_head_commit_id",
+            command.expected_head_commit_id.as_str(),
+        ),
         ("block_id", command.block_id.as_str()),
         ("expected_hash", command.expected_hash.as_str()),
         ("new_content_hash", command.new_content_hash.as_str()),
@@ -1023,7 +1146,26 @@ fn validate_edit(command: &ApplyBlockEdit) -> StoreResult<()> {
             return Err(StoreError::Validation(format!("{field} must not be empty")));
         }
     }
+    if command.expected_project_revision < 0 {
+        return Err(StoreError::Validation(
+            "expected_project_revision must be non-negative".into(),
+        ));
+    }
     Ok(())
+}
+
+fn map_block_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<BlockRecord> {
+    Ok(BlockRecord {
+        id: row.get(0)?,
+        document_id: row.get(1)?,
+        kind: row.get(2)?,
+        order_key: row.get(3)?,
+        content_json: row.get(4)?,
+        plain_text: row.get(5)?,
+        content_hash: row.get(6)?,
+        revision: row.get(7)?,
+        locked: row.get::<_, i64>(8)? == 1,
+    })
 }
 
 fn validate_restore(command: &RestoreSnapshot) -> StoreResult<()> {

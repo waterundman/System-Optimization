@@ -51,7 +51,7 @@ scripts/               工程约束检查
 
 ## 下一步
 
-1. 文档树读取、Block 乐观并发自动保存、提交前快照与版本恢复命令。
+1. 可运行桌面入口、项目选择器、文档树与 Tiptap 编辑器壳。
 2. 将模型网络执行移入宿主信任边界，直接解析 credentialRef，避免 API Key 返回 WebView。
 3. Ollama 本地 Provider 与模型可用性探测。
 4. Tiptap 审查 UI、宿主审查命令调用与 Kernel Lab 可视化。
@@ -62,4 +62,5 @@ scripts/               工程约束检查
 - Host 可在现有安全父目录中原子创建 `.optimizer` 目录包，并严格打开/校验 manifest 与 SQLite。
 - manifest 显式绑定 `projectId`、`mainBranchId` 和固定数据库文件，拒绝未知字段、路径替换与损坏绑定。
 - Tauri 增加 create/open/close/status 四个会话命令；所有 Operation 命令必须通过当前会话访问 Store。
-- 下一实现重点已经收敛为文档树读取、Block 乐观并发自动保存和提交前快照，而非继续扩展无 UI 的基础设施。
+- 当前 Session 已可读取结构化工作区、乐观保存 Block、浏览 Commit/检查点，并把检查点恢复为新 Commit。
+- 下一实现重点转向真实桌面 UI 与宿主模型网络执行，不再缺少正文持久化入口。

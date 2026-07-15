@@ -1,9 +1,11 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use optimizer_host::{
-    NewProjectSpec, OpenedProject, OperationAuditResponse, OperationCommandError,
-    PersistOperationResponse, PersistReviewResponse, ProjectInfo, ProjectPackageError,
-    SecretReference, SecretStore, SecretStoreError, SecretValue,
+    CheckpointSummary, NewProjectSpec, OpenedProject, OperationAuditResponse,
+    OperationCommandError, PersistOperationResponse, PersistReviewResponse, ProjectInfo,
+    ProjectPackageError, ProjectWorkspace, RestoreCheckpointResponse, RestoreCheckpointSpec,
+    SaveBlockResponse, SaveBlockSpec, SecretReference, SecretStore, SecretStoreError, SecretValue,
+    VersionHistory, WorkspaceCommandError,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Runtime, State};
@@ -74,6 +76,50 @@ impl DesktopState {
             )),
             None => Ok(ProjectSessionResponse::closed()),
         }
+    }
+
+    pub fn get_project_workspace(&self) -> CommandResult<ProjectWorkspace> {
+        self.current_project()?
+            .workspace()
+            .map_err(CommandError::from)
+    }
+
+    pub fn save_block(&self, input: SaveBlockRequest) -> CommandResult<SaveBlockResponse> {
+        input.validate()?;
+        let mut project = self.current_project()?;
+        project
+            .save_block(&SaveBlockSpec {
+                block_id: input.block_id,
+                expected_revision: input.expected_revision,
+                expected_hash: input.expected_hash,
+                content: input.content,
+                plain_text: input.plain_text,
+            })
+            .map_err(CommandError::from)
+    }
+
+    pub fn get_version_history(&self) -> CommandResult<VersionHistory> {
+        self.current_project()?
+            .version_history()
+            .map_err(CommandError::from)
+    }
+
+    pub fn create_checkpoint(&self) -> CommandResult<CheckpointSummary> {
+        let mut project = self.current_project()?;
+        project.create_checkpoint().map_err(CommandError::from)
+    }
+
+    pub fn restore_checkpoint(
+        &self,
+        input: RestoreCheckpointRequest,
+    ) -> CommandResult<RestoreCheckpointResponse> {
+        input.validate()?;
+        let mut project = self.current_project()?;
+        project
+            .restore_checkpoint(&RestoreCheckpointSpec {
+                checkpoint_id: input.checkpoint_id,
+            })
+            .map_err(CommandError::from)
     }
 
     pub fn persist_operation_bundle(&self, input: &str) -> CommandResult<PersistOperationResponse> {
@@ -261,6 +307,15 @@ impl From<SecretStoreError> for CommandError {
     }
 }
 
+impl From<WorkspaceCommandError> for CommandError {
+    fn from(error: WorkspaceCommandError) -> Self {
+        Self {
+            code: error.code().into(),
+            message: error.public_message(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateProjectRequest {
@@ -287,6 +342,46 @@ impl CreateProjectRequest {
 pub struct OpenProjectRequest {
     pub schema_version: u32,
     pub project_directory: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SaveBlockRequest {
+    pub schema_version: u32,
+    pub block_id: String,
+    pub expected_revision: i64,
+    pub expected_hash: String,
+    pub content: serde_json::Value,
+    pub plain_text: String,
+}
+
+impl SaveBlockRequest {
+    fn validate(&self) -> CommandResult<()> {
+        if self.schema_version != 1 {
+            return Err(CommandError::unsupported_request_schema(
+                self.schema_version,
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RestoreCheckpointRequest {
+    pub schema_version: u32,
+    pub checkpoint_id: String,
+}
+
+impl RestoreCheckpointRequest {
+    fn validate(&self) -> CommandResult<()> {
+        if self.schema_version != 1 {
+            return Err(CommandError::unsupported_request_schema(
+                self.schema_version,
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl OpenProjectRequest {
@@ -351,6 +446,11 @@ pub fn attach<R: Runtime>(builder: tauri::Builder<R>, state: DesktopState) -> ta
             open_project,
             close_project,
             get_project_session,
+            get_project_workspace,
+            save_block,
+            get_version_history,
+            create_checkpoint,
+            restore_checkpoint,
             persist_operation_bundle,
             append_review_event,
             get_operation_audit,
@@ -386,6 +486,37 @@ async fn get_project_session(
     state: State<'_, DesktopState>,
 ) -> CommandResult<ProjectSessionResponse> {
     spawn_host_task(state, DesktopState::get_project_session).await
+}
+
+#[tauri::command]
+async fn get_project_workspace(state: State<'_, DesktopState>) -> CommandResult<ProjectWorkspace> {
+    spawn_host_task(state, DesktopState::get_project_workspace).await
+}
+
+#[tauri::command]
+async fn save_block(
+    input: SaveBlockRequest,
+    state: State<'_, DesktopState>,
+) -> CommandResult<SaveBlockResponse> {
+    spawn_host_task(state, move |state| state.save_block(input)).await
+}
+
+#[tauri::command]
+async fn get_version_history(state: State<'_, DesktopState>) -> CommandResult<VersionHistory> {
+    spawn_host_task(state, DesktopState::get_version_history).await
+}
+
+#[tauri::command]
+async fn create_checkpoint(state: State<'_, DesktopState>) -> CommandResult<CheckpointSummary> {
+    spawn_host_task(state, DesktopState::create_checkpoint).await
+}
+
+#[tauri::command]
+async fn restore_checkpoint(
+    input: RestoreCheckpointRequest,
+    state: State<'_, DesktopState>,
+) -> CommandResult<RestoreCheckpointResponse> {
+    spawn_host_task(state, move |state| state.restore_checkpoint(input)).await
 }
 
 #[tauri::command]
@@ -571,6 +702,82 @@ mod tests {
     }
 
     #[test]
+    fn workspace_commands_load_and_optimistically_save_the_current_project() {
+        let (state, _, parent) = state();
+        assert_eq!(
+            state.get_project_workspace().unwrap_err().code,
+            "NO_PROJECT_OPEN"
+        );
+        open_test_project(&state, &parent);
+        let workspace = state.get_project_workspace().unwrap();
+        assert_eq!(workspace.documents.len(), 1);
+        assert_eq!(workspace.blocks.len(), 1);
+        let block = workspace.blocks[0].clone();
+        let request = SaveBlockRequest {
+            schema_version: 1,
+            block_id: block.id.clone(),
+            expected_revision: block.revision,
+            expected_hash: block.content_hash.clone(),
+            content: json!({
+                "type": "paragraph",
+                "content": [{ "type": "text", "text": "桌面自动保存" }]
+            }),
+            plain_text: "桌面自动保存".into(),
+        };
+        let saved = state.save_block(request.clone()).unwrap();
+        assert_eq!(saved.project_revision, 1);
+        assert_eq!(saved.block.revision, 1);
+        assert_eq!(saved.block.plain_text, "桌面自动保存");
+        assert_eq!(state.save_block(request).unwrap_err().code, "CONFLICT");
+        assert_eq!(
+            state
+                .save_block(SaveBlockRequest {
+                    schema_version: 99,
+                    block_id: block.id,
+                    expected_revision: 1,
+                    expected_hash: saved.block.content_hash.clone(),
+                    content: json!({}),
+                    plain_text: String::new(),
+                })
+                .unwrap_err()
+                .code,
+            "UNSUPPORTED_SCHEMA"
+        );
+
+        let checkpoint = state.create_checkpoint().unwrap();
+        let history = state.get_version_history().unwrap();
+        assert_eq!(history.commits.len(), 2);
+        assert_eq!(history.checkpoints, vec![checkpoint.clone()]);
+        assert_eq!(checkpoint.commit_id, saved.commit_id);
+
+        let second = state
+            .save_block(SaveBlockRequest {
+                schema_version: 1,
+                block_id: saved.block.id.clone(),
+                expected_revision: saved.block.revision,
+                expected_hash: saved.block.content_hash.clone(),
+                content: json!({
+                    "type": "paragraph",
+                    "content": [{ "type": "text", "text": "稍后改写" }]
+                }),
+                plain_text: "稍后改写".into(),
+            })
+            .unwrap();
+        assert_eq!(second.project_revision, 2);
+        let restored = state
+            .restore_checkpoint(RestoreCheckpointRequest {
+                schema_version: 1,
+                checkpoint_id: checkpoint.id,
+            })
+            .unwrap();
+        assert_eq!(restored.changed_blocks, 1);
+        assert_eq!(restored.workspace.revision, 3);
+        assert_eq!(restored.workspace.documents[0].revision, 3);
+        assert_eq!(restored.workspace.blocks[0].plain_text, "桌面自动保存");
+        assert_eq!(state.get_version_history().unwrap().commits.len(), 4);
+    }
+
+    #[test]
     fn command_errors_are_structured_and_do_not_echo_secret_values() {
         let (state, _, parent) = state();
         let info = open_test_project(&state, &parent);
@@ -626,6 +833,10 @@ mod tests {
             capability["permissions"],
             json!([
                 "allow-project-session",
+                "allow-workspace-read",
+                "allow-workspace-write",
+                "allow-version-read",
+                "allow-version-write",
                 "allow-operation-write",
                 "allow-operation-audit-read",
                 "allow-provider-secret-manage"

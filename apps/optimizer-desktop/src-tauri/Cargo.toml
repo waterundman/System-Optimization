@@ -12,10 +12,8 @@ tauri-build = { version = "2.6.2", default-features = false }
 [dependencies]
 optimizer-host = { path = "../../../crates/optimizer-host" }
 serde = { version = "1.0.228", features = ["derive"] }
-tauri = { version = "2.11.2", default-features = false }
-
-[dev-dependencies]
 serde_json = "1.0.150"
+tauri = { version = "2.11.2", default-features = false }
 
 [lib]
 path = "src/lib.rs"

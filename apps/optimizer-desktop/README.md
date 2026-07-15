@@ -21,3 +21,13 @@ WebView 不存在“读取 secret 明文”命令。模型请求执行器后续�
 - Operation 写入和审计命令在无项目时统一返回 `NO_PROJECT_OPEN`。
 
 四个命令位于独立的 `allow-project-session` permission 中，只授权给本地 `main` window。前端项目选择器和编辑器壳仍待接入。
+
+## 工作区与版本
+
+- `get_project_workspace` 返回文档树、结构化 Block、稳定 hash/revision 和当前 HEAD；
+- `save_block` 使用 Block 与项目 HEAD 双层乐观并发，成功时原子生成 EditJournal 与 autosave Commit；
+- `create_checkpoint` 为当前 HEAD 建立带 checksum 的物化快照；
+- `get_version_history` 只返回 Commit/检查点元数据；
+- `restore_checkpoint` 校验快照并“恢复为新 Commit”，不会覆盖历史节点。
+
+工作区读写和版本读写分别拥有独立 permission。前端应对 `CONFLICT` 重新加载工作区，对 `NO_CHANGES` 静默结束保存状态。
