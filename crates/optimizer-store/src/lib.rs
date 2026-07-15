@@ -1,6 +1,7 @@
 mod error;
 mod migration;
 mod model;
+mod operation;
 mod snapshot;
 mod store;
 

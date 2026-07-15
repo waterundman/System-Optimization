@@ -1,4 +1,6 @@
 import type {
+  ContextPacket,
+  ModelProviderId,
   OperationRunId,
   OperationState,
 } from "../../protocol/src/index.ts";
@@ -33,6 +35,9 @@ export class OperationExecutionError extends Error {
   readonly runId: OperationRunId;
   readonly state: Extract<OperationState, "failed" | "cancelled">;
   readonly history: readonly OperationTransition[];
+  readonly providerId: ModelProviderId;
+  readonly model?: string;
+  readonly contextPacket?: ContextPacket;
   readonly rootCause: unknown;
 
   constructor(input: {
@@ -41,6 +46,9 @@ export class OperationExecutionError extends Error {
     readonly runId: OperationRunId;
     readonly state: Extract<OperationState, "failed" | "cancelled">;
     readonly history: readonly OperationTransition[];
+    readonly providerId: ModelProviderId;
+    readonly model?: string;
+    readonly contextPacket?: ContextPacket;
     readonly rootCause: unknown;
   }) {
     super(input.message);
@@ -49,6 +57,9 @@ export class OperationExecutionError extends Error {
     this.runId = input.runId;
     this.state = input.state;
     this.history = [...input.history];
+    this.providerId = input.providerId;
+    this.model = input.model;
+    this.contextPacket = input.contextPacket;
     this.rootCause = input.rootCause;
   }
 }

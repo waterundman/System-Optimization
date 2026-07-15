@@ -3,8 +3,12 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use optimizer_store::{
-    ApplyBlockEdit, CURRENT_SCHEMA_VERSION, CreateSnapshot, MINIMUM_SQLITE_VERSION, OptimizerStore,
-    ProjectSeed, RestoreSnapshot, SeedBlock, SeedDocument, StoreError, encode_snapshot,
+    AppendReviewEvent, ApplyBlockEdit, CURRENT_SCHEMA_VERSION, CreateSnapshot,
+    MINIMUM_SQLITE_VERSION, ModelUsageRecord, NewContextPacket, NewOperationArtifact,
+    NewOperationLifecycleEvent, NewOperationRun, OperationArtifactKind, OperationFailureRecord,
+    OperationState, OptimizerStore, PersistOperationBundle, ProjectSeed, RestoreSnapshot,
+    ReviewDecision, ReviewEventKind, ReviewSessionStatus, SeedBlock, SeedDocument, StoreError,
+    encode_snapshot,
 };
 
 struct TempDatabase {
@@ -81,6 +85,62 @@ fn edit(commit_id: &str, expected_revision: i64, expected_hash: &str) -> ApplyBl
         actor_type: "human".into(),
         actor_id: Some("user-local".into()),
         occurred_at: "2026-07-14T00:01:00.000Z".into(),
+    }
+}
+
+fn operation_bundle(run_id: &str, packet_id: &str, proposal_id: &str) -> PersistOperationBundle {
+    let transition = |from_state, to_state| NewOperationLifecycleEvent {
+        from_state,
+        to_state,
+        occurred_at: "2026-07-15T00:01:00.000Z".into(),
+        reason: None,
+    };
+    PersistOperationBundle {
+        run: NewOperationRun {
+            id: run_id.into(),
+            operation_intent_id: format!("intent-{run_id}"),
+            project_id: "project-1".into(),
+            base_commit_id: "commit-initial".into(),
+            provider_id: "deepseek".into(),
+            model: "deepseek-v4-flash".into(),
+            state: OperationState::Review,
+            response_id: Some(format!("response-{run_id}")),
+            finish_reason: Some("stop".into()),
+            usage: Some(ModelUsageRecord {
+                input_tokens: 80,
+                output_tokens: 20,
+                total_tokens: 100,
+                cached_input_tokens: Some(12),
+                reasoning_tokens: Some(5),
+            }),
+            failure: None,
+            started_at: "2026-07-15T00:00:00.000Z".into(),
+            updated_at: "2026-07-15T00:01:00.000Z".into(),
+        },
+        context_packet: Some(NewContextPacket {
+            id: packet_id.into(),
+            operation_intent_id: format!("intent-{run_id}"),
+            project_id: "project-1".into(),
+            base_commit_id: "commit-initial".into(),
+            packet_hash: format!("sha256:{packet_id}"),
+            payload_json: format!(r#"{{"id":"{packet_id}","items":[]}}"#),
+            created_at: "2026-07-15T00:00:10.000Z".into(),
+        }),
+        lifecycle_events: vec![
+            transition(OperationState::Draft, OperationState::Compiling),
+            transition(OperationState::Compiling, OperationState::Preflight),
+            transition(OperationState::Preflight, OperationState::Queued),
+            transition(OperationState::Queued, OperationState::Streaming),
+            transition(OperationState::Streaming, OperationState::Validating),
+            transition(OperationState::Validating, OperationState::Review),
+        ],
+        artifact: Some(NewOperationArtifact {
+            id: proposal_id.into(),
+            kind: OperationArtifactKind::PatchProposal,
+            binding_hash: format!("sha256:{proposal_id}"),
+            payload_json: format!(r#"{{"id":"{proposal_id}","schemaVersion":2}}"#),
+            created_at: "2026-07-15T00:01:00.000Z".into(),
+        }),
     }
 }
 
@@ -271,4 +331,314 @@ fn rejects_snapshot_payload_when_checksum_is_tampered() {
     snapshot.payload[0] ^= 0xff;
     let error = store.decode_snapshot_record(&snapshot).unwrap_err();
     assert!(matches!(error, StoreError::Snapshot(_)));
+}
+
+#[test]
+fn persists_operation_context_usage_events_and_patch_artifact_atomically() {
+    let temp = TempDatabase::new();
+    let mut store = open_seeded(&temp.database);
+    let stored = store
+        .persist_operation_bundle(&operation_bundle("run-1", "context-1", "proposal-1"))
+        .unwrap();
+    assert_eq!(stored.state, OperationState::Review);
+    assert_eq!(stored.context_packet_id.as_deref(), Some("context-1"));
+    assert_eq!(stored.usage.as_ref().unwrap().total_tokens, 100);
+    assert!(stored.failure.is_none());
+
+    let context = store.get_context_packet("context-1").unwrap();
+    assert_eq!(context.operation_intent_id, "intent-run-1");
+    let artifact = store.get_operation_artifact("run-1").unwrap();
+    assert_eq!(artifact.id, "proposal-1");
+    assert_eq!(artifact.kind, OperationArtifactKind::PatchProposal);
+    let events = store.list_operation_lifecycle_events("run-1").unwrap();
+    assert_eq!(events.len(), 6);
+    assert_eq!(events[0].sequence, 1);
+    assert_eq!(events.last().unwrap().to_state, OperationState::Review);
+    let review = store.get_review_session("proposal-1").unwrap();
+    assert_eq!(review.revision, 0);
+    assert_eq!(review.status, ReviewSessionStatus::Review);
+    store.verify_invariants().unwrap();
+}
+
+#[test]
+fn rolls_back_every_operation_row_when_artifact_insert_fails_late() {
+    let temp = TempDatabase::new();
+    let mut store = open_seeded(&temp.database);
+    store
+        .persist_operation_bundle(&operation_bundle("run-1", "context-1", "proposal-shared"))
+        .unwrap();
+
+    let error = store
+        .persist_operation_bundle(&operation_bundle("run-2", "context-2", "proposal-shared"))
+        .unwrap_err();
+    assert!(matches!(error, StoreError::Sqlite(_)));
+    assert!(matches!(
+        store.get_operation_run("run-2"),
+        Err(StoreError::NotFound { .. })
+    ));
+    assert!(matches!(
+        store.get_context_packet("context-2"),
+        Err(StoreError::NotFound { .. })
+    ));
+    assert!(
+        store
+            .list_operation_lifecycle_events("run-2")
+            .unwrap()
+            .is_empty()
+    );
+    store.verify_invariants().unwrap();
+}
+
+#[test]
+fn persists_failed_runs_without_fabricating_context_or_artifacts() {
+    let temp = TempDatabase::new();
+    let mut store = open_seeded(&temp.database);
+    let bundle = PersistOperationBundle {
+        run: NewOperationRun {
+            id: "run-failed".into(),
+            operation_intent_id: "intent-failed".into(),
+            project_id: "project-1".into(),
+            base_commit_id: "commit-initial".into(),
+            provider_id: "qwen".into(),
+            model: "qwen-plus".into(),
+            state: OperationState::Failed,
+            response_id: None,
+            finish_reason: None,
+            usage: None,
+            failure: Some(OperationFailureRecord {
+                code: "CONTEXT_FAILED".into(),
+                message: "Context compilation failed".into(),
+                retriable: false,
+            }),
+            started_at: "2026-07-15T00:00:00.000Z".into(),
+            updated_at: "2026-07-15T00:00:01.000Z".into(),
+        },
+        context_packet: None,
+        lifecycle_events: vec![
+            NewOperationLifecycleEvent {
+                from_state: OperationState::Draft,
+                to_state: OperationState::Compiling,
+                occurred_at: "2026-07-15T00:00:00.000Z".into(),
+                reason: None,
+            },
+            NewOperationLifecycleEvent {
+                from_state: OperationState::Compiling,
+                to_state: OperationState::Failed,
+                occurred_at: "2026-07-15T00:00:01.000Z".into(),
+                reason: Some("DomainError".into()),
+            },
+        ],
+        artifact: None,
+    };
+    let stored = store.persist_operation_bundle(&bundle).unwrap();
+    assert_eq!(stored.state, OperationState::Failed);
+    assert_eq!(stored.failure.as_ref().unwrap().code, "CONTEXT_FAILED");
+    assert!(stored.context_packet_id.is_none());
+    assert!(matches!(
+        store.get_operation_artifact("run-failed"),
+        Err(StoreError::NotFound { .. })
+    ));
+    store.verify_invariants().unwrap();
+}
+
+#[test]
+fn persists_findings_as_an_auditable_artifact_without_patch_review_state() {
+    let temp = TempDatabase::new();
+    let mut store = open_seeded(&temp.database);
+    let mut bundle = operation_bundle("run-findings", "context-findings", "findings-1");
+    let artifact = bundle.artifact.as_mut().unwrap();
+    artifact.kind = OperationArtifactKind::Findings;
+    artifact.binding_hash = "sha256:findings".into();
+    artifact.payload_json = r#"{"findings":[{"severity":"warning","message":"节奏过快"}]}"#.into();
+
+    store.persist_operation_bundle(&bundle).unwrap();
+    let stored = store.get_operation_artifact("run-findings").unwrap();
+    assert_eq!(stored.kind, OperationArtifactKind::Findings);
+    assert!(matches!(
+        store.get_review_session("findings-1"),
+        Err(StoreError::NotFound { .. })
+    ));
+    store.verify_invariants().unwrap();
+}
+
+#[test]
+fn appends_review_decisions_with_optimistic_concurrency_and_operation_transitions() {
+    let temp = TempDatabase::new();
+    let mut store = open_seeded(&temp.database);
+    store
+        .persist_operation_bundle(&operation_bundle(
+            "run-review",
+            "context-review",
+            "proposal-review",
+        ))
+        .unwrap();
+
+    let ready = store
+        .append_review_event(&AppendReviewEvent {
+            id: "review-event-1".into(),
+            proposal_id: "proposal-review".into(),
+            expected_revision: 0,
+            expected_status: ReviewSessionStatus::Review,
+            kind: ReviewEventKind::Decision,
+            next_status: ReviewSessionStatus::Ready,
+            hunk_id: Some("hunk-1".into()),
+            decision: Some(ReviewDecision::Accepted),
+            payload_json: Some(r#"{"source":"inline-review"}"#.into()),
+            occurred_at: "2026-07-15T00:02:00.000Z".into(),
+        })
+        .unwrap();
+    assert_eq!(ready.revision, 1);
+    assert_eq!(ready.status, ReviewSessionStatus::Ready);
+    assert_eq!(
+        store.get_operation_run("run-review").unwrap().state,
+        OperationState::Review
+    );
+
+    let applied = store
+        .append_review_event(&AppendReviewEvent {
+            id: "review-event-2".into(),
+            proposal_id: "proposal-review".into(),
+            expected_revision: 1,
+            expected_status: ReviewSessionStatus::Ready,
+            kind: ReviewEventKind::Apply,
+            next_status: ReviewSessionStatus::Applied,
+            hunk_id: None,
+            decision: None,
+            payload_json: Some(r#"{"transactionId":"tx-1"}"#.into()),
+            occurred_at: "2026-07-15T00:03:00.000Z".into(),
+        })
+        .unwrap();
+    assert_eq!(applied.revision, 2);
+    assert_eq!(applied.status, ReviewSessionStatus::Applied);
+    assert_eq!(
+        store.get_operation_run("run-review").unwrap().state,
+        OperationState::Accepted
+    );
+    let lifecycle = store.list_operation_lifecycle_events("run-review").unwrap();
+    assert_eq!(lifecycle.last().unwrap().from_state, OperationState::Review);
+    assert_eq!(lifecycle.last().unwrap().to_state, OperationState::Accepted);
+    assert_eq!(
+        store.list_review_events("proposal-review").unwrap().len(),
+        2
+    );
+
+    let stale = store
+        .append_review_event(&AppendReviewEvent {
+            id: "review-event-stale".into(),
+            proposal_id: "proposal-review".into(),
+            expected_revision: 1,
+            expected_status: ReviewSessionStatus::Ready,
+            kind: ReviewEventKind::Apply,
+            next_status: ReviewSessionStatus::Applied,
+            hunk_id: None,
+            decision: None,
+            payload_json: None,
+            occurred_at: "2026-07-15T00:04:00.000Z".into(),
+        })
+        .unwrap_err();
+    assert!(matches!(stale, StoreError::StateConflict { .. }));
+    assert_eq!(
+        store.list_review_events("proposal-review").unwrap().len(),
+        2
+    );
+    store.verify_invariants().unwrap();
+}
+
+#[test]
+fn persists_conflict_rebase_and_rejection_as_a_contiguous_operation_history() {
+    let temp = TempDatabase::new();
+    let mut store = open_seeded(&temp.database);
+    store
+        .persist_operation_bundle(&operation_bundle(
+            "run-conflicted",
+            "context-conflicted",
+            "proposal-conflicted",
+        ))
+        .unwrap();
+
+    let commands = [
+        AppendReviewEvent {
+            id: "conflict-event".into(),
+            proposal_id: "proposal-conflicted".into(),
+            expected_revision: 0,
+            expected_status: ReviewSessionStatus::Review,
+            kind: ReviewEventKind::Conflict,
+            next_status: ReviewSessionStatus::Conflicted,
+            hunk_id: None,
+            decision: None,
+            payload_json: Some(r#"{"code":"TARGET_BLOCK_CHANGED"}"#.into()),
+            occurred_at: "2026-07-15T00:02:00.000Z".into(),
+        },
+        AppendReviewEvent {
+            id: "rebase-event".into(),
+            proposal_id: "proposal-conflicted".into(),
+            expected_revision: 1,
+            expected_status: ReviewSessionStatus::Conflicted,
+            kind: ReviewEventKind::Rebase,
+            next_status: ReviewSessionStatus::Review,
+            hunk_id: None,
+            decision: None,
+            payload_json: Some(r#"{"proposalHash":"sha256:rebased"}"#.into()),
+            occurred_at: "2026-07-15T00:03:00.000Z".into(),
+        },
+        AppendReviewEvent {
+            id: "reject-event".into(),
+            proposal_id: "proposal-conflicted".into(),
+            expected_revision: 2,
+            expected_status: ReviewSessionStatus::Review,
+            kind: ReviewEventKind::Reject,
+            next_status: ReviewSessionStatus::Rejected,
+            hunk_id: None,
+            decision: None,
+            payload_json: None,
+            occurred_at: "2026-07-15T00:04:00.000Z".into(),
+        },
+    ];
+    for command in commands {
+        store.append_review_event(&command).unwrap();
+    }
+
+    let run = store.get_operation_run("run-conflicted").unwrap();
+    assert_eq!(run.state, OperationState::Rejected);
+    let lifecycle = store
+        .list_operation_lifecycle_events("run-conflicted")
+        .unwrap();
+    assert_eq!(lifecycle.len(), 9);
+    assert_eq!(lifecycle[6].to_state, OperationState::Conflicted);
+    assert_eq!(lifecycle[7].to_state, OperationState::Review);
+    assert_eq!(lifecycle[8].to_state, OperationState::Rejected);
+    assert_eq!(
+        store
+            .get_review_session("proposal-conflicted")
+            .unwrap()
+            .revision,
+        3
+    );
+    store.verify_invariants().unwrap();
+}
+
+#[test]
+fn immutable_operation_artifacts_reject_out_of_band_tampering() {
+    let temp = TempDatabase::new();
+    let mut store = open_seeded(&temp.database);
+    store
+        .persist_operation_bundle(&operation_bundle(
+            "run-tamper",
+            "context-tamper",
+            "proposal-tamper",
+        ))
+        .unwrap();
+    drop(store);
+
+    let connection = rusqlite::Connection::open(&temp.database).unwrap();
+    let artifact = connection.execute(
+        "UPDATE operation_artifact SET binding_hash = 'tampered' WHERE id = 'proposal-tamper'",
+        [],
+    );
+    assert!(artifact.is_err());
+    let context = connection.execute(
+        "DELETE FROM context_packet_record WHERE id = 'context-tamper'",
+        [],
+    );
+    assert!(context.is_err());
 }

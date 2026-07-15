@@ -1,5 +1,6 @@
-use std::path::Path;
-use std::time::Duration;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, MAIN_DB, OptionalExtension, Transaction, TransactionBehavior, params};
 
@@ -24,19 +25,37 @@ pub struct StoreDiagnostics {
     pub journal_mode: String,
     pub foreign_keys: bool,
     pub synchronous: i64,
+    pub migration_backup: Option<PathBuf>,
 }
 
 pub struct OptimizerStore {
-    connection: Connection,
+    pub(crate) connection: Connection,
+    migration_backup: Option<PathBuf>,
 }
 
 impl OptimizerStore {
     pub fn open(path: impl AsRef<Path>) -> StoreResult<Self> {
+        let path = path.as_ref();
         let mut connection = Connection::open(path)?;
         configure(&connection, true)?;
         ensure_safe_sqlite_version(&connection)?;
+        let schema_version: i64 =
+            connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        let migration_backup = if schema_version > 0 && schema_version < CURRENT_SCHEMA_VERSION {
+            Some(create_pre_migration_backup(
+                &connection,
+                path,
+                schema_version,
+                CURRENT_SCHEMA_VERSION,
+            )?)
+        } else {
+            None
+        };
         migrate(&mut connection)?;
-        let store = Self { connection };
+        let store = Self {
+            connection,
+            migration_backup,
+        };
         store.verify_invariants()?;
         Ok(store)
     }
@@ -46,7 +65,10 @@ impl OptimizerStore {
         configure(&connection, false)?;
         ensure_safe_sqlite_version(&connection)?;
         migrate(&mut connection)?;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            migration_backup: None,
+        })
     }
 
     pub fn diagnostics(&self) -> StoreResult<StoreDiagnostics> {
@@ -65,6 +87,7 @@ impl OptimizerStore {
             synchronous: self
                 .connection
                 .query_row("PRAGMA synchronous", [], |row| row.get(0))?,
+            migration_backup: self.migration_backup.clone(),
         })
     }
 
@@ -799,6 +822,7 @@ impl OptimizerStore {
                 "FTS index count {indexed_blocks} does not match active block count {active_blocks}"
             )));
         }
+        self.verify_operation_invariants()?;
         Ok(())
     }
 }
@@ -835,6 +859,39 @@ fn read_block_for_edit(
         )
         .optional()?
         .ok_or_else(|| StoreError::NotFound { entity: "block", id: block_id.to_owned() })
+}
+
+fn create_pre_migration_backup(
+    connection: &Connection,
+    database_path: &Path,
+    from_version: i64,
+    to_version: i64,
+) -> StoreResult<PathBuf> {
+    let file_name = database_path
+        .file_name()
+        .ok_or_else(|| StoreError::Validation("database path has no file name".into()))?
+        .to_string_lossy();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| StoreError::Validation(format!("system clock is invalid: {error}")))?
+        .as_nanos();
+    let destination = database_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(
+            "{file_name}.pre-v{from_version}-to-v{to_version}-{nonce}.sqlite3"
+        ));
+    connection.backup(MAIN_DB, &destination, None)?;
+    let backup = Connection::open(&destination)?;
+    let result: String = backup.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+    drop(backup);
+    if result != "ok" {
+        let _ = fs::remove_file(&destination);
+        return Err(StoreError::InvariantViolation(format!(
+            "pre-migration backup quick_check returned {result}"
+        )));
+    }
+    Ok(destination)
 }
 
 fn configure(connection: &Connection, wal: bool) -> StoreResult<()> {
@@ -1103,5 +1160,75 @@ fn snapshot_structure_signature(snapshot: &ProjectSnapshotV1) -> StructureSignat
                 )
             })
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod migration_backup_tests {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use rusqlite::Connection;
+
+    use super::OptimizerStore;
+    use crate::migration::{CURRENT_SCHEMA_VERSION, MIGRATION_1};
+
+    struct TempDirectory(PathBuf);
+
+    impl TempDirectory {
+        fn new() -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "optimizer-migration-backup-{}-{nonce}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn creates_a_checked_version_one_backup_before_file_migration() {
+        let temp = TempDirectory::new();
+        let database = temp.0.join("project.sqlite3");
+        let connection = Connection::open(&database).unwrap();
+        connection.execute_batch(MIGRATION_1).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migration(version, applied_at) VALUES (1, '2026-07-14T00:00:00.000Z')",
+                [],
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 1).unwrap();
+        drop(connection);
+
+        let store = OptimizerStore::open(&database).unwrap();
+        let diagnostics = store.diagnostics().unwrap();
+        assert_eq!(diagnostics.schema_version, CURRENT_SCHEMA_VERSION);
+        let backup_path = diagnostics.migration_backup.unwrap();
+        assert!(backup_path.exists());
+        let backup = Connection::open(backup_path).unwrap();
+        let backup_version: i64 = backup
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        let operation_tables: i64 = backup
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'operation_run'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(backup_version, 1);
+        assert_eq!(operation_tables, 0);
     }
 }

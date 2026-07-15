@@ -44,6 +44,8 @@ export class OperationRunner {
   async execute(request: ExecuteOperationRequest): Promise<OperationExecutionResult> {
     const runId = this.ports.ids.nextRunId();
     const lifecycle = new OperationLifecycle();
+    let compiledPacket: ContextPacket | undefined;
+    let resolvedModel: string | undefined;
     const move = (to: OperationState, reason?: string): void => {
       const transition = lifecycle.transition(to, this.ports.clock.now(), reason);
       emit(request.onProgress, { type: "lifecycle", runId, transition });
@@ -53,6 +55,7 @@ export class OperationRunner {
       throwIfCancelled(request.signal);
       move("compiling");
       const provider = this.ports.providers.provider(request.providerId);
+      resolvedModel = request.model?.trim() || provider.profile.defaultModel;
       const packet = await this.ports.contextCompiler.compile({
         intent: request.intent,
         profile: coreOperationProfiles[request.intent.type],
@@ -60,6 +63,7 @@ export class OperationRunner {
         modelLimit: request.modelLimit,
         reservedOverhead: request.reservedOverhead ?? defaultReservedOverhead,
       });
+      compiledPacket = packet;
 
       throwIfCancelled(request.signal);
       move("preflight");
@@ -136,6 +140,9 @@ export class OperationRunner {
         runId,
         state: terminal,
         history: lifecycle.history,
+        providerId: request.providerId,
+        model: resolvedModel,
+        contextPacket: compiledPacket,
         rootCause: error,
       });
     }

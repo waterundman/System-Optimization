@@ -2,7 +2,7 @@
 
 基于《Optimizer Kernel 文本优化器工程设计文档》的实际工程仓库。
 
-当前实现已完成 M0/M1 基线并推进 M2：稳定协议、纯领域内核、宿主安全边界、SQLite 版本存储、可校验快照恢复、编辑器桥接、Patch 审查闭环、多模型网关与 Operation 执行闭环已经可测试运行。
+当前实现已完成 M0/M1 基线并推进 M2：稳定协议、纯领域内核、宿主安全边界、SQLite 版本与 Operation 审计存储、可校验快照恢复、编辑器桥接、Patch 审查闭环、多模型网关与 Operation 执行闭环已经可测试运行。
 
 ## 已实现
 
@@ -10,7 +10,7 @@
 - `@optimizer/kernel`：操作状态机、端口接口、确定性 Context Compiler、预算与隐私过滤。
 - `kernel-lab`：无需第三方依赖即可运行的上下文编译示例。
 - `optimizer-host`：Rust 宿主路径边界与目录逃逸防护基线。
-- `optimizer-store`：SQLite 3.51.3、Block、编辑日志、Commit DAG、快照、FTS5 与在线备份。
+- `optimizer-store`：SQLite 3.51.3、Block/Commit/快照、Operation/Artifact/Review 审计日志、FTS5 与迁移前在线备份。
 - `@optimizer/editor-bridge`：稳定 Block ID、UTF-16 选区映射、乐观并发编辑事务与 Tiptap 快照适配。
 - `@optimizer/patch-engine`：中文分层 diff、PatchProposal v2、逐 hunk 审查、原子决策与冲突检测。
 - `@optimizer/model-gateway`：DeepSeek、Qwen、Kimi、MiniMax，支持流式输出、取消、超时与统一错误。
@@ -49,7 +49,7 @@ scripts/               工程约束检查
 
 ## 下一步
 
-1. PatchProposal、OperationRun、模型用量与审查事件事务性持久化。
+1. 宿主命令适配：把 Operation Runner 成功/失败结果映射到 Store bundle。
 2. Ollama 本地 Provider 与模型可用性探测。
-3. Tiptap 审查 UI 与 Kernel Lab 可视化。
+3. Tiptap 审查 UI、审查事件写入与 Kernel Lab 可视化。
 4. 显式成本策略下的重试与 Provider fallback 调度。

@@ -29,3 +29,5 @@ OperationIntent
 - `findings`：模型返回经过数量、字段、severity 和长度校验的问题列表，不生成编辑事务。
 
 `onProgress` 只面向瞬时 UI 更新，观察者异常不会改变操作语义。需要持久化的生命周期、模型用量和 proposal 将由后续 Operation Store 负责。
+
+成功结果包含完整 ContextPacket、模型响应 ID、模型名称、用量和生命周期。失败结果 `OperationExecutionError` 也会保留 run ID、Provider、已解析模型以及失败前已经完成的 ContextPacket，供宿主构造可审计的失败 OperationRun；不会保存 API Key 或原始 HTTP Header。

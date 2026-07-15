@@ -233,6 +233,9 @@ test("fails stale targets during preflight before a billable provider call", asy
       if (!(error instanceof OperationExecutionError)) return false;
       assert.equal(error.code, "TARGET_STALE");
       assert.equal(error.state, "failed");
+      assert.equal(error.contextPacket?.id.startsWith("ctx_test_"), true);
+      assert.equal(error.providerId, "deepseek");
+      assert.equal(error.model, "deepseek-v4-flash");
       assert.equal(error.history.at(-1)?.to, "failed");
       return true;
     },
