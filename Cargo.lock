@@ -1698,7 +1698,6 @@ name = "optimizer-desktop"
 version = "0.1.0"
 dependencies = [
  "optimizer-host",
- "optimizer-store",
  "serde",
  "serde_json",
  "tauri",
@@ -1712,6 +1711,9 @@ dependencies = [
  "optimizer-store",
  "serde",
  "serde_json",
+ "sha2",
+ "time",
+ "uuid",
  "windows-sys 0.61.2",
  "zeroize",
 ]

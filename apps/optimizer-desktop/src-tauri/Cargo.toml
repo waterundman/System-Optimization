@@ -15,7 +15,6 @@ serde = { version = "1.0.228", features = ["derive"] }
 tauri = { version = "2.11.2", default-features = false }
 
 [dev-dependencies]
-optimizer-store = { path = "../../../crates/optimizer-store" }
 serde_json = "1.0.150"
 
 [lib]

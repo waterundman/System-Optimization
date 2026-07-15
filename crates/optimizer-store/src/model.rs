@@ -33,6 +33,28 @@ pub struct ProjectSeed {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectRecord {
+    pub id: String,
+    pub title: String,
+    pub language: String,
+    pub schema_version: i64,
+    pub head_commit_id: String,
+    pub revision: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchRecord {
+    pub id: String,
+    pub project_id: String,
+    pub name: String,
+    pub head_commit_id: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockRecord {
     pub id: String,
     pub document_id: String,

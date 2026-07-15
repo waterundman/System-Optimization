@@ -3,12 +3,16 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 mod operation_commands;
+mod project_package;
 mod secrets;
 
 pub use operation_commands::{
     ArtifactAudit, ContextPacketAudit, FailureAudit, LifecycleEventAudit, ModelUsageAudit,
     OperationAuditResponse, OperationCommandError, OperationCommandHost, PersistOperationResponse,
     PersistReviewResponse, ReviewAudit, ReviewEventAudit, RunAudit,
+};
+pub use project_package::{
+    NewProjectSpec, OpenedProject, ProjectInfo, ProjectPackageError, ProjectPackageManifest,
 };
 #[cfg(windows)]
 pub use secrets::WindowsCredentialStore;

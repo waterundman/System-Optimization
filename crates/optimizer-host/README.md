@@ -5,14 +5,21 @@ Rust 宿主安全边界与跨语言命令适配层。
 当前实现：
 
 - `ProjectRoot` 校验项目相对路径，拒绝绝对路径、`..` 与目录逃逸；
+- `OpenedProject::create/open` 原子创建并严格校验 `.optimizer` 项目包；
 - `OperationCommandHost::persist_operation_bundle_json` 严格接收 v1 Operation bundle，并在一个 Store 事务中持久化；
 - `OperationCommandHost::append_review_event_json` 使用 expected revision/status 写入审查事件；
 - `OperationCommandHost::get_operation_audit` 聚合运行、ContextPacket、生命周期、Artifact 与 Patch review 历史；
 - 所有输入 DTO 使用 `deny_unknown_fields`，协议版本不匹配或嵌套未知字段会在写库前失败；
-- ContextPacket、Artifact 与 review 的开放 JSON payload 会递归拒绝 credential、API key、Authorization 和原始 Header 字段；
-- TypeScript 与 Rust 读取同一份 `packages/protocol/fixtures/operation-persistence-bundle.v1.json` 夹具，避免边界字段漂移。
-- `SecretStore` 只接受协议一致的 `secret://` 引用；`SecretValue` Debug 固定脱敏并在释放时清零。
-- Windows 使用 Credential Manager Generic Credential 后端，Secret 不写入 SQLite、配置文件或日志。
+- 开放 JSON payload 会递归拒绝 credential、API key、Authorization 和原始 Header 字段；
+- TypeScript 与 Rust 读取同一份 Operation 持久化夹具，避免边界字段漂移；
+- `SecretStore` 只接受 `secret://` 引用；`SecretValue` Debug 固定脱敏并在释放时清零；
+- Windows 使用 Credential Manager Generic Credential，Secret 不写入 SQLite、配置文件或日志。
+
+## `.optimizer` 项目包
+
+`OpenedProject::create/open` 是桌面端项目生命周期的唯一入口。项目包使用固定的 `manifest.json + project.sqlite3 + assets/backups/exports` 结构；创建时在目标父目录的隐藏 staging 目录完成初始化与校验，再原子 rename 发布。打开时严格校验 manifest 大小/schema、数据库 invariant、项目 ID 和主分支/HEAD 绑定。
+
+`ProjectInfo` 对上层暴露 `projectId`、`mainBranchId`、HEAD、revision 与数据库 schema，为下一阶段的文档加载、乐观并发自动保存和版本提交提供稳定基线。
 
 Tauri Adapter 已在 `apps/optimizer-desktop` 注册最小权限 commands/capabilities。Provider 网络请求移入宿主、macOS Keychain/Linux Secret Service 后端与 WASM 插件资源限制仍属于后续宿主能力。
 

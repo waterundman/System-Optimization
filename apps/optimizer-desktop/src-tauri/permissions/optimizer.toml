@@ -1,4 +1,9 @@
 [[permission]]
+identifier = "allow-project-session"
+description = "Allows the bundled editor to create, open, close and inspect one local project session."
+commands.allow = ["create_project", "open_project", "close_project", "get_project_session"]
+
+[[permission]]
 identifier = "allow-operation-write"
 description = "Allows the bundled editor to persist final operation bundles and append optimistic review events."
 commands.allow = ["persist_operation_bundle", "append_review_event"]

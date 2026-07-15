@@ -7,8 +7,8 @@ use rusqlite::{Connection, MAIN_DB, OptionalExtension, Transaction, TransactionB
 use crate::error::{StoreError, StoreResult};
 use crate::migration::{CURRENT_SCHEMA_VERSION, migrate};
 use crate::model::{
-    ApplyBlockEdit, BlockRecord, BlockSearchHit, CommitRecord, CreateSnapshot, EditReceipt,
-    ProjectSeed, RestoreReceipt, RestoreSnapshot, SnapshotRecord,
+    ApplyBlockEdit, BlockRecord, BlockSearchHit, BranchRecord, CommitRecord, CreateSnapshot,
+    EditReceipt, ProjectRecord, ProjectSeed, RestoreReceipt, RestoreSnapshot, SnapshotRecord,
 };
 use crate::snapshot::{
     ProjectSnapshotV1, SNAPSHOT_CODEC, SNAPSHOT_CODEC_VERSION, SNAPSHOT_SCHEMA_VERSION,
@@ -168,6 +168,56 @@ impl OptimizerStore {
         )?;
         transaction.commit()?;
         Ok(())
+    }
+
+    pub fn get_project(&self, project_id: &str) -> StoreResult<ProjectRecord> {
+        self.connection
+            .query_row(
+                "SELECT id, title, language, schema_version, head_commit_id, revision, created_at, updated_at
+                 FROM project WHERE id = ?1",
+                [project_id],
+                |row| {
+                    Ok(ProjectRecord {
+                        id: row.get(0)?,
+                        title: row.get(1)?,
+                        language: row.get(2)?,
+                        schema_version: row.get(3)?,
+                        head_commit_id: row.get(4)?,
+                        revision: row.get(5)?,
+                        created_at: row.get(6)?,
+                        updated_at: row.get(7)?,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NotFound {
+                entity: "project",
+                id: project_id.to_owned(),
+            })
+    }
+
+    pub fn get_branch(&self, branch_id: &str) -> StoreResult<BranchRecord> {
+        self.connection
+            .query_row(
+                "SELECT id, project_id, name, head_commit_id, created_at, updated_at
+                 FROM branch WHERE id = ?1",
+                [branch_id],
+                |row| {
+                    Ok(BranchRecord {
+                        id: row.get(0)?,
+                        project_id: row.get(1)?,
+                        name: row.get(2)?,
+                        head_commit_id: row.get(3)?,
+                        created_at: row.get(4)?,
+                        updated_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NotFound {
+                entity: "branch",
+                id: branch_id.to_owned(),
+            })
     }
 
     pub fn get_block(&self, block_id: &str) -> StoreResult<BlockRecord> {

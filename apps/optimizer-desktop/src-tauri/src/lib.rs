@@ -1,10 +1,11 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use optimizer_host::{
-    OperationAuditResponse, OperationCommandError, OperationCommandHost, PersistOperationResponse,
-    PersistReviewResponse, SecretReference, SecretStore, SecretStoreError, SecretValue,
+    NewProjectSpec, OpenedProject, OperationAuditResponse, OperationCommandError,
+    PersistOperationResponse, PersistReviewResponse, ProjectInfo, ProjectPackageError,
+    SecretReference, SecretStore, SecretStoreError, SecretValue,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{Runtime, State};
 
 mod command_manifest;
@@ -13,32 +14,87 @@ pub use command_manifest::REGISTERED_COMMANDS;
 
 #[derive(Clone)]
 pub struct DesktopState {
-    operations: Arc<Mutex<OperationCommandHost>>,
+    session: Arc<Mutex<Option<OpenedProject>>>,
     secrets: Arc<dyn SecretStore>,
 }
 
 impl DesktopState {
-    pub fn new(operations: OperationCommandHost, secrets: Arc<dyn SecretStore>) -> Self {
+    pub fn new(secrets: Arc<dyn SecretStore>) -> Self {
         Self {
-            operations: Arc::new(Mutex::new(operations)),
+            session: Arc::new(Mutex::new(None)),
             secrets,
         }
     }
 
+    pub fn create_project(
+        &self,
+        input: CreateProjectRequest,
+    ) -> CommandResult<ProjectSessionResponse> {
+        input.validate()?;
+        let mut session = self.project_session()?;
+        if session.is_some() {
+            return Err(CommandError::project_already_open());
+        }
+        let project = OpenedProject::create(
+            &input.parent_directory,
+            &NewProjectSpec {
+                folder_name: input.folder_name,
+                title: input.title,
+                language: input.language,
+            },
+        )
+        .map_err(CommandError::from)?;
+        let info = project.info().map_err(CommandError::from)?;
+        *session = Some(project);
+        Ok(ProjectSessionResponse::open(info))
+    }
+
+    pub fn open_project(&self, input: OpenProjectRequest) -> CommandResult<ProjectSessionResponse> {
+        input.validate()?;
+        let mut session = self.project_session()?;
+        if session.is_some() {
+            return Err(CommandError::project_already_open());
+        }
+        let project = OpenedProject::open(&input.project_directory).map_err(CommandError::from)?;
+        let info = project.info().map_err(CommandError::from)?;
+        *session = Some(project);
+        Ok(ProjectSessionResponse::open(info))
+    }
+
+    pub fn close_project(&self) -> CommandResult<ProjectSessionResponse> {
+        self.project_session()?.take();
+        Ok(ProjectSessionResponse::closed())
+    }
+
+    pub fn get_project_session(&self) -> CommandResult<ProjectSessionResponse> {
+        let session = self.project_session()?;
+        match session.as_ref() {
+            Some(project) => Ok(ProjectSessionResponse::open(
+                project.info().map_err(CommandError::from)?,
+            )),
+            None => Ok(ProjectSessionResponse::closed()),
+        }
+    }
+
     pub fn persist_operation_bundle(&self, input: &str) -> CommandResult<PersistOperationResponse> {
-        self.operation_host()?
+        let mut project = self.current_project()?;
+        project
+            .operations_mut()
             .persist_operation_bundle_json(input)
             .map_err(CommandError::from)
     }
 
     pub fn append_review_event(&self, input: &str) -> CommandResult<PersistReviewResponse> {
-        self.operation_host()?
+        let mut project = self.current_project()?;
+        project
+            .operations_mut()
             .append_review_event_json(input)
             .map_err(CommandError::from)
     }
 
     pub fn get_operation_audit(&self, run_id: &str) -> CommandResult<OperationAuditResponse> {
-        self.operation_host()?
+        self.current_project()?
+            .operations()
             .get_operation_audit(run_id)
             .map_err(CommandError::from)
     }
@@ -91,10 +147,44 @@ impl DesktopState {
         })
     }
 
-    fn operation_host(&self) -> CommandResult<MutexGuard<'_, OperationCommandHost>> {
-        self.operations
+    fn project_session(&self) -> CommandResult<MutexGuard<'_, Option<OpenedProject>>> {
+        self.session
             .lock()
             .map_err(|_| CommandError::state_unavailable())
+    }
+
+    fn current_project(&self) -> CommandResult<OpenedProjectGuard<'_>> {
+        let guard = self.project_session()?;
+        if guard.is_none() {
+            return Err(CommandError::no_project_open());
+        }
+        Ok(OpenedProjectGuard(guard))
+    }
+}
+
+struct OpenedProjectGuard<'a>(MutexGuard<'a, Option<OpenedProject>>);
+
+impl OpenedProjectGuard<'_> {
+    fn project(&self) -> &OpenedProject {
+        self.0.as_ref().expect("open project guard invariant")
+    }
+
+    fn project_mut(&mut self) -> &mut OpenedProject {
+        self.0.as_mut().expect("open project guard invariant")
+    }
+}
+
+impl std::ops::Deref for OpenedProjectGuard<'_> {
+    type Target = OpenedProject;
+
+    fn deref(&self) -> &Self::Target {
+        self.project()
+    }
+}
+
+impl std::ops::DerefMut for OpenedProjectGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.project_mut()
     }
 }
 
@@ -121,10 +211,40 @@ impl CommandError {
             message: "Desktop host task failed".into(),
         }
     }
+
+    fn no_project_open() -> Self {
+        Self {
+            code: "NO_PROJECT_OPEN".into(),
+            message: "Open a project before using this command".into(),
+        }
+    }
+
+    fn project_already_open() -> Self {
+        Self {
+            code: "PROJECT_ALREADY_OPEN".into(),
+            message: "Close the current project before opening another one".into(),
+        }
+    }
+
+    fn unsupported_request_schema(actual: u32) -> Self {
+        Self {
+            code: "UNSUPPORTED_SCHEMA".into(),
+            message: format!("Unsupported project command schema version {actual}"),
+        }
+    }
 }
 
 impl From<OperationCommandError> for CommandError {
     fn from(error: OperationCommandError) -> Self {
+        Self {
+            code: error.code().into(),
+            message: error.public_message(),
+        }
+    }
+}
+
+impl From<ProjectPackageError> for CommandError {
+    fn from(error: ProjectPackageError) -> Self {
         Self {
             code: error.code().into(),
             message: error.public_message(),
@@ -137,6 +257,71 @@ impl From<SecretStoreError> for CommandError {
         Self {
             code: error.code().into(),
             message: error.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateProjectRequest {
+    pub schema_version: u32,
+    pub parent_directory: String,
+    pub folder_name: String,
+    pub title: String,
+    pub language: String,
+}
+
+impl CreateProjectRequest {
+    fn validate(&self) -> CommandResult<()> {
+        if self.schema_version != 1 {
+            return Err(CommandError::unsupported_request_schema(
+                self.schema_version,
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OpenProjectRequest {
+    pub schema_version: u32,
+    pub project_directory: String,
+}
+
+impl OpenProjectRequest {
+    fn validate(&self) -> CommandResult<()> {
+        if self.schema_version != 1 {
+            return Err(CommandError::unsupported_request_schema(
+                self.schema_version,
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSessionResponse {
+    pub schema_version: u32,
+    pub is_open: bool,
+    pub project: Option<ProjectInfo>,
+}
+
+impl ProjectSessionResponse {
+    fn open(project: ProjectInfo) -> Self {
+        Self {
+            schema_version: 1,
+            is_open: true,
+            project: Some(project),
+        }
+    }
+
+    fn closed() -> Self {
+        Self {
+            schema_version: 1,
+            is_open: false,
+            project: None,
         }
     }
 }
@@ -162,6 +347,10 @@ pub fn attach<R: Runtime>(builder: tauri::Builder<R>, state: DesktopState) -> ta
     builder
         .manage(state)
         .invoke_handler(tauri::generate_handler![
+            create_project,
+            open_project,
+            close_project,
+            get_project_session,
             persist_operation_bundle,
             append_review_event,
             get_operation_audit,
@@ -172,14 +361,39 @@ pub fn attach<R: Runtime>(builder: tauri::Builder<R>, state: DesktopState) -> ta
 }
 
 #[tauri::command]
+async fn create_project(
+    input: CreateProjectRequest,
+    state: State<'_, DesktopState>,
+) -> CommandResult<ProjectSessionResponse> {
+    spawn_host_task(state, move |state| state.create_project(input)).await
+}
+
+#[tauri::command]
+async fn open_project(
+    input: OpenProjectRequest,
+    state: State<'_, DesktopState>,
+) -> CommandResult<ProjectSessionResponse> {
+    spawn_host_task(state, move |state| state.open_project(input)).await
+}
+
+#[tauri::command]
+async fn close_project(state: State<'_, DesktopState>) -> CommandResult<ProjectSessionResponse> {
+    spawn_host_task(state, DesktopState::close_project).await
+}
+
+#[tauri::command]
+async fn get_project_session(
+    state: State<'_, DesktopState>,
+) -> CommandResult<ProjectSessionResponse> {
+    spawn_host_task(state, DesktopState::get_project_session).await
+}
+
+#[tauri::command]
 async fn persist_operation_bundle(
     input: String,
     state: State<'_, DesktopState>,
 ) -> CommandResult<PersistOperationResponse> {
-    let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || state.persist_operation_bundle(&input))
-        .await
-        .map_err(|_| CommandError::task_failed())?
+    spawn_host_task(state, move |state| state.persist_operation_bundle(&input)).await
 }
 
 #[tauri::command]
@@ -187,10 +401,7 @@ async fn append_review_event(
     input: String,
     state: State<'_, DesktopState>,
 ) -> CommandResult<PersistReviewResponse> {
-    let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || state.append_review_event(&input))
-        .await
-        .map_err(|_| CommandError::task_failed())?
+    spawn_host_task(state, move |state| state.append_review_event(&input)).await
 }
 
 #[tauri::command]
@@ -198,10 +409,7 @@ async fn get_operation_audit(
     run_id: String,
     state: State<'_, DesktopState>,
 ) -> CommandResult<OperationAuditResponse> {
-    let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || state.get_operation_audit(&run_id))
-        .await
-        .map_err(|_| CommandError::task_failed())?
+    spawn_host_task(state, move |state| state.get_operation_audit(&run_id)).await
 }
 
 #[tauri::command]
@@ -210,10 +418,10 @@ async fn store_provider_secret(
     secret: String,
     state: State<'_, DesktopState>,
 ) -> CommandResult<SecretMutationResponse> {
-    let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || state.store_provider_secret(reference, secret))
-        .await
-        .map_err(|_| CommandError::task_failed())?
+    spawn_host_task(state, move |state| {
+        state.store_provider_secret(reference, secret)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -221,10 +429,7 @@ async fn has_provider_secret(
     reference: String,
     state: State<'_, DesktopState>,
 ) -> CommandResult<SecretStatusResponse> {
-    let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || state.has_provider_secret(reference))
-        .await
-        .map_err(|_| CommandError::task_failed())?
+    spawn_host_task(state, move |state| state.has_provider_secret(reference)).await
 }
 
 #[tauri::command]
@@ -232,8 +437,16 @@ async fn delete_provider_secret(
     reference: String,
     state: State<'_, DesktopState>,
 ) -> CommandResult<SecretMutationResponse> {
+    spawn_host_task(state, move |state| state.delete_provider_secret(reference)).await
+}
+
+async fn spawn_host_task<T, F>(state: State<'_, DesktopState>, task: F) -> CommandResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&DesktopState) -> CommandResult<T> + Send + 'static,
+{
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || state.delete_provider_secret(reference))
+    tauri::async_runtime::spawn_blocking(move || task(&state))
         .await
         .map_err(|_| CommandError::task_failed())?
 }
@@ -241,71 +454,127 @@ async fn delete_provider_secret(
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use optimizer_host::MemorySecretStore;
-    use optimizer_store::{OptimizerStore, ProjectSeed, SeedBlock, SeedDocument};
     use serde_json::json;
 
     use super::*;
 
-    fn state() -> (DesktopState, Arc<MemorySecretStore>) {
-        let mut store = OptimizerStore::open_in_memory().unwrap();
-        store
-            .initialize_project(&ProjectSeed {
-                project_id: "project-1".into(),
-                title: "Desktop adapter test".into(),
-                language: "zh-CN".into(),
-                initial_commit_id: "commit-initial".into(),
-                initial_root_hash: "sha256:root-initial".into(),
-                main_branch_id: "branch-main".into(),
-                documents: vec![SeedDocument {
-                    id: "document-1".into(),
-                    parent_id: None,
-                    kind: "chapter".into(),
-                    title: "Chapter 1".into(),
-                    order_key: "a0".into(),
-                }],
-                blocks: vec![SeedBlock {
-                    id: "block-1".into(),
-                    document_id: "document-1".into(),
-                    kind: "paragraph".into(),
-                    order_key: "a0".into(),
-                    content_json: r#"{"type":"paragraph","text":"station platform"}"#.into(),
-                    plain_text: "station platform".into(),
-                    content_hash: "sha256:block-initial".into(),
-                    locked: false,
-                }],
-                created_at: "2026-07-14T00:00:00.000Z".into(),
-            })
-            .unwrap();
+    struct TempParent(PathBuf);
+
+    static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    impl TempParent {
+        fn new() -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "optimizer-desktop-session-{}-{nonce}-{}",
+                std::process::id(),
+                NEXT_TEMP_DIRECTORY.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempParent {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn state() -> (DesktopState, Arc<MemorySecretStore>, TempParent) {
         let secrets = Arc::new(MemorySecretStore::default());
         (
-            DesktopState::new(OperationCommandHost::new(store), secrets.clone()),
+            DesktopState::new(secrets.clone()),
             secrets,
+            TempParent::new(),
         )
     }
 
-    fn fixture() -> String {
+    fn create_request(parent: &TempParent) -> CreateProjectRequest {
+        CreateProjectRequest {
+            schema_version: 1,
+            parent_directory: parent.0.to_string_lossy().into_owned(),
+            folder_name: "DesktopTest.optimizer".into(),
+            title: "Desktop Test".into(),
+            language: "zh-CN".into(),
+        }
+    }
+
+    fn open_test_project(state: &DesktopState, parent: &TempParent) -> ProjectInfo {
+        state
+            .create_project(create_request(parent))
+            .unwrap()
+            .project
+            .unwrap()
+    }
+
+    fn fixture(info: &ProjectInfo) -> String {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../packages/protocol/fixtures/operation-persistence-bundle.v1.json");
-        fs::read_to_string(path).unwrap()
+        let mut fixture: serde_json::Value =
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        fixture["run"]["projectId"] = json!(info.project_id);
+        fixture["run"]["baseCommitId"] = json!(info.head_commit_id);
+        fixture["contextPacket"]["projectId"] = json!(info.project_id);
+        fixture["contextPacket"]["baseCommitId"] = json!(info.head_commit_id);
+        fixture["contextPacket"]["payload"]["projectId"] = json!(info.project_id);
+        fixture["contextPacket"]["payload"]["baseCommitId"] = json!(info.head_commit_id);
+        fixture.to_string()
     }
 
     #[test]
-    fn desktop_state_persists_and_reads_the_shared_operation_fixture() {
-        let (state, _) = state();
-        let persisted = state.persist_operation_bundle(&fixture()).unwrap();
+    fn creates_closes_and_reopens_a_project_session() {
+        let (state, _, parent) = state();
+        assert!(!state.get_project_session().unwrap().is_open);
+        let created = state.create_project(create_request(&parent)).unwrap();
+        let info = created.project.unwrap();
+        assert!(Path::new(&info.directory).is_dir());
+        assert!(state.get_project_session().unwrap().is_open);
+        assert_eq!(
+            state
+                .create_project(create_request(&parent))
+                .unwrap_err()
+                .code,
+            "PROJECT_ALREADY_OPEN"
+        );
+        assert!(!state.close_project().unwrap().is_open);
+        let reopened = state
+            .open_project(OpenProjectRequest {
+                schema_version: 1,
+                project_directory: info.directory,
+            })
+            .unwrap();
+        assert_eq!(reopened.project.unwrap().project_id, info.project_id);
+    }
+
+    #[test]
+    fn operation_commands_require_and_use_the_current_project_session() {
+        let (state, _, parent) = state();
+        assert_eq!(
+            state.persist_operation_bundle("{}").unwrap_err().code,
+            "NO_PROJECT_OPEN"
+        );
+        let info = open_test_project(&state, &parent);
+        let persisted = state.persist_operation_bundle(&fixture(&info)).unwrap();
         assert_eq!(persisted.run_id, "run-fixture-1");
         let audit = state.get_operation_audit("run-fixture-1").unwrap();
         assert_eq!(audit.run.state, "review");
-        assert_eq!(audit.artifact.unwrap().id, "proposal-fixture-1");
+        assert_eq!(audit.run.project_id, info.project_id);
     }
 
     #[test]
     fn command_errors_are_structured_and_do_not_echo_secret_values() {
-        let (state, _) = state();
-        let mut payload: serde_json::Value = serde_json::from_str(&fixture()).unwrap();
+        let (state, _, parent) = state();
+        let info = open_test_project(&state, &parent);
+        let mut payload: serde_json::Value = serde_json::from_str(&fixture(&info)).unwrap();
         payload["contextPacket"]["payload"]["apiKey"] = json!("secret-never-echoed");
         let error = state
             .persist_operation_bundle(&payload.to_string())
@@ -316,7 +585,7 @@ mod tests {
 
     #[test]
     fn secret_commands_never_serialize_or_return_plaintext() {
-        let (state, store) = state();
+        let (state, store, _) = state();
         let reference = "secret://providers/deepseek/default".to_string();
         let stored = state
             .store_provider_secret(reference.clone(), "desktop-test-key".into())
@@ -356,6 +625,7 @@ mod tests {
         assert_eq!(
             capability["permissions"],
             json!([
+                "allow-project-session",
                 "allow-operation-write",
                 "allow-operation-audit-read",
                 "allow-provider-secret-manage"

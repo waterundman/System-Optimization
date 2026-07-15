@@ -4,8 +4,9 @@ use optimizer_store::{
     AppendReviewEvent, ContextPacketRecord, ModelUsageRecord, NewContextPacket,
     NewOperationArtifact, NewOperationLifecycleEvent, NewOperationRun, OperationArtifactKind,
     OperationArtifactRecord, OperationFailureRecord, OperationLifecycleEventRecord,
-    OperationRunRecord, OperationState, OptimizerStore, PersistOperationBundle, ReviewDecision,
-    ReviewEventKind, ReviewEventRecord, ReviewSessionRecord, ReviewSessionStatus, StoreError,
+    OperationRunRecord, OperationState, OptimizerStore, PersistOperationBundle, ProjectRecord,
+    ReviewDecision, ReviewEventKind, ReviewEventRecord, ReviewSessionRecord, ReviewSessionStatus,
+    StoreError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -185,6 +186,13 @@ impl OperationCommandHost {
 
     pub fn into_store(self) -> OptimizerStore {
         self.store
+    }
+
+    pub fn get_project_record(
+        &self,
+        project_id: &str,
+    ) -> Result<ProjectRecord, OperationCommandError> {
+        self.store.get_project(project_id).map_err(Into::into)
     }
 }
 
