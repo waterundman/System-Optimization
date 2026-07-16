@@ -60,9 +60,33 @@ test("runs Context Compiler to host stream to persisted patch proposal without p
     }],
     blocks: [block],
   };
+  let authorizedRequest = null;
+  const hostCalls = [];
   const invokeHost = async (command, args) => {
-    if (command === "execute_model_stream") {
+    hostCalls.push(command);
+    if (command === "authorize_model_request") {
       assert.ok(confirmedContext, "context must be confirmed before the billable host request");
+      assert.equal(args.input.binding.projectId, workspace.projectId);
+      assert.equal(args.input.binding.baseCommitId, workspace.headCommitId);
+      assert.equal(args.input.binding.operationIntentId, confirmedContext.operationIntentId);
+      assert.equal(args.input.binding.contextPacketId, confirmedContext.id);
+      assert.equal(args.input.binding.contextPacketHash, confirmedContext.packetHash);
+      assert.equal(args.input.binding.providerLocality, "remote");
+      assert.equal(args.input.binding.targetBlockId, block.id);
+      assert.equal(args.input.binding.targetBlockRevision, block.revision);
+      assert.equal(args.input.binding.targetBlockHash, block.contentHash);
+      authorizedRequest = args.input.request;
+      return {
+        schemaVersion: 1,
+        authorizationId: "model-auth-test",
+        requestId: authorizedRequest.requestId,
+        providerId: "deepseek",
+        expiresAt: "2026-07-15T00:02:00Z",
+      };
+    }
+    if (command === "execute_authorized_model_stream") {
+      assert.ok(authorizedRequest, "a host authorization must precede execution");
+      assert.equal(args.authorizationId, "model-auth-test");
       const output = JSON.stringify({
         schemaVersion: 1,
         kind: "replacement",
@@ -70,13 +94,13 @@ test("runs Context Compiler to host stream to persisted patch proposal without p
         summary: "插入开场句",
       });
       for (const event of [
-        { type: "start", requestId: args.input.requestId, id: "response-1", providerId: "deepseek", model: "deepseek-v4-flash" },
+        { type: "start", requestId: authorizedRequest.requestId, id: "response-1", providerId: "deepseek", model: "deepseek-v4-flash" },
         { type: "text_delta", text: output },
         { type: "finish", reason: "stop" },
       ]) args.onEvent.onmessage(event);
       return {
         schemaVersion: 1,
-        requestId: args.input.requestId,
+        requestId: authorizedRequest.requestId,
         responseId: "response-1",
         providerId: "deepseek",
         model: "deepseek-v4-flash",
@@ -145,6 +169,10 @@ test("runs Context Compiler to host stream to persisted patch proposal without p
   assert.equal(execution.result.kind, "patch_proposal");
   assert.equal(execution.result.proposal.hunks.length, 1);
   assert.equal(execution.result.proposal.hunks[0].replacement, "你好，世界");
+  assert.deepEqual(hostCalls.slice(0, 2), [
+    "authorize_model_request",
+    "execute_authorized_model_stream",
+  ]);
   assert.equal(persisted.length, 1);
   const bundle = JSON.parse(persisted[0]);
   assert.equal(bundle.run.state, "review");

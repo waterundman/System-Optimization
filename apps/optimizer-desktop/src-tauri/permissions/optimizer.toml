@@ -50,5 +50,5 @@ commands.allow = ["store_provider_secret", "has_provider_secret", "delete_provid
 
 [[permission]]
 identifier = "allow-model-execution"
-description = "Allows the bundled editor to stream one fixed-endpoint provider request, cancel active model requests and list fixed-loopback Ollama models."
-commands.allow = ["execute_model_stream", "cancel_model_request", "list_ollama_models"]
+description = "Allows the bundled editor to authorize and consume one short-lived fixed-endpoint model request, cancel active or pending requests and list fixed-loopback Ollama models."
+commands.allow = ["authorize_model_request", "execute_authorized_model_stream", "cancel_model_request", "list_ollama_models"]

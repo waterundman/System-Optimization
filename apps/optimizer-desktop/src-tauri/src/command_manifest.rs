@@ -20,7 +20,8 @@ pub const REGISTERED_COMMANDS: &[&str] = &[
     "store_provider_secret",
     "has_provider_secret",
     "delete_provider_secret",
-    "execute_model_stream",
+    "authorize_model_request",
+    "execute_authorized_model_stream",
     "cancel_model_request",
     "list_ollama_models",
 ];

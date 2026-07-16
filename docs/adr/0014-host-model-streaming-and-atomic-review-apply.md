@@ -19,7 +19,7 @@
 5. 非敏感供应商偏好（模型名、Qwen 区域、启用状态）保存在 WebView 的 machine-local storage；API Key 只写入操作系统凭据库。Rust 强制 `credentialRef` 精确匹配 `secret://providers/{provider}/default`，避免跨供应商 confused-deputy。
 6. `apply_reviewed_proposal` 由宿主重新读取不可变 Proposal、校验 SHA-256、目标基线、UTF-16 anchor、hunk 源文本、全部审查决策与 atomic group，然后在同一 SQLite transaction 中写入 Block/EditJournal、`ai_accept` Commit、Review apply 事件和 Operation accepted 状态。
 7. 关闭项目时取消全部活动模型请求；打开项目、写入审查决策和应用 Proposal 都继续使用单项目 Session 与 optimistic concurrency。
-8. Context Compiler 完成后，桌面端必须先向用户展示实际 Context Packet（层级、来源、内容、必需标记、排除项和估算 token）。只有显式确认后才能调用 `execute_model_stream`；取消确认会中止整个 Operation，且不产生云端请求。
+8. Context Compiler 完成后，桌面端必须先向用户展示实际 Context Packet（层级、来源、内容、必需标记、排除项和估算 token）。只有显式确认后才能申请一次性模型请求授权；取消确认会中止整个 Operation，且不产生云端请求。具体授权边界由 ADR-0018 补充。
 
 WinHTTP 的 request handle 生命周期遵循微软文档；Tauri Channel 的传输方式遵循 Tauri v2 IPC 文档：
 
@@ -37,7 +37,7 @@ WinHTTP 的 request handle 生命周期遵循微软文档；Tauri Channel 的传
 
 ## 代价与后续
 
-- 当前 Operation Runner 与 Context Compiler 运行在受 CSP 限制的 bundled WebView；模型网络与密钥在 Rust，但 WebView 仍能调用 main-window 的 model command。后续应把“编译 ContextPacket + 生成模型请求”的授权收紧为宿主 Operation capability，或整体迁入 Rust，以便对 compromised WebView 也强制执行 `never_send` 策略。
+- 当前 Operation Runner 与 Context Compiler 运行在受 CSP 限制的 bundled WebView；ADR-0018 已移除原始模型执行 IPC，并增加绑定项目 HEAD 与 Context Packet 的一次性授权，但 Context 内容资格仍由 WebView 编译。后续应把 Context 来源验证与 `never_send` 策略整体迁入 Rust。
 - Node `stripTypeScriptTypes` 仍会输出 experimental warning，因此 Node 24 是明确的构建前提；如 API 发生变化，回退到锁定版本的离线 bundler。
 - 当前正文输入仍是 `contenteditable`。逐 hunk 审查使用稳定 Block/UTF-16 anchor，但复杂富文本 decoration 等待 Tiptap 适配器。
 

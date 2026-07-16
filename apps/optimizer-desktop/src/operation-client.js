@@ -104,14 +104,30 @@ export async function runDesktopOperation(input) {
   const ids = randomIds();
   const configuration = providerConfiguration(input.providerSettings, startedAt);
   const profile = profileFor(configuration);
+  const intent = operationIntent(input, ids.next("intent"), startedAt);
+  let confirmedPacket;
   const provider = new HostModelProvider({
     configuration,
     profile,
     invokeHost: input.invokeHost,
     createChannel: input.createChannel,
     nextId: () => ids.next("request"),
+    authorizationBinding() {
+      if (!confirmedPacket) return null;
+      return {
+        schemaVersion: 1,
+        projectId: confirmedPacket.projectId,
+        baseCommitId: confirmedPacket.baseCommitId,
+        operationIntentId: confirmedPacket.operationIntentId,
+        contextPacketId: confirmedPacket.id,
+        contextPacketHash: confirmedPacket.packetHash,
+        providerLocality: confirmedPacket.providerLocality,
+        targetBlockId: intent.target.blockId,
+        targetBlockRevision: intent.target.baseRevision,
+        targetBlockHash: intent.target.baseHash,
+      };
+    },
   });
-  const intent = operationIntent(input, ids.next("intent"), startedAt);
   const compiler = new ContextCompiler({
     contextSources: [contextSource(input, hasher)],
     tokenizer: {
@@ -128,6 +144,7 @@ export async function runDesktopOperation(input) {
     async compile(request) {
       const packet = await compiler.compile(request);
       await input.confirmContext?.(packet);
+      confirmedPacket = packet;
       return packet;
     },
   };
@@ -274,6 +291,7 @@ class HostModelProvider {
     this.invokeHost = input.invokeHost;
     this.createChannel = input.createChannel;
     this.nextId = input.nextId;
+    this.authorizationBinding = input.authorizationBinding;
   }
 
   async *stream(request, options = {}) {
@@ -296,13 +314,38 @@ class HostModelProvider {
       void this.invokeHost("cancel_model_request", { requestId }).catch(() => {});
     };
     options.signal?.addEventListener("abort", onAbort, { once: true });
-    const completion = this.invokeHost("execute_model_stream", {
-      input: {
-        schemaVersion: 1,
-        requestId,
-        configuration: this.configuration,
-        request,
-      },
+    let authorization;
+    try {
+      const binding = this.authorizationBinding?.();
+      if (!binding) throw new Error("Confirmed Context Packet is required before model execution");
+      authorization = await this.invokeHost("authorize_model_request", {
+        input: {
+          schemaVersion: 1,
+          binding,
+          request: {
+            schemaVersion: 1,
+            requestId,
+            configuration: this.configuration,
+            request,
+          },
+        },
+      });
+      if (authorization.requestId !== requestId || authorization.providerId !== this.profile.id) {
+        throw new Error("Desktop host returned a mismatched model authorization");
+      }
+      if (options.signal?.aborted) {
+        await this.invokeHost("cancel_model_request", { requestId }).catch(() => {});
+        throw { code: "PROVIDER_CANCELLED", message: "Provider request was cancelled" };
+      }
+    } catch (error) {
+      options.signal?.removeEventListener("abort", onAbort);
+      if (authorization) {
+        await this.invokeHost("cancel_model_request", { requestId }).catch(() => {});
+      }
+      throw providerError(error, this.profile.id);
+    }
+    const completion = this.invokeHost("execute_authorized_model_stream", {
+      authorizationId: authorization.authorizationId,
       onEvent: channel,
     }).catch((error) => {
       failure = providerError(error, this.profile.id);
@@ -508,6 +551,7 @@ function providerErrorKind(code) {
   if (code.includes("CONFIGURATION")) return "configuration";
   if (code.includes("INVALID")) return "invalid_request";
   if (code.includes("PROTOCOL") || code.includes("SSE")) return "protocol";
+  if (code.includes("AUTHORIZATION")) return "invalid_request";
   if (code.includes("SERVER")) return "server";
   return "network";
 }

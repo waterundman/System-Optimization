@@ -9,7 +9,7 @@
 - `@optimizer/protocol`：OperationIntent、ContextPacket、PatchProposal、EventEnvelope、ModelProviderConfiguration 类型与 JSON Schema。
 - `@optimizer/kernel`：操作状态机、端口接口、确定性 Context Compiler、预算与隐私过滤。
 - `kernel-lab`：无需第三方依赖即可运行的上下文编译示例。
-- `optimizer-host`：Rust 宿主路径边界、原子 `.optimizer` 项目包、严格 JSON 命令适配、Operation/Review 持久化、审计读取、Secret Store，以及四个云端 Provider 和固定回环 Ollama 的原生流式执行。
+- `optimizer-host`：Rust 宿主路径边界、原子 `.optimizer` 项目包、严格 JSON 命令适配、Operation/Review 持久化、审计读取、Secret Store、一次性模型 capability，以及四个云端 Provider 和固定回环 Ollama 的原生流式执行。
 - `optimizer-desktop`：Tauri 2 桌面入口、单项目 Session、文档树、版本化自动保存、冲突草稿、检查点/恢复、模型设置、流式 AI 操作、取消与 Patch/Findings 审查界面。
 - `optimizer-store`：SQLite 3.51.3、Block/Commit/快照、Operation/Artifact/Review 审计日志、FTS5 与迁移前在线备份。
 - 项目风格库：SQLite schema v4 中独立保存、归档和恢复固定样本；canonical 样本以 L4 Context 参与操作，`never_send` 对远程模型强制排除并允许本地 Ollama 使用。
@@ -55,7 +55,7 @@ scripts/               工程约束检查
 
 ## 下一步
 
-1. 将 Context 编译与模型请求授权进一步收紧为宿主 Operation capability，强制 compromised WebView 也不能绕过 `never_send`。
+1. 将 Context 来源解析、Packet hash 复算与 `never_send` 资格校验下沉到宿主，补完一次性模型 capability 的策略边界。
 2. Ollama 缺失模型拉取指引、版本兼容提示与可选上下文窗口配置。
 3. 依赖源可用后将正文输入适配器替换为 Tiptap，并提供行内 decoration 审查。
 4. 显式成本策略下的重试、Provider fallback 与费用上限。
@@ -76,6 +76,7 @@ scripts/               工程约束检查
 - Ollama 通过固定 `127.0.0.1:11434/v1/chat/completions` 执行，无需凭据并禁用系统代理；界面和项目内容都不能改写目标地址，且不会失败后隐式回退云端。
 - 模型设置可按需探测固定 `/v1/models`，只把经过 Rust 校验和排序的本地模型 ID 返回界面，不开放通用 GET 或 WebView 网络权限。
 - API Key 只在 Rust 中从系统 Secret Store 解析，WebView 只能管理 opaque `credentialRef` 的写入、存在性和删除。
+- WebView 不再拥有原始模型执行命令；确认后的请求先绑定项目 HEAD、Context Packet、目标 Block 与 Provider locality，获得 120 秒内只可消费一次的宿主 capability，项目变化、取消、关闭或重放都会安全失败。
 - AI 工具栏支持续写、润色、压缩、扩写、批评；当前选区为空时使用当前 Block，续写使用光标位置。
 - 用户可把正文选区固定为项目风格样本，在专用抽屉中归档或恢复；风格与正文/事实分层，不会把归档样本重新召回。
 - Context Compiler、Operation Runner 与 Patch Engine 复用仓库同一份实现；模型输出经过严格 JSON 校验后生成不可变 PatchProposal 或 Findings。

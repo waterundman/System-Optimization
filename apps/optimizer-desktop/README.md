@@ -9,13 +9,15 @@ WebView 只允许：
 - 写入 Patch review 事件；
 - 读取 Operation 审计；
 - 写入、检查和删除 provider secret。
-- 通过 Rust Host 执行 DeepSeek、Qwen、Kimi、MiniMax 固定 HTTPS 端点，以及 Ollama 固定回环端点的流式请求与取消。
+- 通过一次性、短期、绑定当前项目 HEAD/Context Packet/目标 Block 的 Rust capability，执行 DeepSeek、Qwen、Kimi、MiniMax 固定 HTTPS 端点，以及 Ollama 固定回环端点的流式请求与取消。
 - 复用 Kernel/Operation Runner/Patch Engine 完成 AI 操作、Findings 与逐 hunk 审查。
 - 原子应用已审查 Proposal，同时写入 `ai_accept` Commit 与完整 Operation/Review 审计。
 - 读取文档树并用版本基线保存 Block；
 - 建立检查点、浏览版本元数据并恢复为新 Commit。
 
 WebView 不存在“读取 secret 明文”命令。云端模型请求由 Rust 信任边界解析 `credentialRef` 并执行，API Key 不会返回 JavaScript。
+
+WebView 也不存在原始 `execute_model_stream` 命令。用户确认 Context 后，`authorize_model_request` 先由 Host 校验项目、HEAD、目标 Block、Provider locality 和完整模型请求，再返回最多 120 秒有效且只可消费一次的 capability；`execute_authorized_model_stream` 只接收 capability ID。项目变化、取消或关闭会使授权失效。
 
 Ollama 是无凭据的显式本地 Provider：宿主只连接 `127.0.0.1:11434/v1/chat/completions` 并禁用系统代理，不接受页面提交的地址。模型需由用户预先在 Ollama 中拉取；运行失败不会自动把本地 Context Packet 发往云端。
 

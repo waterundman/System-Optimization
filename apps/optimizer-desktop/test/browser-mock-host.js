@@ -58,6 +58,7 @@
   class Channel {
     onmessage = null;
   }
+  let authorizedModelRequest = null;
   async function invoke(command, args = {}) {
     if (command === "get_project_session") return structuredClone(session);
     if (command === "get_project_workspace") return structuredClone(workspace);
@@ -144,7 +145,20 @@
         ],
       };
     }
-    if (command === "execute_model_stream") {
+    if (command === "authorize_model_request") {
+      authorizedModelRequest = structuredClone(args.input.request);
+      return {
+        schemaVersion: 1,
+        authorizationId: "model-auth-visual-1",
+        requestId: authorizedModelRequest.requestId,
+        providerId: authorizedModelRequest.configuration.providerId,
+        expiresAt: "2026-07-15T00:02:00Z",
+      };
+    }
+    if (command === "execute_authorized_model_stream") {
+      if (args.authorizationId !== "model-auth-visual-1" || !authorizedModelRequest) {
+        throw new Error("Model execution did not consume the visual authorization");
+      }
       const output = JSON.stringify({
         schemaVersion: 1,
         kind: "replacement",
@@ -152,13 +166,13 @@
         summary: "延续雨后的车站场景",
       });
       for (const event of [
-        { type: "start", requestId: args.input.requestId, id: "response-visual-1", providerId: "deepseek", model: "deepseek-v4-flash" },
+        { type: "start", requestId: authorizedModelRequest.requestId, id: "response-visual-1", providerId: "deepseek", model: "deepseek-v4-flash" },
         { type: "text_delta", text: output },
         { type: "finish", reason: "stop" },
       ]) args.onEvent.onmessage?.(event);
       return {
         schemaVersion: 1,
-        requestId: args.input.requestId,
+        requestId: authorizedModelRequest.requestId,
         responseId: "response-visual-1",
         providerId: "deepseek",
         model: "deepseek-v4-flash",

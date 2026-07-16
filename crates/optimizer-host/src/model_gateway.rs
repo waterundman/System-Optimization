@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::{Rfc2822, Rfc3339};
+use uuid::Uuid;
 
 use crate::{SecretReference, SecretStore, SecretStoreError, SecretValue};
 
@@ -22,6 +23,8 @@ const MAX_SSE_EVENT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
 const OLLAMA_DISCOVERY_TIMEOUT_MS: u32 = 3_000;
 const OLLAMA_DISCOVERY_MAX_BYTES: usize = 1024 * 1024;
+const MODEL_AUTHORIZATION_TTL_SECONDS: i64 = 120;
+const MAX_PENDING_MODEL_AUTHORIZATIONS: usize = 32;
 const CONTROL_ACTIVE: u8 = 0;
 const CONTROL_CANCELLED: u8 = 1;
 const CONTROL_TIMED_OUT: u8 = 2;
@@ -286,6 +289,28 @@ pub struct ModelExecutionRequest {
     pub request_id: String,
     pub configuration: ModelProviderConfiguration,
     pub request: ModelRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelAuthorizationScope {
+    pub project_id: String,
+    pub base_commit_id: String,
+    pub operation_intent_id: String,
+    pub context_packet_id: String,
+    pub context_packet_hash: String,
+    pub target_block_id: String,
+    pub target_block_revision: i64,
+    pub target_block_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelRequestAuthorization {
+    pub schema_version: u32,
+    pub authorization_id: String,
+    pub request_id: String,
+    pub provider_id: ModelProviderId,
+    pub expires_at: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -723,6 +748,13 @@ pub struct ModelExecutionHost {
     secrets: Arc<dyn SecretStore>,
     transport: Arc<dyn ModelTransport>,
     active: Arc<Mutex<HashMap<String, Arc<ModelCancellation>>>>,
+    pending: Arc<Mutex<HashMap<String, PendingModelAuthorization>>>,
+}
+
+struct PendingModelAuthorization {
+    input: ModelExecutionRequest,
+    scope: ModelAuthorizationScope,
+    expires_at: OffsetDateTime,
 }
 
 impl ModelExecutionHost {
@@ -741,7 +773,114 @@ impl ModelExecutionHost {
             secrets,
             transport,
             active: Arc::new(Mutex::new(HashMap::new())),
+            pending: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub fn authorize(
+        &self,
+        input: ModelExecutionRequest,
+        scope: ModelAuthorizationScope,
+    ) -> Result<ModelRequestAuthorization, ModelGatewayError> {
+        let prepared = prepare_request(&input)?;
+        let provider_id = prepared.provider_id;
+        let now = OffsetDateTime::now_utc();
+        let expires_at = now + time::Duration::seconds(MODEL_AUTHORIZATION_TTL_SECONDS);
+        let mut pending = self.pending.lock().map_err(|_| {
+            ModelGatewayError::new(
+                "MODEL_EXECUTION_STATE_UNAVAILABLE",
+                "model authorization state is unavailable",
+            )
+        })?;
+        pending.retain(|_, authorization| authorization.expires_at > now);
+        if pending.len() >= MAX_PENDING_MODEL_AUTHORIZATIONS {
+            return Err(ModelGatewayError::new(
+                "MODEL_AUTHORIZATION_CAPACITY",
+                "too many model requests are waiting for execution",
+            )
+            .for_provider(provider_id));
+        }
+        if pending
+            .values()
+            .any(|authorization| authorization.input.request_id == input.request_id)
+            || self
+                .active
+                .lock()
+                .map_err(|_| {
+                    ModelGatewayError::new(
+                        "MODEL_EXECUTION_STATE_UNAVAILABLE",
+                        "model execution state is unavailable",
+                    )
+                })?
+                .contains_key(&input.request_id)
+        {
+            return Err(ModelGatewayError::new(
+                "MODEL_REQUEST_ID_IN_USE",
+                "model request ID is already authorized or active",
+            )
+            .for_provider(provider_id));
+        }
+        let authorization_id = format!("model-auth-{}", Uuid::new_v4().simple());
+        pending.insert(
+            authorization_id.clone(),
+            PendingModelAuthorization {
+                input: input.clone(),
+                scope,
+                expires_at,
+            },
+        );
+        Ok(ModelRequestAuthorization {
+            schema_version: REQUEST_SCHEMA_VERSION,
+            authorization_id,
+            request_id: input.request_id,
+            provider_id,
+            expires_at: expires_at
+                .format(&Rfc3339)
+                .expect("RFC 3339 formatting supports OffsetDateTime"),
+        })
+    }
+
+    pub fn take_authorized_request(
+        &self,
+        authorization_id: &str,
+        project_id: &str,
+        head_commit_id: &str,
+    ) -> Result<ModelExecutionRequest, ModelGatewayError> {
+        validate_authorization_id(authorization_id)?;
+        let authorization = self
+            .pending
+            .lock()
+            .map_err(|_| {
+                ModelGatewayError::new(
+                    "MODEL_EXECUTION_STATE_UNAVAILABLE",
+                    "model authorization state is unavailable",
+                )
+            })?
+            .remove(authorization_id)
+            .ok_or_else(|| {
+                ModelGatewayError::new(
+                    "MODEL_AUTHORIZATION_INVALID",
+                    "model request authorization is unknown or already consumed",
+                )
+            })?;
+        let provider_id = authorization.input.configuration.provider_id;
+        if authorization.expires_at <= OffsetDateTime::now_utc() {
+            return Err(ModelGatewayError::new(
+                "MODEL_AUTHORIZATION_EXPIRED",
+                "model request authorization has expired",
+            )
+            .for_provider(provider_id));
+        }
+        if authorization.scope.project_id != project_id
+            || authorization.scope.base_commit_id != head_commit_id
+        {
+            return Err(ModelGatewayError::new(
+                "MODEL_AUTHORIZATION_STALE",
+                "the project changed after the model request was authorized",
+            )
+            .for_provider(provider_id));
+        }
+        Ok(authorization.input)
     }
 
     pub fn list_ollama_models(&self) -> Result<OllamaModelList, ModelGatewayError> {
@@ -777,10 +916,23 @@ impl ModelExecutionHost {
     pub fn execute_stream<F>(
         &self,
         input: ModelExecutionRequest,
+        emit: F,
+    ) -> Result<ModelExecutionSummary, ModelGatewayError>
+    where
+        F: FnMut(ModelStreamEvent) -> Result<(), ModelGatewayError>,
+    {
+        self.execute_stream_after_ready(input, || {}, emit)
+    }
+
+    pub fn execute_stream_after_ready<F, R>(
+        &self,
+        input: ModelExecutionRequest,
+        ready: R,
         mut emit: F,
     ) -> Result<ModelExecutionSummary, ModelGatewayError>
     where
         F: FnMut(ModelStreamEvent) -> Result<(), ModelGatewayError>,
+        R: FnOnce(),
     {
         let prepared = prepare_request(&input)?;
         let provider_id = prepared.provider_id;
@@ -818,6 +970,7 @@ impl ModelExecutionHost {
             request_id: prepared.request_id.clone(),
             control: control.clone(),
         };
+        ready();
         let (watchdog_done, watchdog_wait) = mpsc::sync_channel(1);
         let timeout_control = control.clone();
         let timeout_ms = prepared.timeout_ms;
@@ -849,16 +1002,27 @@ impl ModelExecutionHost {
 
     pub fn cancel(&self, request_id: impl Into<String>) -> CancelModelRequestResponse {
         let request_id = request_id.into();
-        let cancelled = self
+        let active_cancelled = self
             .active
             .lock()
             .ok()
             .and_then(|active| active.get(&request_id).cloned())
             .is_some_and(|control| control.cancel());
+        let pending_cancelled = self
+            .pending
+            .lock()
+            .ok()
+            .and_then(|mut pending| {
+                let authorization_id = pending.iter().find_map(|(id, authorization)| {
+                    (authorization.input.request_id == request_id).then(|| id.clone())
+                })?;
+                pending.remove(&authorization_id)
+            })
+            .is_some();
         CancelModelRequestResponse {
             schema_version: REQUEST_SCHEMA_VERSION,
             request_id,
-            cancelled,
+            cancelled: active_cancelled || pending_cancelled,
         }
     }
 
@@ -868,10 +1032,20 @@ impl ModelExecutionHost {
             .lock()
             .map(|active| active.values().cloned().collect::<Vec<_>>())
             .unwrap_or_default();
-        controls
+        let active = controls
             .into_iter()
             .filter(|control| control.cancel())
-            .count()
+            .count();
+        let pending = self
+            .pending
+            .lock()
+            .map(|mut pending| {
+                let count = pending.len();
+                pending.clear();
+                count
+            })
+            .unwrap_or_default();
+        active + pending
     }
 }
 
@@ -959,6 +1133,21 @@ fn validate_request_id(request_id: &str) -> Result<(), ModelGatewayError> {
         return Err(ModelGatewayError::new(
             "INVALID_MODEL_REQUEST",
             "requestId must contain 1-128 ASCII letters, digits, '_' or '-'",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_authorization_id(authorization_id: &str) -> Result<(), ModelGatewayError> {
+    if authorization_id.is_empty()
+        || authorization_id.len() > 128
+        || !authorization_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(ModelGatewayError::new(
+            "MODEL_AUTHORIZATION_INVALID",
+            "model authorization ID is invalid",
         ));
     }
     Ok(())
@@ -2333,6 +2522,19 @@ mod tests {
         ModelExecutionHost::with_transport(secrets, transport)
     }
 
+    fn authorization_scope() -> ModelAuthorizationScope {
+        ModelAuthorizationScope {
+            project_id: "project-1".into(),
+            base_commit_id: "commit-1".into(),
+            operation_intent_id: "intent-1".into(),
+            context_packet_id: "packet-1".into(),
+            context_packet_hash: format!("sha256:{}", "1".repeat(64)),
+            target_block_id: "block-1".into(),
+            target_block_revision: 0,
+            target_block_hash: format!("sha256:{}", "2".repeat(64)),
+        }
+    }
+
     #[test]
     fn builds_only_fixed_official_endpoints_and_provider_dialects() {
         let mut deepseek = model_request(ModelProviderId::Deepseek);
@@ -2461,6 +2663,96 @@ mod tests {
         let serialized = serde_json::to_string(&(summary, events)).unwrap();
         assert!(!serialized.contains("host-only-key"));
         assert!(!host.cancel("request-deepseek").cancelled);
+    }
+
+    #[test]
+    fn authorizations_are_short_lived_scoped_and_single_use() {
+        let transport = Arc::new(ScriptedTransport::sse(Vec::new()));
+        let host = host_with_secret(transport);
+        let request = model_request(ModelProviderId::Deepseek);
+        let authorization = host
+            .authorize(request.clone(), authorization_scope())
+            .unwrap();
+
+        assert_eq!(authorization.schema_version, 1);
+        assert_eq!(authorization.request_id, request.request_id);
+        assert_eq!(authorization.provider_id, ModelProviderId::Deepseek);
+        assert!(authorization.authorization_id.starts_with("model-auth-"));
+        assert!(OffsetDateTime::parse(&authorization.expires_at, &Rfc3339).is_ok());
+        assert_eq!(
+            host.authorize(request.clone(), authorization_scope())
+                .unwrap_err()
+                .code(),
+            "MODEL_REQUEST_ID_IN_USE"
+        );
+        assert_eq!(
+            host.take_authorized_request(&authorization.authorization_id, "project-1", "commit-1")
+                .unwrap(),
+            request
+        );
+        assert_eq!(
+            host.take_authorized_request(&authorization.authorization_id, "project-1", "commit-1")
+                .unwrap_err()
+                .code(),
+            "MODEL_AUTHORIZATION_INVALID"
+        );
+
+        let stale = host
+            .authorize(
+                model_request(ModelProviderId::Deepseek),
+                authorization_scope(),
+            )
+            .unwrap();
+        assert_eq!(
+            host.take_authorized_request(&stale.authorization_id, "project-1", "commit-2")
+                .unwrap_err()
+                .code(),
+            "MODEL_AUTHORIZATION_STALE"
+        );
+        assert_eq!(
+            host.take_authorized_request(&stale.authorization_id, "project-1", "commit-1")
+                .unwrap_err()
+                .code(),
+            "MODEL_AUTHORIZATION_INVALID"
+        );
+    }
+
+    #[test]
+    fn expired_and_cancelled_authorizations_cannot_execute() {
+        let transport = Arc::new(ScriptedTransport::sse(Vec::new()));
+        let host = host_with_secret(transport);
+        let expired = host
+            .authorize(
+                model_request(ModelProviderId::Deepseek),
+                authorization_scope(),
+            )
+            .unwrap();
+        host.pending
+            .lock()
+            .unwrap()
+            .get_mut(&expired.authorization_id)
+            .unwrap()
+            .expires_at = OffsetDateTime::now_utc() - time::Duration::seconds(1);
+        assert_eq!(
+            host.take_authorized_request(&expired.authorization_id, "project-1", "commit-1")
+                .unwrap_err()
+                .code(),
+            "MODEL_AUTHORIZATION_EXPIRED"
+        );
+
+        let cancelled = host
+            .authorize(
+                model_request(ModelProviderId::Deepseek),
+                authorization_scope(),
+            )
+            .unwrap();
+        assert!(host.cancel(&cancelled.request_id).cancelled);
+        assert_eq!(
+            host.take_authorized_request(&cancelled.authorization_id, "project-1", "commit-1")
+                .unwrap_err()
+                .code(),
+            "MODEL_AUTHORIZATION_INVALID"
+        );
     }
 
     #[test]
@@ -2662,6 +2954,22 @@ mod tests {
         let cancelled = worker.join().unwrap().unwrap_err();
         assert_eq!(cancelled.code(), "PROVIDER_CANCELLED");
         assert!(!cancelled.retriable());
+    }
+
+    #[test]
+    fn ready_callback_runs_only_after_the_request_is_cancellable() {
+        let transport = Arc::new(BlockingTransport {
+            started: Mutex::new(None),
+        });
+        let host = host_with_secret(transport);
+        let error = host
+            .execute_stream_after_ready(
+                model_request(ModelProviderId::Deepseek),
+                || assert!(host.cancel("request-deepseek").cancelled),
+                |_| Ok(()),
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "PROVIDER_CANCELLED");
     }
 
     #[test]

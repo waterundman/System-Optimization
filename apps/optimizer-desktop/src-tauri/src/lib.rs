@@ -3,13 +3,13 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use optimizer_host::{
     ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, CancelModelRequestResponse,
     CheckpointSummary, CreateDocumentResponse, CreateDocumentSpec, CreateStyleSampleSpec,
-    ExportMarkdownResponse, ModelExecutionHost, ModelExecutionRequest, ModelExecutionSummary,
-    ModelGatewayError, ModelProviderId, ModelStreamEvent, NewProjectSpec, OllamaModelList,
-    OpenedProject, OperationAuditResponse, OperationCommandError, PersistOperationResponse,
-    PersistReviewResponse, ProjectInfo, ProjectPackageError, ProjectWorkspace,
-    RestoreCheckpointResponse, RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec,
-    SecretReference, SecretStore, SecretStoreError, SecretValue, SetStyleSampleStatusSpec,
-    StyleSample, VersionHistory, WorkspaceCommandError,
+    ExportMarkdownResponse, ModelAuthorizationScope, ModelExecutionHost, ModelExecutionRequest,
+    ModelExecutionSummary, ModelGatewayError, ModelProviderId, ModelRequestAuthorization,
+    ModelStreamEvent, NewProjectSpec, OllamaModelList, OpenedProject, OperationAuditResponse,
+    OperationCommandError, PersistOperationResponse, PersistReviewResponse, ProjectInfo,
+    ProjectPackageError, ProjectWorkspace, RestoreCheckpointResponse, RestoreCheckpointSpec,
+    SaveBlockResponse, SaveBlockSpec, SecretReference, SecretStore, SecretStoreError, SecretValue,
+    SetStyleSampleStatusSpec, StyleSample, VersionHistory, WorkspaceCommandError,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Runtime, State, ipc::Channel};
@@ -71,8 +71,9 @@ impl DesktopState {
     }
 
     pub fn close_project(&self) -> CommandResult<ProjectSessionResponse> {
+        let mut session = self.project_session()?;
         self.models.cancel_all();
-        self.project_session()?.take();
+        session.take();
         Ok(ProjectSessionResponse::closed())
     }
 
@@ -271,19 +272,44 @@ impl DesktopState {
         })
     }
 
-    pub fn execute_model_stream<F>(
+    pub fn authorize_model_request(
         &self,
-        input: ModelExecutionRequest,
+        input: AuthorizeModelRequest,
+    ) -> CommandResult<ModelRequestAuthorization> {
+        input.validate()?;
+        let project = self.current_project()?;
+        let workspace = project.workspace().map_err(CommandError::from)?;
+        input.binding.validate(&workspace, &input.request)?;
+        let scope = input.binding.into_scope();
+        self.models
+            .authorize(input.request, scope)
+            .map_err(CommandError::from)
+    }
+
+    pub fn execute_authorized_model_stream<F>(
+        &self,
+        authorization_id: String,
         emit: F,
     ) -> CommandResult<ModelExecutionSummary>
     where
         F: FnMut(ModelStreamEvent) -> Result<(), ModelGatewayError>,
     {
-        if self.project_session()?.is_none() {
-            return Err(CommandError::no_project_open());
-        }
+        let mut project = Some(self.current_project()?);
+        let workspace = project
+            .as_ref()
+            .expect("project guard is present before model execution")
+            .workspace()
+            .map_err(CommandError::from)?;
+        let request = self
+            .models
+            .take_authorized_request(
+                &authorization_id,
+                &workspace.project_id,
+                &workspace.head_commit_id,
+            )
+            .map_err(CommandError::from)?;
         self.models
-            .execute_stream(input, emit)
+            .execute_stream_after_ready(request, || drop(project.take()), emit)
             .map_err(CommandError::from)
     }
 
@@ -405,6 +431,14 @@ impl CommandError {
             "UNSUPPORTED_SCHEMA",
             format!("Unsupported project command schema version {actual}"),
         )
+    }
+
+    fn invalid_model_authorization_binding(message: impl Into<String>) -> Self {
+        Self::basic("MODEL_AUTHORIZATION_BINDING_INVALID", message)
+    }
+
+    fn stale_model_authorization_binding(message: impl Into<String>) -> Self {
+        Self::basic("MODEL_AUTHORIZATION_STALE", message)
     }
 }
 
@@ -585,6 +619,142 @@ pub struct RestoreCheckpointRequest {
     pub checkpoint_id: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderLocality {
+    Local,
+    Remote,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelRequestBinding {
+    pub schema_version: u32,
+    pub project_id: String,
+    pub base_commit_id: String,
+    pub operation_intent_id: String,
+    pub context_packet_id: String,
+    pub context_packet_hash: String,
+    pub provider_locality: ProviderLocality,
+    pub target_block_id: String,
+    pub target_block_revision: i64,
+    pub target_block_hash: String,
+}
+
+impl ModelRequestBinding {
+    fn validate(
+        &self,
+        workspace: &ProjectWorkspace,
+        request: &ModelExecutionRequest,
+    ) -> CommandResult<()> {
+        if self.schema_version != 1 {
+            return Err(CommandError::unsupported_request_schema(
+                self.schema_version,
+            ));
+        }
+        for (name, value) in [
+            ("projectId", self.project_id.as_str()),
+            ("baseCommitId", self.base_commit_id.as_str()),
+            ("operationIntentId", self.operation_intent_id.as_str()),
+            ("contextPacketId", self.context_packet_id.as_str()),
+            ("targetBlockId", self.target_block_id.as_str()),
+        ] {
+            if !is_safe_binding_id(value) {
+                return Err(CommandError::invalid_model_authorization_binding(format!(
+                    "{name} is not a safe capability identifier"
+                )));
+            }
+        }
+        if !is_sha256(&self.context_packet_hash) || !is_sha256(&self.target_block_hash) {
+            return Err(CommandError::invalid_model_authorization_binding(
+                "contextPacketHash and targetBlockHash must be canonical SHA-256 values",
+            ));
+        }
+        let expected_locality = if request.configuration.provider_id == ModelProviderId::Ollama {
+            ProviderLocality::Local
+        } else {
+            ProviderLocality::Remote
+        };
+        if self.provider_locality != expected_locality {
+            return Err(CommandError::invalid_model_authorization_binding(
+                "provider locality does not match the selected provider",
+            ));
+        }
+        if self.project_id != workspace.project_id
+            || self.base_commit_id != workspace.head_commit_id
+        {
+            return Err(CommandError::stale_model_authorization_binding(
+                "the Context Packet does not target the current project HEAD",
+            ));
+        }
+        let block = workspace
+            .blocks
+            .iter()
+            .find(|block| block.id == self.target_block_id)
+            .ok_or_else(|| {
+                CommandError::stale_model_authorization_binding(
+                    "the Context Packet target block no longer exists",
+                )
+            })?;
+        if block.revision != self.target_block_revision
+            || block.content_hash != self.target_block_hash
+        {
+            return Err(CommandError::stale_model_authorization_binding(
+                "the Context Packet target block changed before authorization",
+            ));
+        }
+        Ok(())
+    }
+
+    fn into_scope(self) -> ModelAuthorizationScope {
+        ModelAuthorizationScope {
+            project_id: self.project_id,
+            base_commit_id: self.base_commit_id,
+            operation_intent_id: self.operation_intent_id,
+            context_packet_id: self.context_packet_id,
+            context_packet_hash: self.context_packet_hash,
+            target_block_id: self.target_block_id,
+            target_block_revision: self.target_block_revision,
+            target_block_hash: self.target_block_hash,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuthorizeModelRequest {
+    pub schema_version: u32,
+    pub binding: ModelRequestBinding,
+    pub request: ModelExecutionRequest,
+}
+
+impl AuthorizeModelRequest {
+    fn validate(&self) -> CommandResult<()> {
+        if self.schema_version != 1 {
+            return Err(CommandError::unsupported_request_schema(
+                self.schema_version,
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn is_safe_binding_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
 impl RestoreCheckpointRequest {
     fn validate(&self) -> CommandResult<()> {
         if self.schema_version != 1 {
@@ -675,7 +845,8 @@ pub fn attach<R: Runtime>(builder: tauri::Builder<R>, state: DesktopState) -> ta
             store_provider_secret,
             has_provider_secret,
             delete_provider_secret,
-            execute_model_stream,
+            authorize_model_request,
+            execute_authorized_model_stream,
             cancel_model_request,
             list_ollama_models,
         ])
@@ -835,13 +1006,21 @@ async fn delete_provider_secret(
 }
 
 #[tauri::command]
-async fn execute_model_stream(
-    input: ModelExecutionRequest,
+async fn authorize_model_request(
+    input: AuthorizeModelRequest,
+    state: State<'_, DesktopState>,
+) -> CommandResult<ModelRequestAuthorization> {
+    spawn_host_task(state, move |state| state.authorize_model_request(input)).await
+}
+
+#[tauri::command]
+async fn execute_authorized_model_stream(
+    authorization_id: String,
     on_event: Channel<ModelStreamEvent>,
     state: State<'_, DesktopState>,
 ) -> CommandResult<ModelExecutionSummary> {
     spawn_host_task(state, move |state| {
-        state.execute_model_stream(input, |event| {
+        state.execute_authorized_model_stream(authorization_id, |event| {
             on_event
                 .send(event)
                 .map_err(|_| ModelGatewayError::event_delivery_failed())
@@ -1192,7 +1371,7 @@ mod tests {
     #[test]
     fn model_execution_requires_a_project_and_reports_safe_provider_details() {
         let (state, _, parent) = state();
-        let input: ModelExecutionRequest = serde_json::from_value(json!({
+        let request: ModelExecutionRequest = serde_json::from_value(json!({
             "schemaVersion": 1,
             "requestId": "desktop-deepseek-test",
             "configuration": {
@@ -1228,16 +1407,80 @@ mod tests {
             }
         }))
         .unwrap();
-
+        let placeholder_binding = ModelRequestBinding {
+            schema_version: 1,
+            project_id: "project-test".into(),
+            base_commit_id: "commit-test".into(),
+            operation_intent_id: "intent-test".into(),
+            context_packet_id: "packet-test".into(),
+            context_packet_hash: format!("sha256:{}", "1".repeat(64)),
+            provider_locality: ProviderLocality::Remote,
+            target_block_id: "block-test".into(),
+            target_block_revision: 0,
+            target_block_hash: format!("sha256:{}", "2".repeat(64)),
+        };
         assert_eq!(
             state
-                .execute_model_stream(input.clone(), |_| Ok(()))
+                .authorize_model_request(AuthorizeModelRequest {
+                    schema_version: 1,
+                    binding: placeholder_binding,
+                    request: request.clone(),
+                })
                 .unwrap_err()
                 .code,
             "NO_PROJECT_OPEN"
         );
         open_test_project(&state, &parent);
-        let error = state.execute_model_stream(input, |_| Ok(())).unwrap_err();
+        let workspace = state.get_project_workspace().unwrap();
+        let block = workspace.blocks.first().unwrap();
+        let binding = ModelRequestBinding {
+            schema_version: 1,
+            project_id: workspace.project_id.clone(),
+            base_commit_id: workspace.head_commit_id.clone(),
+            operation_intent_id: "intent-test".into(),
+            context_packet_id: "packet-test".into(),
+            context_packet_hash: format!("sha256:{}", "1".repeat(64)),
+            provider_locality: ProviderLocality::Remote,
+            target_block_id: block.id.clone(),
+            target_block_revision: block.revision,
+            target_block_hash: block.content_hash.clone(),
+        };
+        let mut wrong_locality = binding.clone();
+        wrong_locality.provider_locality = ProviderLocality::Local;
+        assert_eq!(
+            state
+                .authorize_model_request(AuthorizeModelRequest {
+                    schema_version: 1,
+                    binding: wrong_locality,
+                    request: request.clone(),
+                })
+                .unwrap_err()
+                .code,
+            "MODEL_AUTHORIZATION_BINDING_INVALID"
+        );
+        let mut wrong_block = binding.clone();
+        wrong_block.target_block_revision += 1;
+        assert_eq!(
+            state
+                .authorize_model_request(AuthorizeModelRequest {
+                    schema_version: 1,
+                    binding: wrong_block,
+                    request: request.clone(),
+                })
+                .unwrap_err()
+                .code,
+            "MODEL_AUTHORIZATION_STALE"
+        );
+        let authorization = state
+            .authorize_model_request(AuthorizeModelRequest {
+                schema_version: 1,
+                binding: binding.clone(),
+                request: request.clone(),
+            })
+            .unwrap();
+        let error = state
+            .execute_authorized_model_stream(authorization.authorization_id.clone(), |_| Ok(()))
+            .unwrap_err();
         assert_eq!(error.code, "PROVIDER_CREDENTIAL_MISSING");
         assert_eq!(
             error.details.as_ref().unwrap().provider_id,
@@ -1247,6 +1490,83 @@ mod tests {
         let serialized = serde_json::to_string(&error).unwrap();
         assert!(!serialized.contains("apiKey"));
         assert!(!serialized.contains("Authorization"));
+        assert_eq!(
+            state
+                .execute_authorized_model_stream(authorization.authorization_id, |_| Ok(()))
+                .unwrap_err()
+                .code,
+            "MODEL_AUTHORIZATION_INVALID"
+        );
+
+        let mut stale_request = request.clone();
+        stale_request.request_id = "desktop-deepseek-stale".into();
+        let stale = state
+            .authorize_model_request(AuthorizeModelRequest {
+                schema_version: 1,
+                binding,
+                request: stale_request,
+            })
+            .unwrap();
+        state
+            .save_block(SaveBlockRequest {
+                schema_version: 1,
+                block_id: block.id.clone(),
+                expected_revision: block.revision,
+                expected_hash: block.content_hash.clone(),
+                content: json!({ "type": "paragraph", "content": [{ "type": "text", "text": "changed" }] }),
+                plain_text: "changed".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            state
+                .execute_authorized_model_stream(stale.authorization_id.clone(), |_| Ok(()))
+                .unwrap_err()
+                .code,
+            "MODEL_AUTHORIZATION_STALE"
+        );
+        assert_eq!(
+            state
+                .execute_authorized_model_stream(stale.authorization_id, |_| Ok(()))
+                .unwrap_err()
+                .code,
+            "MODEL_AUTHORIZATION_INVALID"
+        );
+
+        let updated = state.get_project_workspace().unwrap();
+        let updated_block = updated.blocks.first().unwrap();
+        let mut pending_request = request;
+        pending_request.request_id = "desktop-deepseek-pending".into();
+        let pending = state
+            .authorize_model_request(AuthorizeModelRequest {
+                schema_version: 1,
+                binding: ModelRequestBinding {
+                    schema_version: 1,
+                    project_id: updated.project_id.clone(),
+                    base_commit_id: updated.head_commit_id.clone(),
+                    operation_intent_id: "intent-pending".into(),
+                    context_packet_id: "packet-pending".into(),
+                    context_packet_hash: format!("sha256:{}", "3".repeat(64)),
+                    provider_locality: ProviderLocality::Remote,
+                    target_block_id: updated_block.id.clone(),
+                    target_block_revision: updated_block.revision,
+                    target_block_hash: updated_block.content_hash.clone(),
+                },
+                request: pending_request,
+            })
+            .unwrap();
+        state.close_project().unwrap();
+        assert_eq!(
+            state
+                .models
+                .take_authorized_request(
+                    &pending.authorization_id,
+                    &updated.project_id,
+                    &updated.head_commit_id,
+                )
+                .unwrap_err()
+                .code(),
+            "MODEL_AUTHORIZATION_INVALID"
+        );
 
         let cancelled = state
             .cancel_model_request("not-active".to_string())
@@ -1300,5 +1620,7 @@ mod tests {
         }
         assert!(!permissions.contains("resolve_provider_secret"));
         assert!(!permissions.contains("read_provider_secret"));
+        assert!(!permissions.contains("\"execute_model_stream\""));
+        assert!(!REGISTERED_COMMANDS.contains(&"execute_model_stream"));
     }
 }
