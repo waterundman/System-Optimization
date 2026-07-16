@@ -16,6 +16,7 @@ import {
   decideDesktopHunk,
   defaultProviderSettings,
   persistDesktopReviewDecision,
+  planDesktopReviewDecisions,
   providerRequiresCredential,
   rejectDesktopReview,
   runDesktopOperation,
@@ -24,6 +25,13 @@ import {
 const app = document.querySelector("#app");
 const PROVIDER_SETTINGS_KEY = "optimizer.provider-settings.v1";
 const SUMMARY_REFRESH_DEBOUNCE_MS = 800;
+const AI_OPERATION_COMMANDS = Object.freeze([
+  { type: "continue_scene", label: "续写", description: "从当前光标继续创作", shortcut: "Alt+1", key: "1" },
+  { type: "polish", label: "润色", description: "保持原意优化表达", shortcut: "Alt+2", key: "2" },
+  { type: "compress", label: "压缩", description: "收紧当前选区或 Block", shortcut: "Alt+3", key: "3" },
+  { type: "expand", label: "扩写", description: "补充细节与过渡", shortcut: "Alt+4", key: "4" },
+  { type: "critique", label: "批评", description: "只返回问题与建议", shortcut: "Alt+5", key: "5" },
+]);
 const state = {
   session: null,
   workspace: null,
@@ -55,6 +63,8 @@ const state = {
   aiRunning: null,
   aiContextPreview: null,
   aiReview: null,
+  aiContextMenu: null,
+  commandPaletteOpen: false,
 };
 
 function element(tag, options = {}, children = []) {
@@ -425,6 +435,8 @@ function renderWorkspace() {
     noticeView(),
     body,
     contextPreviewModal(),
+    commandPaletteModal(),
+    aiContextMenuView(),
   ]));
 }
 
@@ -728,24 +740,22 @@ function editorPane() {
   if (!document) {
     return element("section", { className: "editor-empty", text: "项目中还没有可编辑文档。" });
   }
-  const operations = [
-    ["continue_scene", "续写"],
-    ["polish", "润色"],
-    ["compress", "压缩"],
-    ["expand", "扩写"],
-    ["critique", "批评"],
-  ];
   const toolbar = element("div", { className: "editor-toolbar" }, [
     element("span", { className: "toolbar-label", text: "AI 操作" }),
-    ...operations.map(([operationType, label]) =>
-      button(label, "tool-button", () => runAiOperation(operationType), {
+    ...AI_OPERATION_COMMANDS.map((command) =>
+      button(command.label, "tool-button", () => runAiOperation(command.type), {
         disabled: Boolean(state.aiRunning || state.aiReview?.kind === "patch_proposal"),
-        title: "作用于当前选区；没有选区时作用于当前 Block",
+        title: `${command.description} · ${command.shortcut}`,
+        attrs: { "aria-keyshortcuts": command.shortcut },
       }),
     ),
     button("固定风格", "tool-button style-pin-button", pinCurrentStyleSample, {
       disabled: Boolean(state.aiRunning || state.aiReview?.kind === "patch_proposal"),
       title: "将当前选区固定为项目风格样本",
+    }),
+    button("命令", "tool-button command-palette-trigger", openCommandPalette, {
+      title: "打开 AI 命令面板 · Ctrl/⌘+Shift+P",
+      attrs: { "aria-keyshortcuts": "Control+Shift+P Meta+Shift+P" },
     }),
     state.aiRunning
       ? button("取消", "danger-button", cancelAiOperation)
@@ -814,6 +824,12 @@ function blockEditor(block) {
       rememberTarget();
       queueSave(block.id, content.textContent ?? "");
     });
+    content.addEventListener("contextmenu", (event) => {
+      if (event.shiftKey) return;
+      event.preventDefault();
+      rememberTarget();
+      openAiContextMenu(event.clientX, event.clientY, block.id);
+    });
     content.addEventListener("keydown", (event) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
@@ -847,6 +863,166 @@ function textOffset(root, node, offset) {
   range.selectNodeContents(root);
   range.setEnd(node, offset);
   return range.toString().length;
+}
+
+function operationCommandsDisabled() {
+  return Boolean(state.aiRunning || state.aiReview?.kind === "patch_proposal");
+}
+
+function openAiContextMenu(x, y, blockId) {
+  state.commandPaletteOpen = false;
+  state.aiContextMenu = { x, y, blockId };
+  renderWorkspace();
+  queueMicrotask(() => document.querySelector(".ai-context-menu button:not(:disabled)")?.focus());
+}
+
+function aiContextMenuView() {
+  const context = state.aiContextMenu;
+  if (!context || !state.workspace) return null;
+  const menu = element("div", {
+    className: "ai-context-menu",
+    attrs: { role: "menu", "aria-label": "AI 文本操作" },
+  }, [
+    element("div", { className: "context-menu-heading", text: "AI 文本操作" }),
+    ...AI_OPERATION_COMMANDS.map((command) => commandMenuButton(command)),
+    element("div", { className: "context-menu-separator", attrs: { role: "separator" } }),
+    commandMenuButton({
+      type: "pin_style",
+      label: "固定为风格样本",
+      description: "保存当前选区",
+      shortcut: "",
+    }),
+    element("div", { className: "context-menu-hint", text: "Shift + 右键打开系统菜单" }),
+  ]);
+  menu.style.left = `${Math.max(8, Math.min(context.x, window.innerWidth - 244))}px`;
+  menu.style.top = `${Math.max(8, Math.min(context.y, window.innerHeight - 340))}px`;
+  menu.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeCommandSurfaces();
+      return;
+    }
+    if (!["ArrowDown", "ArrowUp"].includes(event.key)) return;
+    event.preventDefault();
+    const items = [...menu.querySelectorAll('button[role="menuitem"]:not(:disabled)')];
+    const current = items.indexOf(document.activeElement);
+    const delta = event.key === "ArrowDown" ? 1 : -1;
+    items[(current + delta + items.length) % items.length]?.focus();
+  });
+  return menu;
+}
+
+function commandMenuButton(command) {
+  const item = button("", "context-menu-command", () => executeRegisteredCommand(command.type), {
+    disabled: operationCommandsDisabled(),
+    attrs: {
+      role: "menuitem",
+      ...(command.shortcut ? { "aria-keyshortcuts": command.shortcut } : {}),
+    },
+  });
+  item.append(element("span", { text: command.label }));
+  if (command.shortcut) item.append(element("kbd", { text: command.shortcut }));
+  return item;
+}
+
+function openCommandPalette() {
+  if (!state.workspace || state.aiContextPreview) return;
+  state.aiContextMenu = null;
+  state.commandPaletteOpen = true;
+  renderWorkspace();
+  queueMicrotask(() => document.querySelector("#command-palette-query")?.focus());
+}
+
+function commandPaletteModal() {
+  if (!state.commandPaletteOpen || !state.workspace) return null;
+  const commandRows = [
+    ...AI_OPERATION_COMMANDS,
+    {
+      type: "pin_style",
+      label: "固定为风格样本",
+      description: "将当前选区保存到项目风格库",
+      shortcut: "",
+    },
+  ].map((command) => {
+    const row = button("", "command-palette-item", () => executeRegisteredCommand(command.type), {
+      disabled: operationCommandsDisabled(),
+      attrs: {
+        "data-command-search": `${command.label} ${command.description} ${command.type}`.toLowerCase(),
+      },
+    });
+    row.append(element("span", { className: "command-palette-copy" }, [
+      element("strong", { text: command.label }),
+      element("span", { text: command.description }),
+    ]));
+    if (command.shortcut) row.append(element("kbd", { text: command.shortcut }));
+    return row;
+  });
+  const query = element("input", {
+    type: "search",
+    placeholder: "搜索续写、润色、压缩…",
+    attrs: {
+      id: "command-palette-query",
+      "aria-label": "搜索 AI 命令",
+      autocomplete: "off",
+    },
+  });
+  query.addEventListener("input", () => {
+    const needle = query.value.trim().toLowerCase();
+    for (const row of commandRows) {
+      row.hidden = !row.dataset.commandSearch.includes(needle);
+    }
+  });
+  query.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeCommandSurfaces();
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      commandRows.find((row) => !row.hidden && !row.disabled)?.click();
+    }
+  });
+  const backdrop = element("div", {
+    className: "command-palette-backdrop",
+    attrs: { role: "presentation" },
+  }, [
+    element("section", {
+      className: "command-palette",
+      attrs: { role: "dialog", "aria-modal": "true", "aria-labelledby": "command-palette-title" },
+    }, [
+      element("div", { className: "command-palette-heading" }, [
+        element("div", {}, [
+          element("span", { className: "eyebrow", text: "COMMAND PALETTE" }),
+          element("h2", { text: "选择 AI 操作", attrs: { id: "command-palette-title" } }),
+        ]),
+        element("kbd", { text: "Esc" }),
+      ]),
+      query,
+      operationCommandsDisabled()
+        ? element("p", { className: "command-palette-warning", text: "请先完成或放弃当前 AI 操作与审查。" })
+        : null,
+      element("div", { className: "command-palette-list" }, commandRows),
+    ]),
+  ]);
+  backdrop.addEventListener("pointerdown", (event) => {
+    if (event.target === backdrop) closeCommandSurfaces();
+  });
+  return backdrop;
+}
+
+function executeRegisteredCommand(commandType) {
+  closeCommandSurfaces();
+  if (commandType === "pin_style") {
+    void pinCurrentStyleSample();
+  } else {
+    void runAiOperation(commandType);
+  }
+}
+
+function closeCommandSurfaces() {
+  state.aiContextMenu = null;
+  state.commandPaletteOpen = false;
+  document.querySelector(".ai-context-menu")?.remove();
+  document.querySelector(".command-palette-backdrop")?.remove();
 }
 
 async function runAiOperation(operationType) {
@@ -1078,19 +1254,30 @@ function aiReviewView() {
   const proposal = review.result.proposal;
   const accepted = Object.values(review.session.decisions).filter((value) => value === "accepted").length;
   const rejected = Object.values(review.session.decisions).filter((value) => value === "rejected").length;
+  const total = proposal.hunks.length;
   return element("section", { className: "ai-review-card" }, [
     element("div", { className: "review-heading" }, [
       element("div", {}, [
         element("span", { className: "eyebrow", text: "PATCH REVIEW" }),
         element("h2", { text: "逐项审查 AI 修改" }),
       ]),
-      element("span", { className: "count-pill", text: `${accepted} 接受 · ${rejected} 拒绝` }),
+      element("div", { className: "review-heading-actions" }, [
+        element("span", { className: "count-pill", text: `${accepted} 接受 · ${rejected} 拒绝` }),
+        element("div", { className: "review-batch-actions", attrs: { "aria-label": "批量审查" } }, [
+          button("全部接受", "small-button", () => decideAllCurrentHunks("accepted"), {
+            disabled: review.busy || accepted === total,
+          }),
+          button("全部拒绝", "quiet-button", () => decideAllCurrentHunks("rejected"), {
+            disabled: review.busy || rejected === total,
+          }),
+        ]),
+      ]),
     ]),
     proposal.summary ? element("p", { className: "review-summary", text: proposal.summary }) : null,
     ...proposal.hunks.map((hunk, index) => hunkReviewView(review, hunk, index)),
     element("div", { className: "review-footer" }, [
-      button("拒绝整个提案", "quiet-button", rejectCurrentReview, { disabled: review.busy }),
-      button("应用已接受修改", "primary-button review-apply", applyCurrentReview, {
+      button("放弃提案", "quiet-button", rejectCurrentReview, { disabled: review.busy }),
+      button(accepted ? "应用已接受修改" : "完成审查（不改正文）", "primary-button review-apply", applyCurrentReview, {
         disabled: review.busy || review.session.status !== "ready",
         title: review.session.status === "ready" ? "创建 ai_accept Commit 并完成审计" : "请先处理全部修改项",
       }),
@@ -1137,6 +1324,38 @@ async function decideCurrentHunk(hunkId, decision) {
       decision,
     });
     review.session = next;
+  } catch (error) {
+    setNotice("error", normalizeHostError(error).message);
+  } finally {
+    review.busy = false;
+    renderWorkspace();
+  }
+}
+
+async function decideAllCurrentHunks(decision) {
+  const review = state.aiReview;
+  if (review?.kind !== "patch_proposal" || review.busy) return;
+  review.busy = true;
+  renderWorkspace();
+  try {
+    const plan = planDesktopReviewDecisions(review.result.proposal, review.session, decision);
+    for (const step of plan.steps) {
+      await persistDesktopReviewDecision({
+        invokeHost,
+        proposalId: review.result.proposal.id,
+        previous: step.previous,
+        next: step.next,
+        hunkId: step.hunkId,
+        decision: step.decision,
+      });
+      review.session = step.next;
+    }
+    setNotice(
+      "success",
+      decision === "accepted"
+        ? `已接受全部 ${review.result.proposal.hunks.length} 个修改项；应用前正文仍未改变。`
+        : `已拒绝全部 ${review.result.proposal.hunks.length} 个修改项；完成审查后正文不会改变。`,
+    );
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
   } finally {
@@ -1928,6 +2147,8 @@ async function closeProject() {
     state.aiRunning = null;
     state.aiContextPreview = null;
     state.aiReview = null;
+    state.aiContextMenu = null;
+    state.commandPaletteOpen = false;
     state.activeBlockId = null;
     state.aiSelection = null;
     setNotice(null, null);
@@ -1941,6 +2162,45 @@ async function closeProject() {
 
 window.addEventListener("beforeunload", (event) => {
   if (state.pendingText.size || state.savePromises.size) event.preventDefault();
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    if (state.aiContextPreview) {
+      event.preventDefault();
+      cancelContextPreview();
+    } else if (state.commandPaletteOpen || state.aiContextMenu) {
+      event.preventDefault();
+      closeCommandSurfaces();
+    }
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "p") {
+    if (!state.workspace || state.aiContextPreview) return;
+    event.preventDefault();
+    openCommandPalette();
+    return;
+  }
+  if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || !state.workspace) return;
+  const activeTag = document.activeElement?.tagName;
+  if (["INPUT", "TEXTAREA", "SELECT"].includes(activeTag)) return;
+  const command = AI_OPERATION_COMMANDS.find((item) => item.key === event.key);
+  if (!command || operationCommandsDisabled() || state.aiContextPreview) return;
+  event.preventDefault();
+  executeRegisteredCommand(command.type);
+});
+
+document.addEventListener("pointerdown", (event) => {
+  if (
+    !state.aiContextMenu
+    || (event.target instanceof Element && event.target.closest(".ai-context-menu"))
+  ) return;
+  state.aiContextMenu = null;
+  document.querySelector(".ai-context-menu")?.remove();
+});
+
+window.addEventListener("resize", () => {
+  if (state.aiContextMenu) closeCommandSurfaces();
 });
 
 bootstrap();

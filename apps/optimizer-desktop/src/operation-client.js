@@ -228,6 +228,22 @@ export function decideDesktopHunk(proposal, session, hunkId, decision) {
   });
 }
 
+export function planDesktopReviewDecisions(proposal, session, decision) {
+  if (!["accepted", "rejected"].includes(decision)) {
+    throw new TypeError("Batch review decision must be accepted or rejected");
+  }
+  let current = session;
+  const steps = [];
+  for (const hunk of proposal.hunks) {
+    if (current.decisions[hunk.id] === decision) continue;
+    const previous = current;
+    const next = decideDesktopHunk(proposal, previous, hunk.id, decision);
+    steps.push({ hunkId: hunk.id, decision, previous, next });
+    current = next;
+  }
+  return { session: current, steps };
+}
+
 export async function persistDesktopReviewDecision(input) {
   const occurredAt = new Date().toISOString();
   return input.invokeHost("append_review_event", {

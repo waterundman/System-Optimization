@@ -83,10 +83,11 @@ scripts/               工程约束检查
 - API Key 只在 Rust 中从系统 Secret Store 解析，WebView 只能管理 opaque `credentialRef` 的写入、存在性和删除。
 - WebView 不再拥有原始模型执行命令；确认后的请求必须携带完整 Context Packet 与受控 Prompt，Host 基于当前 HEAD 重新收集来源并复算 hash、token、评分、预算和敏感策略后，才签发 120 秒内只可消费一次的 capability；项目变化、Packet/Prompt 替换、取消、关闭或重放都会安全失败。
 - AI 工具栏支持续写、润色、压缩、扩写、批评；当前选区为空时使用当前 Block，续写使用光标位置。
+- 五种操作同时支持 Block 右键菜单、`Alt+1…5` 和 `Ctrl/⌘+Shift+P` 可搜索命令面板；`Shift + 右键` 仍可打开系统原生菜单。
 - 用户可把正文选区固定为项目风格样本，在专用抽屉中归档或恢复；风格与正文/事实分层，不会把归档样本重新召回。
 - 用户可维护带 authority、敏感级别和硬/软强度的项目事实与约束；只有 canonical 且绑定当前 HEAD/目标 Block 的条目会进入 L3 Context，`never_send` 不会发往云端模型。
 - AI 主链通过单个 Host Operation Context 命令读取目标、局部正文、结构、摘要、知识和风格；WebView 只做严格 DTO/哈希复核与 Kernel 预算编译，不再自行决定来源资格；模型授权前 Host 会独立复算最终 Packet，并验证真正出站的 Prompt 与用户确认内容逐项一致。
 - Context Compiler、Operation Runner 与 Patch Engine 复用仓库同一份实现；模型输出经过严格 JSON 校验后生成不可变 PatchProposal 或 Findings。
 - 任何云端模型请求发出前都会展示实际编译后的 Context Packet、来源、层级、必需标记、排除项和估算 token；用户确认前不会调用模型宿主命令。
-- 每个 hunk 可接受或拒绝；最终应用在一个 SQLite transaction 内同时创建 `ai_accept` Commit、编辑日志、Review apply 事件和 Operation accepted 状态。
+- 每个 hunk 可接受或拒绝，也可全部接受/拒绝；批量动作按 review revision 逐步审计并尊重 atomic group，最终应用在一个 SQLite transaction 内同时创建 `ai_accept` Commit、编辑日志、Review apply 事件和 Operation accepted 状态。
 - 本地浏览器验收覆盖模型设置、发送前 Context 预览、流式续写、Patch 审查和应用完成路径；没有控制台或页面错误。

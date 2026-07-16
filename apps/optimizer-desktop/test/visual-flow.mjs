@@ -111,8 +111,25 @@ await page.getByText(/optimizer-export-visual\.md/).waitFor();
 await page.getByRole("button", { name: "章 雾港来信", exact: true }).click();
 await page.getByText("摘要已就绪", { exact: true }).waitFor({ timeout: 10_000 });
 
-await page.locator('[data-block-id="block-visual-1"]').click();
-await page.getByRole("button", { name: "续写" }).click();
+const activeEditor = page.locator('[data-block-id="block-visual-1"]');
+await activeEditor.click();
+await activeEditor.click({ button: "right" });
+await page.getByRole("menu", { name: "AI 文本操作" }).waitFor();
+assert.equal(await page.getByRole("menuitem", { name: /续写/ }).count(), 1);
+assert.equal(await page.getByRole("menuitem", { name: /固定为风格样本/ }).count(), 1);
+assert.equal(await page.getByText("null", { exact: true }).count(), 0);
+await page.screenshot({ path: resolve(screenshotDirectory, "ai-context-menu.png"), fullPage: true });
+await page.keyboard.press("Escape");
+
+await page.keyboard.press("Control+Shift+P");
+await page.getByRole("heading", { name: "选择 AI 操作" }).waitFor();
+await page.getByRole("searchbox", { name: "搜索 AI 命令" }).fill("续写");
+assert.equal(await page.locator(".command-palette-item:visible").count(), 1);
+await page.screenshot({ path: resolve(screenshotDirectory, "command-palette.png"), fullPage: true });
+await page.keyboard.press("Escape");
+
+await activeEditor.click();
+await page.keyboard.press("Alt+1");
 await page.getByRole("heading", { name: "确认即将发送的上下文" }).waitFor();
 assert.ok(await page.locator(".context-item").count() >= 1);
 assert.equal(await page.getByText("L4_STYLE_GLOBAL", { exact: true }).count(), 1);
@@ -130,7 +147,8 @@ await page.getByRole("heading", { name: "逐项审查 AI 修改" }).waitFor();
 assert.equal(await page.locator(".review-hunk").count(), 1);
 await page.screenshot({ path: resolve(screenshotDirectory, "patch-review.png"), fullPage: true });
 
-await page.getByRole("button", { name: "接受", exact: true }).click();
+await page.getByRole("button", { name: "全部接受", exact: true }).click();
+await page.getByText(/已接受全部 1 个修改项/).waitFor();
 await page.getByRole("button", { name: "应用已接受修改" }).click();
 await page.getByText("雨停了。她推开车站的门。").waitFor();
 await page.getByText(/ai_accept Commit/).waitFor();

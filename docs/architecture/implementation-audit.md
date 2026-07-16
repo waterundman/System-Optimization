@@ -12,10 +12,10 @@
 | FR-01 项目/文档/章节/场景/Block 创建编辑重排导出 | 部分 | `.optimizer` 项目包、版本化章节树、Block 自动保存、Markdown 导入导出 | 缺 JSON 可读导出；Block 类型/多 Block 创建仍是最小实现 |
 | FR-02 自动保存、操作前提交、AI 接受提交、版本恢复 | 完成 | `workspace_commands`、快照/Commit DAG、操作前 `flushAll`、`ai_accept` 原子事务 | 继续补充真实崩溃故障注入，但主验收闭环已存在 |
 | FR-03 五种内置操作 | 完成 | 桌面续写/润色/压缩/扩写/批评，Operation Profile、严格产物解析 | 多 Provider contract 与浏览器完整流程已覆盖 |
-| FR-04 选区菜单、右键、快捷键、命令面板 | 部分 | 编辑器工具栏与选区/光标目标 | 缺右键菜单、键盘快捷键、命令面板；自动触发目前未启用 |
+| FR-04 选区菜单、右键、快捷键、命令面板 | 完成 | 统一命令注册表驱动工具栏、Block 右键菜单、`Alt+1…5` 与 `Ctrl/⌘+Shift+P` 可搜索命令面板；所有入口复用选区/光标目标与并发禁用规则 | 自动触发属于 FR-12 MAY，默认未启用，不阻塞本项 |
 | FR-05 Context 编译、预算、来源展示、敏感预检 | 完成 | Kernel Context Compiler 与发送确认；Host 在授权前重取当前 HEAD 的 L0—L4 候选，复算 Packet stable hash、token、评分、预算、排除策略和受控 Prompt，并把完整不可变 Packet 纳入一次性 capability | Packet/Prompt/绑定篡改、远程 `never_send`、旧 HEAD/Block 和 capability 重放均有失败关闭测试 |
 | FR-06 流式、取消、超时、有限重试、结构化校验 | 部分 | Rust 固定端点流式传输、取消/超时、严格 JSON 输出 | 缺显式有限重试策略、幂等重试 UI 与重试审计 |
-| FR-07 差异、逐项/整段接受拒绝、保留候选、冲突 | 部分 | 中文分层 diff、逐 hunk 决策、原子应用、冲突拒绝、不可变候选审计 | 缺“全部接受/全部拒绝”的批量交互和候选分支入口 |
+| FR-07 差异、逐项/整段接受拒绝、保留候选、冲突 | 部分 | 中文分层 diff、逐 hunk 与全部接受/拒绝、atomic group 批量计划、逐 revision 审计、原子应用、冲突拒绝、不可变候选审计 | 缺跨会话候选列表、重新打开未完成候选和候选分支入口 |
 | FR-08 事实、约束、风格、摘要及 canonical 状态 | 完成 | schema v6 事实/约束库、authority/sensitivity/severity、canonical/archived/rejected、目标绑定 L3 Context；风格样本与分层摘要 | 自动事实抽取属于后续增强，不是 MVP 必需项 |
 | FR-09 OpenAI-compatible 与 Ollama | 部分 | DeepSeek、Qwen、Kimi、MiniMax 固定官方端点；Ollama 固定回环与模型发现 | 缺通用 OpenAI-compatible 手工配置/能力探测；当前安全模型故意不接受任意 URL |
 | FR-10 日志、token/费用、模型、来源、反馈 | 部分 | Operation/Context/usage/lifecycle/Artifact/Review 本地审计 | 缺费用换算、接受率/二次编辑率聚合、用户反馈与诊断导出 |
@@ -30,7 +30,7 @@
 | Kernel 隔离 | 完成 | 架构检查阻止 Kernel 依赖 UI/Tauri/SQLite/Provider SDK |
 | 密钥隔离 | 完成（Windows） | Credential Manager、opaque ref、WebView 无明文读取、日志脱敏测试；其他桌面平台尚未实现 |
 | 离线编辑/版本/导出/本地摘要 | 完成 | 所有本地能力无 npm 运行时依赖；摘要默认零网络 |
-| 可访问性 | 部分 | 语义按钮/aria-label/键盘可聚焦；缺完整快捷键、焦点管理和屏幕阅读器验收 |
+| 可访问性 | 部分 | 语义按钮/aria-label、右键菜单方向键、命令面板搜索/Enter/Escape 与全局快捷键；缺焦点陷阱和屏幕阅读器完整验收 |
 | 国际化 | 部分 | Unicode/语言标签/中文 diff；界面字符串尚未资源化 |
 | 性能预算 | 缺失证据 | 无 10 万字热启动、Context 编译、补丁落盘基准与阈值门禁 |
 | 插件最小权限与跨宿主复用 | 缺失 | 有 Ports/Adapters 协议，但无 Obsidian contract adapter、WASM 插件 runtime/manifest/权限 |
@@ -39,7 +39,7 @@
 
 ## 当前执行顺序
 
-1. `P0 / FR-04 + FR-07`：右键、快捷键、命令面板，以及全部接受/拒绝交互。
+1. `P0 / FR-07`：持久候选列表、重新打开未完成候选和从候选建立分支。
 2. `P0 / FR-06`：有限重试、幂等审计和重试 UI。
 3. `P0 / FR-09`：在固定端点安全原则下设计通用 OpenAI-compatible 配置与白名单策略。
 4. `P1`：JSON 导出、项目备份/恢复向导、性能基准、可访问性和国际化。

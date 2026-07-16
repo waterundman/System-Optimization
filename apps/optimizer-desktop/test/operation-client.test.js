@@ -7,8 +7,37 @@ import {
   defaultProviderSettings,
   providerConfiguration,
   providerRequiresCredential,
+  planDesktopReviewDecisions,
   runDesktopOperation,
 } from "../dist/operation-client.js";
+
+test("plans auditable batch review decisions without duplicating atomic groups", () => {
+  const proposal = {
+    id: "proposal-batch",
+    proposalHash: `sha256:${"a".repeat(64)}`,
+    hunks: [
+      { id: "hunk-1", atomicGroup: "group-1" },
+      { id: "hunk-2", atomicGroup: "group-1" },
+      { id: "hunk-3" },
+    ],
+  };
+  const session = {
+    proposalId: proposal.id,
+    proposalHash: proposal.proposalHash,
+    revision: 0,
+    status: "review",
+    decisions: { "hunk-1": "pending", "hunk-2": "pending", "hunk-3": "pending" },
+  };
+  const accepted = planDesktopReviewDecisions(proposal, session, "accepted");
+  assert.equal(accepted.steps.length, 2);
+  assert.deepEqual(accepted.steps.map((step) => step.hunkId), ["hunk-1", "hunk-3"]);
+  assert.equal(accepted.steps[0].previous.revision, 0);
+  assert.equal(accepted.steps[1].previous.revision, 1);
+  assert.equal(accepted.session.revision, 2);
+  assert.equal(accepted.session.status, "ready");
+  assert.deepEqual(new Set(Object.values(accepted.session.decisions)), new Set(["accepted"]));
+  assert.throws(() => planDesktopReviewDecisions(proposal, session, "pending"), TypeError);
+});
 
 test("builds fixed host configurations for cloud and local providers", () => {
   const settings = defaultProviderSettings();
