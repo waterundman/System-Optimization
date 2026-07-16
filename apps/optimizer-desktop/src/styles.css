@@ -206,6 +206,7 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .document-button { width: 100%; min-width: 0; margin: 0; padding: 9px 10px; padding-right: 32px; display: flex; align-items: center; gap: 9px; border: 0; border-radius: 8px; color: #4f4b44; background: transparent; text-align: left; font-size: 13px; }
 .document-button:hover { background: #ebe6dc; }
 .document-button.active { color: #214f3b; background: var(--accent-soft); font-weight: 720; }
+.document-indent { flex: 0 0 auto; color: #9c9487; font-size: 12px; letter-spacing: 1px; white-space: pre; }
 .document-icon { width: 24px; height: 24px; display: grid; place-items: center; border: 1px solid #c9c2b7; border-radius: 7px; font-family: Georgia, "Songti SC", serif; font-size: 11px; }
 .document-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .document-actions { position: absolute; inset: 3px 3px 3px auto; padding-left: 14px; display: flex; align-items: center; gap: 1px; opacity: 0; pointer-events: none; background: linear-gradient(90deg, transparent, #f4f0e8 18%); transition: opacity 120ms; }
@@ -215,6 +216,9 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .document-action:hover { color: var(--accent); background: var(--accent-soft); }
 .document-action:disabled { opacity: 0.35; cursor: default; }
 .document-action-danger:hover { color: #8b3d34; background: #f7e6e2; }
+.document-structure-actions { margin: -1px 6px 6px 24px; padding: 4px; display: flex; gap: 3px; border-left: 1px solid #bdcdbf; }
+.document-structure-action { padding: 4px 6px; color: #657168; border: 0; border-radius: 5px; background: transparent; font-size: 9px; }
+.document-structure-action:hover { color: var(--accent); background: #e8f0ea; }
 .archived-heading { margin: 16px 8px 7px; padding-top: 12px; border-top: 1px solid var(--line); color: #8a8378; font-size: 10px; font-weight: 750; letter-spacing: 0.06em; }
 .archived-document-row { min-width: 0; padding: 6px 8px; display: flex; align-items: center; gap: 7px; color: #888177; font-size: 11px; }
 .archived-document-row > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

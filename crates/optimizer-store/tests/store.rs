@@ -251,6 +251,24 @@ fn creates_a_document_block_and_commit_atomically() {
         command.commit_id
     );
 
+    let duplicate_root_order = store.create_document_with_block(&CreateDocumentWithBlock {
+        document_id: "document-duplicate-order".into(),
+        document_title: "Duplicate order".into(),
+        document_order_key: "a0".into(),
+        block_id: "block-duplicate-order".into(),
+        block_content_hash: "sha256:block-duplicate-order".into(),
+        commit_id: "commit-duplicate-order".into(),
+        expected_head_commit_id: "commit-document-2".into(),
+        expected_project_revision: 1,
+        new_root_hash: "sha256:root-duplicate-order".into(),
+        ..command.clone()
+    });
+    assert!(matches!(
+        duplicate_root_order,
+        Err(StoreError::Validation(_))
+    ));
+    assert_eq!(store.list_documents("project-1").unwrap().len(), 2);
+
     let stale = store.create_document_with_block(&CreateDocumentWithBlock {
         document_id: "document-stale".into(),
         block_id: "block-stale".into(),

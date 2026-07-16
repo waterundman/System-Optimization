@@ -11,19 +11,20 @@ use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
 use crate::workspace_commands::{
-    apply_reviewed_proposal, block_content_hash, create_checkpoint, create_document,
-    create_style_sample, list_archived_documents, list_style_samples, list_summary_invalidations,
-    load_project_workspace, load_version_history, project_root_hash, rename_document,
-    reorder_document, restore_checkpoint, save_block, set_document_archived,
+    apply_reviewed_proposal, block_content_hash, change_document_depth, create_checkpoint,
+    create_document, create_style_sample, list_archived_documents, list_style_samples,
+    list_summary_invalidations, load_project_workspace, load_version_history, project_root_hash,
+    rename_document, reorder_document, restore_checkpoint, save_block, set_document_archived,
     set_style_sample_status,
 };
 use crate::{
-    ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, ArchivedDocument, CheckpointSummary,
-    CreateDocumentResponse, CreateDocumentSpec, CreateStyleSampleSpec, DocumentMutationResponse,
-    HostError, OperationCommandHost, ProjectRoot, ProjectWorkspace, RenameDocumentSpec,
-    ReorderDocumentSpec, RestoreCheckpointResponse, RestoreCheckpointSpec, SaveBlockResponse,
-    SaveBlockSpec, SetDocumentArchivedSpec, SetStyleSampleStatusSpec, StyleSample,
-    SummaryInvalidation, VersionHistory, WorkspaceCommandError,
+    ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, ArchivedDocument,
+    ChangeDocumentDepthSpec, CheckpointSummary, CreateDocumentResponse, CreateDocumentSpec,
+    CreateStyleSampleSpec, DocumentMutationResponse, HostError, OperationCommandHost, ProjectRoot,
+    ProjectWorkspace, RenameDocumentSpec, ReorderDocumentSpec, RestoreCheckpointResponse,
+    RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec, SetDocumentArchivedSpec,
+    SetStyleSampleStatusSpec, StyleSample, SummaryInvalidation, VersionHistory,
+    WorkspaceCommandError,
 };
 
 const PACKAGE_SCHEMA_VERSION: u32 = 1;
@@ -315,6 +316,18 @@ impl OpenedProject {
         spec: &ReorderDocumentSpec,
     ) -> Result<DocumentMutationResponse, WorkspaceCommandError> {
         reorder_document(
+            self.operations.store_mut(),
+            &self.project_id,
+            &self.main_branch_id,
+            spec,
+        )
+    }
+
+    pub fn change_document_depth(
+        &mut self,
+        spec: &ChangeDocumentDepthSpec,
+    ) -> Result<DocumentMutationResponse, WorkspaceCommandError> {
+        change_document_depth(
             self.operations.store_mut(),
             &self.project_id,
             &self.main_branch_id,
@@ -799,6 +812,7 @@ mod tests {
             .create_document(&CreateDocumentSpec {
                 title: "第二章".into(),
                 initial_text: "雨落在旧站台。".into(),
+                parent_id: None,
             })
             .unwrap();
         let checkpoint = project.create_checkpoint().unwrap();
@@ -884,6 +898,156 @@ mod tests {
         assert_eq!(restored.workspace.documents[1].title, "第二章");
         assert!(project.archived_documents().unwrap().is_empty());
         assert_eq!(restored.workspace.blocks.len(), 2);
+    }
+
+    #[test]
+    fn versions_nested_document_reparenting_sibling_order_and_subtree_archive() {
+        let parent = TempParent::new();
+        let mut project = OpenedProject::create(&parent.0, &spec()).unwrap();
+        let first = project.workspace().unwrap().documents[0].clone();
+        let second = project
+            .create_document(&CreateDocumentSpec {
+                title: "第二章".into(),
+                initial_text: "第二章正文".into(),
+                parent_id: None,
+            })
+            .unwrap()
+            .document;
+        let indented = project
+            .change_document_depth(&ChangeDocumentDepthSpec {
+                document_id: second.id.clone(),
+                expected_revision: second.revision,
+                direction: crate::DocumentDepthDirection::Indent,
+            })
+            .unwrap();
+        let second = indented
+            .workspace
+            .documents
+            .iter()
+            .find(|document| document.id == second.id)
+            .unwrap()
+            .clone();
+        assert_eq!(second.parent_id.as_deref(), Some(first.id.as_str()));
+        assert!(project.summary_invalidations().unwrap().iter().any(|item| {
+            item.scope_type == "document"
+                && item.scope_id == first.id
+                && item.source_commit_id == indented.commit_id
+        }));
+
+        let third = project
+            .create_document(&CreateDocumentSpec {
+                title: "场景三".into(),
+                initial_text: "场景正文".into(),
+                parent_id: Some(first.id.clone()),
+            })
+            .unwrap()
+            .document;
+        let reordered = project
+            .reorder_document(&ReorderDocumentSpec {
+                document_id: third.id.clone(),
+                expected_revision: third.revision,
+                direction: crate::DocumentMoveDirection::Up,
+            })
+            .unwrap();
+        let child_ids = reordered
+            .workspace
+            .documents
+            .iter()
+            .filter(|document| document.parent_id.as_deref() == Some(first.id.as_str()))
+            .map(|document| document.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(child_ids, vec![third.id.as_str(), second.id.as_str()]);
+        let third = reordered
+            .workspace
+            .documents
+            .iter()
+            .find(|document| document.id == third.id)
+            .unwrap()
+            .clone();
+        let outdented = project
+            .change_document_depth(&ChangeDocumentDepthSpec {
+                document_id: third.id.clone(),
+                expected_revision: third.revision,
+                direction: crate::DocumentDepthDirection::Outdent,
+            })
+            .unwrap();
+        let first = outdented
+            .workspace
+            .documents
+            .iter()
+            .find(|document| document.id == first.id)
+            .unwrap()
+            .clone();
+        let third = outdented
+            .workspace
+            .documents
+            .iter()
+            .find(|document| document.id == third.id)
+            .unwrap()
+            .clone();
+        assert_eq!(third.parent_id, None);
+        assert!(project.summary_invalidations().unwrap().iter().any(|item| {
+            item.scope_type == "document"
+                && item.scope_id == first.id
+                && item.source_commit_id == outdented.commit_id
+        }));
+
+        let archived = project
+            .set_document_archived(&SetDocumentArchivedSpec {
+                document_id: first.id.clone(),
+                expected_revision: first.revision,
+                archived: true,
+            })
+            .unwrap();
+        assert_eq!(archived.workspace.documents.len(), 1);
+        assert_eq!(archived.workspace.documents[0].id, third.id);
+        let archived_documents = project.archived_documents().unwrap();
+        assert_eq!(archived_documents.len(), 2);
+        let archived_first = archived_documents
+            .iter()
+            .find(|document| document.id == first.id)
+            .unwrap();
+        let archived_second = archived_documents
+            .iter()
+            .find(|document| document.id == second.id)
+            .unwrap();
+        assert!(matches!(
+            project.set_document_archived(&SetDocumentArchivedSpec {
+                document_id: archived_second.id.clone(),
+                expected_revision: archived_second.revision,
+                archived: false,
+            }),
+            Err(WorkspaceCommandError::DocumentValidation(_))
+        ));
+        project
+            .set_document_archived(&SetDocumentArchivedSpec {
+                document_id: archived_first.id.clone(),
+                expected_revision: archived_first.revision,
+                archived: false,
+            })
+            .unwrap();
+        let archived_second = project
+            .archived_documents()
+            .unwrap()
+            .into_iter()
+            .find(|document| document.id == second.id)
+            .unwrap();
+        let restored = project
+            .set_document_archived(&SetDocumentArchivedSpec {
+                document_id: archived_second.id,
+                expected_revision: archived_second.revision,
+                archived: false,
+            })
+            .unwrap();
+        assert_eq!(restored.workspace.documents.len(), 3);
+        assert!(
+            project
+                .version_history()
+                .unwrap()
+                .commits
+                .iter()
+                .any(|commit| commit.reason == "document_reparent")
+        );
     }
 
     #[test]

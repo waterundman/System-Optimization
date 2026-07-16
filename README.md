@@ -18,7 +18,7 @@
 - `@optimizer/model-gateway`：DeepSeek、Qwen、Kimi、MiniMax 与本地 Ollama，支持流式输出、取消、超时与统一错误。
 - `@optimizer/operation-runner`：ContextPacket → Provider → 严格输出校验 → PatchProposal/Findings，并生成版本化 Store bundle。
 - 确定性 `optimizer-json+zstd` 快照编码、SHA-256 完整性校验与“恢复为新 Commit”。
-- 版本化章节生命周期与结构恢复：创建、重命名、相邻移动、软归档和恢复均形成 Commit；项目根哈希 v2 绑定章节元数据与活动 Block，检查点可恢复章节集合、标题、顺序和归档状态。
+- 版本化树形章节生命周期与结构恢复：顶层/子章节创建、同级移动、缩进、移出、重命名、子树软归档和逐层恢复均形成 Commit；项目根哈希 v2 绑定 parent/order 等章节元数据与活动 Block，检查点可恢复整棵章节树。
 - 结构化摘要失效队列：项目、章节与 Block 三层作用域随同正文/结构 Commit 在同一事务内失效并合并；摘要完成按作用域绑定失效源 Commit，陈旧结果不能消费新队列项；桌面顶部显示当前待更新数量。
 - 最近项目：宿主用户配置区使用有大小上限、严格 schema、备份恢复和原子替换的注册表；欢迎页按 `projectId` 快速打开并重新执行完整项目包校验，可移除记录而不删除项目文件。
 - 用户显式选文件的 Markdown 导入，以及限制在项目包 `exports/` 内的原子 Markdown 导出。
@@ -61,13 +61,13 @@ scripts/               工程约束检查
 2. Ollama 缺失模型拉取指引、版本兼容提示与可选上下文窗口配置。
 3. 依赖源可用后将正文输入适配器替换为 Tiptap，并提供行内 decoration 审查。
 4. 显式成本策略下的重试、Provider fallback 与费用上限。
-5. 真正的父子树形章节与后台摘要生成 worker。
+5. 后台摘要生成 worker，以及更细粒度的 Context 来源策略下沉。
 
 ## 最新迭代：可运行桌面工作区
 
 - 欢迎页可创建或打开经 Host 校验的 `.optimizer` 项目包，并列出最多 12 个宿主维护的最近项目；快速打开不信任旧路径内容，仍会重新校验 manifest、SQLite invariant 与项目绑定。
 - 工作区显示文档树、结构化 Block、保存状态、有效字符数与版本抽屉。
-- 文档树支持章节重命名、上移/下移、软归档和恢复；结构命令先刷新正文草稿并以权威工作区响应推进 HEAD。
+- 文档树支持顶层/子章节创建、同级上移/下移、缩进/移出、重命名、子树软归档和逐层恢复；结构命令先刷新正文草稿并以权威工作区响应推进 HEAD。
 - 900ms 串行自动保存绑定 Block revision/hash；冲突时保留本地草稿并重新加载权威版本。
 - 检查点与恢复均通过 Host，恢复创建新 Commit，不覆盖历史。
 - 静态前端没有第三方 npm 运行时依赖和远程资源；Tauri CSP 只开放本地资源与 IPC。

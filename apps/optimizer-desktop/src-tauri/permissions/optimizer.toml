@@ -25,8 +25,8 @@ commands.allow = ["create_document", "save_block", "apply_reviewed_proposal"]
 
 [[permission]]
 identifier = "allow-document-lifecycle"
-description = "Allows the bundled editor to list archived chapters and commit chapter rename, reorder, archive and restore mutations."
-commands.allow = ["list_archived_documents", "rename_document", "reorder_document", "set_document_archived"]
+description = "Allows the bundled editor to list archived chapters and commit chapter rename, sibling reorder, hierarchy and archive/restore mutations."
+commands.allow = ["list_archived_documents", "rename_document", "reorder_document", "change_document_depth", "set_document_archived"]
 
 [[permission]]
 identifier = "allow-summary-status-read"

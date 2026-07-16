@@ -525,6 +525,23 @@ impl OptimizerStore {
                 });
             }
         }
+        let order_key_exists: bool = transaction.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM document
+               WHERE project_id = ?1 AND parent_id IS ?2 AND order_key = ?3
+             )",
+            params![
+                project_id,
+                command.document_parent_id,
+                command.document_order_key
+            ],
+            |row| row.get(0),
+        )?;
+        if order_key_exists {
+            return Err(StoreError::Validation(
+                "document order key already exists within the parent".into(),
+            ));
+        }
         transaction.execute(
             "INSERT INTO document(id, project_id, parent_id, kind, title, order_key, revision)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
@@ -694,6 +711,12 @@ impl OptimizerStore {
             .enumerate()
             .map(|(index, document)| (document.id.clone(), index))
             .collect::<BTreeMap<_, _>>();
+        let mutation_ids = command
+            .mutations
+            .iter()
+            .map(|mutation| mutation.document_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut related_parent_ids = BTreeSet::new();
         for mutation in &command.mutations {
             let index =
                 positions
@@ -717,6 +740,12 @@ impl OptimizerStore {
                 return Err(StoreError::Validation(
                     "a document cannot be its own parent".into(),
                 ));
+            }
+            if let Some(parent_id) = document.parent_id.as_deref() {
+                related_parent_ids.insert(parent_id.to_owned());
+            }
+            if let Some(parent_id) = mutation.parent_id.as_deref() {
+                related_parent_ids.insert(parent_id.to_owned());
             }
             document.parent_id = mutation.parent_id.clone();
             document.kind = mutation.kind.clone();
@@ -859,6 +888,25 @@ impl OptimizerStore {
                        ))
                      )",
                     params![project_id, mutation.document_id],
+                )?;
+            }
+        }
+        for parent_id in related_parent_ids {
+            if mutation_ids.contains(parent_id.as_str()) {
+                continue;
+            }
+            let active = documents
+                .iter()
+                .any(|document| document.id == parent_id && document.deleted_at.is_none());
+            if active {
+                enqueue_summary_invalidation(
+                    &transaction,
+                    &project_id,
+                    "document",
+                    &parent_id,
+                    &command.commit_id,
+                    &command.reason,
+                    &command.occurred_at,
                 )?;
             }
         }
@@ -2413,7 +2461,11 @@ fn validate_document_batch(command: &ApplyDocumentBatch) -> StoreResult<()> {
     }
     if !matches!(
         command.reason.as_str(),
-        "document_rename" | "document_reorder" | "document_archive" | "document_restore"
+        "document_rename"
+            | "document_reorder"
+            | "document_reparent"
+            | "document_archive"
+            | "document_restore"
     ) {
         return Err(StoreError::Validation(
             "document mutation reason is unsupported".into(),
@@ -2448,7 +2500,7 @@ fn validate_document_batch(command: &ApplyDocumentBatch) -> StoreResult<()> {
         }
         if !matches!(
             mutation.operation.as_str(),
-            "rename" | "reorder" | "archive" | "restore"
+            "rename" | "reorder" | "reparent" | "archive" | "restore"
         ) {
             return Err(StoreError::Validation(
                 "document mutation operation is unsupported".into(),

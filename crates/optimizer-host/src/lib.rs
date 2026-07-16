@@ -30,12 +30,13 @@ pub use recent_projects::{RecentProject, RecentProjectError, RecentProjectRegist
 pub use secrets::WindowsCredentialStore;
 pub use secrets::{MemorySecretStore, SecretReference, SecretStore, SecretStoreError, SecretValue};
 pub use workspace_commands::{
-    ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, ArchivedDocument, CheckpointSummary,
-    CreateDocumentResponse, CreateDocumentSpec, CreateStyleSampleSpec, DocumentMoveDirection,
-    DocumentMutationResponse, ProjectWorkspace, RenameDocumentSpec, ReorderDocumentSpec,
-    RestoreCheckpointResponse, RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec,
-    SetDocumentArchivedSpec, SetStyleSampleStatusSpec, StyleSample, SummaryInvalidation,
-    VersionCommit, VersionHistory, WorkspaceBlock, WorkspaceCommandError, WorkspaceDocument,
+    ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, ArchivedDocument,
+    ChangeDocumentDepthSpec, CheckpointSummary, CreateDocumentResponse, CreateDocumentSpec,
+    CreateStyleSampleSpec, DocumentDepthDirection, DocumentMoveDirection, DocumentMutationResponse,
+    ProjectWorkspace, RenameDocumentSpec, ReorderDocumentSpec, RestoreCheckpointResponse,
+    RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec, SetDocumentArchivedSpec,
+    SetStyleSampleStatusSpec, StyleSample, SummaryInvalidation, VersionCommit, VersionHistory,
+    WorkspaceBlock, WorkspaceCommandError, WorkspaceDocument,
 };
 
 #[derive(Debug)]

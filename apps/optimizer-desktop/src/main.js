@@ -419,30 +419,76 @@ function renderWorkspace() {
   ]));
 }
 
+function documentTreeEntries(documents) {
+  const byId = new Map(documents.map((document) => [document.id, document]));
+  const children = new Map();
+  for (const document of documents) {
+    const parentId = document.parentId && byId.has(document.parentId) ? document.parentId : null;
+    const siblings = children.get(parentId) ?? [];
+    siblings.push(document);
+    children.set(parentId, siblings);
+  }
+  for (const siblings of children.values()) {
+    siblings.sort((left, right) => left.orderKey.localeCompare(right.orderKey) || left.id.localeCompare(right.id));
+  }
+  const entries = [];
+  const visited = new Set();
+  const visit = (document, depth, siblingIndex, siblingCount) => {
+    if (visited.has(document.id)) return;
+    visited.add(document.id);
+    entries.push({ document, depth, siblingIndex, siblingCount });
+    const descendants = children.get(document.id) ?? [];
+    descendants.forEach((child, index) => visit(child, depth + 1, index, descendants.length));
+  };
+  const roots = children.get(null) ?? [];
+  roots.forEach((document, index) => visit(document, 0, index, roots.length));
+  for (const document of documents) {
+    if (!visited.has(document.id)) visit(document, 0, entries.length, documents.length);
+  }
+  return entries;
+}
+
+function documentDescendantCount(documentId, documents) {
+  let frontier = [documentId];
+  let count = 0;
+  while (frontier.length) {
+    const parentId = frontier.pop();
+    const children = documents.filter((document) => document.parentId === parentId);
+    count += children.length;
+    frontier.push(...children.map((document) => document.id));
+  }
+  return count;
+}
+
 function documentSidebar() {
-  const documents = [...state.workspace.documents].sort(
-    (left, right) => left.orderKey.localeCompare(right.orderKey) || left.id.localeCompare(right.id),
-  );
+  const documents = state.workspace.documents;
+  const entries = documentTreeEntries(documents);
   const list = element("nav", { className: "document-list", attrs: { "aria-label": "文档" } });
-  for (const [index, document] of documents.entries()) {
+  for (const entry of entries) {
+    const { document, depth, siblingIndex, siblingCount } = entry;
     const select = button("", `document-button${document.id === state.selectedDocumentId ? " active" : ""}`, () => {
       state.selectedDocumentId = document.id;
       state.conflictDraft = null;
       renderWorkspace();
     });
     select.append(
+      element("span", {
+        className: "document-indent",
+        text: depth ? "· ".repeat(depth) : "",
+        attrs: { "aria-hidden": "true" },
+      }),
       element("span", { className: "document-icon", text: document.kind === "chapter" ? "章" : "文" }),
       element("span", { className: "document-name", text: document.title }),
     );
     const actions = element("span", { className: "document-actions" }, [
       button("↑", "document-action", () => reorderDocument(document, "up"), {
         title: `上移“${document.title}”`,
-        disabled: index === 0,
+        disabled: siblingIndex === 0,
         attrs: { "aria-label": `上移 ${document.title}` },
       }),
       button("↓", "document-action", () => reorderDocument(document, "down"), {
         title: `下移“${document.title}”`,
-        disabled: index === documents.length - 1,
+        disabled: siblingIndex === siblingCount - 1,
         attrs: { "aria-label": `下移 ${document.title}` },
       }),
       button("✎", "document-action", () => renameDocument(document), {
@@ -456,6 +502,21 @@ function documentSidebar() {
       }),
     ]);
     list.append(element("div", { className: "document-row" }, [select, actions]));
+    if (document.id === state.selectedDocumentId) {
+      list.append(element("div", { className: "document-structure-actions" }, [
+        button("缩进", "document-structure-action", () => changeDocumentDepth(document, "indent"), {
+          disabled: siblingIndex === 0,
+          attrs: { "aria-label": `缩进 ${document.title}` },
+        }),
+        button("移出", "document-structure-action", () => changeDocumentDepth(document, "outdent"), {
+          disabled: !document.parentId,
+          attrs: { "aria-label": `移出 ${document.title}` },
+        }),
+        button("＋ 子章节", "document-structure-action", () => createDocument(document.id), {
+          attrs: { "aria-label": `新建 ${document.title} 的子章节` },
+        }),
+      ]));
+    }
   }
   if (state.archivedDocuments.length) {
     list.append(element("div", { className: "archived-heading", text: `已归档 · ${state.archivedDocuments.length}` }));
@@ -473,7 +534,10 @@ function documentSidebar() {
       element("span", { text: "文档" }),
       element("div", { className: "sidebar-heading-actions" }, [
         element("span", { className: "count-pill", text: String(documents.length) }),
-        button("＋", "icon-button document-add", createDocument, { title: "新建章节" }),
+        button("＋", "icon-button document-add", () => createDocument(null), {
+          title: "新建顶层章节",
+          attrs: { "aria-label": "新建顶层章节" },
+        }),
       ]),
     ]),
     list,
@@ -535,8 +599,21 @@ async function reorderDocument(document, direction) {
   );
 }
 
+async function changeDocumentDepth(document, direction) {
+  await commitDocumentMutation(
+    "change_document_depth",
+    { documentId: document.id, expectedRevision: document.revision, direction },
+    document.id,
+    direction === "indent"
+      ? `已将“${document.title}”缩进为上一章节的子章节。`
+      : `已将“${document.title}”移出到上一层。`,
+  );
+}
+
 async function archiveDocument(document) {
-  if (!window.confirm(`归档“${document.title}”？正文会被保留，并可从侧栏恢复。`)) return;
+  const descendants = documentDescendantCount(document.id, state.workspace.documents);
+  const cascade = descendants ? `及其 ${descendants} 个子章节` : "";
+  if (!window.confirm(`归档“${document.title}”${cascade}？正文会被保留，并可从侧栏恢复。`)) return;
   await commitDocumentMutation(
     "set_document_archived",
     { documentId: document.id, expectedRevision: document.revision, archived: true },
@@ -554,13 +631,14 @@ async function restoreArchivedDocument(document) {
   );
 }
 
-async function createDocument() {
-  const title = window.prompt("新章节标题");
+async function createDocument(parentDocumentId = null) {
+  const parent = state.workspace.documents.find((document) => document.id === parentDocumentId);
+  const title = window.prompt(parent ? `新建“${parent.title}”的子章节` : "新章节标题");
   if (title === null) return;
   try {
     await flushAll();
     const created = await invokeHost("create_document", {
-      input: { schemaVersion: 1, title, initialText: "" },
+      input: { schemaVersion: 1, title, initialText: "", parentDocumentId },
     });
     state.summaryInvalidations = await invokeHost("list_summary_invalidations");
     applyCreatedDocument(created, `已创建章节“${created.document.title}”并记录版本。`);

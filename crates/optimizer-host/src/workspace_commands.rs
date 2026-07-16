@@ -103,6 +103,7 @@ pub struct SetStyleSampleStatusSpec {
 pub struct CreateDocumentSpec {
     pub title: String,
     pub initial_text: String,
+    pub parent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -147,6 +148,19 @@ pub struct ReorderDocumentSpec {
     pub document_id: String,
     pub expected_revision: i64,
     pub direction: DocumentMoveDirection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocumentDepthDirection {
+    Indent,
+    Outdent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeDocumentDepthSpec {
+    pub document_id: String,
+    pub expected_revision: i64,
+    pub direction: DocumentDepthDirection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -404,13 +418,21 @@ pub(crate) fn create_document(
     let content_json = serde_json::to_string(&content).map_err(WorkspaceCommandError::Json)?;
     let content_hash = block_content_hash("paragraph", &content, &spec.initial_text, false)?;
     let mut documents = store.list_documents(project_id)?;
+    if let Some(parent_id) = spec.parent_id.as_deref()
+        && !documents.iter().any(|document| document.id == parent_id)
+    {
+        return Err(WorkspaceCommandError::DocumentValidation(
+            "Parent document must be active in the current project".into(),
+        ));
+    }
+    let document_order_key = append_sibling_order_key(&documents, spec.parent_id.as_deref());
     documents.push(DocumentRecord {
         id: document_id.clone(),
         project_id: project_id.to_owned(),
-        parent_id: None,
+        parent_id: spec.parent_id.clone(),
         kind: "chapter".into(),
         title: title.to_owned(),
-        order_key: format!("z-{document_id}"),
+        order_key: document_order_key.clone(),
         revision: 0,
         deleted_at: None,
     });
@@ -434,10 +456,10 @@ pub(crate) fn create_document(
     );
     let receipt = store.create_document_with_block(&CreateDocumentWithBlock {
         document_id: document_id.clone(),
-        document_parent_id: None,
+        document_parent_id: spec.parent_id.clone(),
         document_kind: "chapter".into(),
         document_title: title.to_owned(),
-        document_order_key: format!("z-{document_id}"),
+        document_order_key,
         block_id: block_id.clone(),
         block_kind: "paragraph".into(),
         block_order_key: "a0".into(),
@@ -582,30 +604,23 @@ pub(crate) fn reorder_document(
         spec.expected_revision,
         &project.head_commit_id,
     )?;
+    let before = current_documents.clone();
+    let parent_id = current_documents[current_index].parent_id.clone();
+    let mut sibling_ids = ordered_sibling_ids(&current_documents, parent_id.as_deref());
+    let sibling_index = sibling_ids
+        .iter()
+        .position(|id| id == &spec.document_id)
+        .expect("active document is present in its sibling group");
     let target_index = match spec.direction {
-        DocumentMoveDirection::Up => current_index.checked_sub(1),
+        DocumentMoveDirection::Up => sibling_index.checked_sub(1),
         DocumentMoveDirection::Down => {
-            (current_index + 1 < current_documents.len()).then_some(current_index + 1)
+            (sibling_index + 1 < sibling_ids.len()).then_some(sibling_index + 1)
         }
     }
     .ok_or(WorkspaceCommandError::NoChanges)?;
-    let before = current_documents.clone();
-    current_documents.swap(current_index, target_index);
-    let order_namespace = Uuid::new_v4().simple();
-    for (index, document) in current_documents.iter_mut().enumerate() {
-        document.order_key = format!("d-{index:08}-{order_namespace}");
-    }
-    let mutations = current_documents
-        .iter()
-        .filter_map(|next| {
-            let current = before
-                .iter()
-                .find(|document| document.id == next.id)
-                .expect("reordered document originates from the current workspace");
-            (current.order_key != next.order_key)
-                .then(|| document_mutation(current, next, true, true, "reorder"))
-        })
-        .collect::<Vec<_>>();
+    sibling_ids.swap(sibling_index, target_index);
+    rekey_documents(&mut current_documents, &sibling_ids);
+    let mutations = changed_document_mutations(&before, &current_documents, "reorder");
     if mutations.is_empty() {
         return Err(WorkspaceCommandError::NoChanges);
     }
@@ -618,6 +633,80 @@ pub(crate) fn reorder_document(
         current_documents,
         mutations,
         "document_reorder",
+    )
+}
+
+pub(crate) fn change_document_depth(
+    store: &mut OptimizerStore,
+    project_id: &str,
+    main_branch_id: &str,
+    spec: &ChangeDocumentDepthSpec,
+) -> Result<DocumentMutationResponse, WorkspaceCommandError> {
+    validate_document_reference(&spec.document_id, spec.expected_revision)?;
+    let project = store.get_project(project_id)?;
+    let mut documents = store.list_documents(project_id)?;
+    let current_index = documents
+        .iter()
+        .position(|document| document.id == spec.document_id)
+        .ok_or_else(|| missing_active_document(&spec.document_id))?;
+    validate_document_revision(
+        &documents[current_index],
+        spec.expected_revision,
+        &project.head_commit_id,
+    )?;
+    let before = documents.clone();
+    let current_parent_id = documents[current_index].parent_id.clone();
+    let sibling_ids = ordered_sibling_ids(&documents, current_parent_id.as_deref());
+    let sibling_index = sibling_ids
+        .iter()
+        .position(|id| id == &spec.document_id)
+        .expect("active document is present in its sibling group");
+
+    let destination_ids = match spec.direction {
+        DocumentDepthDirection::Indent => {
+            let new_parent_id = sibling_index
+                .checked_sub(1)
+                .and_then(|index| sibling_ids.get(index))
+                .cloned()
+                .ok_or(WorkspaceCommandError::NoChanges)?;
+            documents[current_index].parent_id = Some(new_parent_id.clone());
+            let mut children = ordered_sibling_ids(&documents, Some(&new_parent_id));
+            children.retain(|id| id != &spec.document_id);
+            children.push(spec.document_id.clone());
+            children
+        }
+        DocumentDepthDirection::Outdent => {
+            let parent_id = current_parent_id.ok_or(WorkspaceCommandError::NoChanges)?;
+            let parent = documents
+                .iter()
+                .find(|document| document.id == parent_id)
+                .cloned()
+                .ok_or_else(|| missing_active_document(&parent_id))?;
+            documents[current_index].parent_id = parent.parent_id.clone();
+            let mut destination = ordered_sibling_ids(&documents, parent.parent_id.as_deref());
+            destination.retain(|id| id != &spec.document_id);
+            let parent_index = destination
+                .iter()
+                .position(|id| id == &parent.id)
+                .expect("active parent is present in its sibling group");
+            destination.insert(parent_index + 1, spec.document_id.clone());
+            destination
+        }
+    };
+    rekey_documents(&mut documents, &destination_ids);
+    let mutations = changed_document_mutations(&before, &documents, "reparent");
+    if mutations.is_empty() {
+        return Err(WorkspaceCommandError::NoChanges);
+    }
+    commit_document_mutations(
+        store,
+        project_id,
+        main_branch_id,
+        &project.head_commit_id,
+        project.revision,
+        documents,
+        mutations,
+        "document_reparent",
     )
 }
 
@@ -635,25 +724,47 @@ pub(crate) fn set_document_archived(
     if currently_archived == spec.archived {
         return Err(WorkspaceCommandError::NoChanges);
     }
-    let mut next = current.clone();
-    next.deleted_at = spec.archived.then(|| "archived".into());
     let mut active_documents = store.list_documents(project_id)?;
-    let (operation, reason, before_active, after_active) = if spec.archived {
-        if active_documents.len() <= 1 {
+    let (mutations, reason) = if spec.archived {
+        let subtree_ids = active_subtree_ids(&active_documents, &current.id);
+        if active_documents.len() <= subtree_ids.len() {
             return Err(WorkspaceCommandError::DocumentValidation(
                 "A project must retain at least one active document".into(),
             ));
         }
-        active_documents.retain(|document| document.id != current.id);
-        ("archive", "document_archive", true, false)
+        let mutations = active_documents
+            .iter()
+            .filter(|document| subtree_ids.contains(document.id.as_str()))
+            .map(|document| {
+                let mut next = document.clone();
+                next.deleted_at = Some("archived".into());
+                document_mutation(document, &next, true, false, "archive")
+            })
+            .collect::<Vec<_>>();
+        active_documents.retain(|document| !subtree_ids.contains(document.id.as_str()));
+        (mutations, "document_archive")
     } else {
+        if let Some(parent_id) = current.parent_id.as_deref()
+            && !active_documents
+                .iter()
+                .any(|document| document.id == parent_id)
+        {
+            return Err(WorkspaceCommandError::DocumentValidation(
+                "Restore the parent document before restoring this child".into(),
+            ));
+        }
+        let mut next = current.clone();
+        next.deleted_at = None;
         active_documents.push(next.clone());
         active_documents.sort_by(|left, right| {
             left.order_key
                 .cmp(&right.order_key)
                 .then_with(|| left.id.cmp(&right.id))
         });
-        ("restore", "document_restore", false, true)
+        (
+            vec![document_mutation(&current, &next, false, true, "restore")],
+            "document_restore",
+        )
     };
     commit_document_mutations(
         store,
@@ -662,15 +773,86 @@ pub(crate) fn set_document_archived(
         &project.head_commit_id,
         project.revision,
         active_documents,
-        vec![document_mutation(
-            &current,
-            &next,
-            before_active,
-            after_active,
-            operation,
-        )],
+        mutations,
         reason,
     )
+}
+
+fn append_sibling_order_key(documents: &[DocumentRecord], parent_id: Option<&str>) -> String {
+    let suffix = Uuid::new_v4().simple();
+    documents
+        .iter()
+        .filter(|document| document.parent_id.as_deref() == parent_id)
+        .map(|document| document.order_key.as_str())
+        .max()
+        .map_or_else(
+            || format!("d-00000000-{suffix}"),
+            |last| format!("{last}~{suffix}"),
+        )
+}
+
+fn ordered_sibling_ids(documents: &[DocumentRecord], parent_id: Option<&str>) -> Vec<String> {
+    let mut siblings = documents
+        .iter()
+        .filter(|document| document.parent_id.as_deref() == parent_id)
+        .collect::<Vec<_>>();
+    siblings.sort_by(|left, right| {
+        left.order_key
+            .cmp(&right.order_key)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    siblings
+        .into_iter()
+        .map(|document| document.id.clone())
+        .collect()
+}
+
+fn rekey_documents(documents: &mut [DocumentRecord], ordered_ids: &[String]) {
+    let namespace = Uuid::new_v4().simple();
+    for (index, document_id) in ordered_ids.iter().enumerate() {
+        let document = documents
+            .iter_mut()
+            .find(|document| document.id == *document_id)
+            .expect("rekey target originates from the current workspace");
+        document.order_key = format!("d-{index:08}-{namespace}");
+    }
+}
+
+fn changed_document_mutations(
+    before: &[DocumentRecord],
+    after: &[DocumentRecord],
+    operation: &str,
+) -> Vec<DocumentMutation> {
+    after
+        .iter()
+        .filter_map(|next| {
+            let current = before
+                .iter()
+                .find(|document| document.id == next.id)
+                .expect("changed document originates from the current workspace");
+            (current.parent_id != next.parent_id || current.order_key != next.order_key)
+                .then(|| document_mutation(current, next, true, true, operation))
+        })
+        .collect()
+}
+
+fn active_subtree_ids(documents: &[DocumentRecord], root_id: &str) -> BTreeSet<String> {
+    let mut subtree = BTreeSet::from([root_id.to_owned()]);
+    loop {
+        let before = subtree.len();
+        for document in documents {
+            if document
+                .parent_id
+                .as_deref()
+                .is_some_and(|parent_id| subtree.contains(parent_id))
+            {
+                subtree.insert(document.id.clone());
+            }
+        }
+        if subtree.len() == before {
+            return subtree;
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

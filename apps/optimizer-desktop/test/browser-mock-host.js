@@ -126,7 +126,7 @@
       const index = workspace.documents.length + 1;
       const document = {
         id: `document-visual-${index}`,
-        parentId: null,
+        parentId: args.input.parentDocumentId ?? null,
         kind: "chapter",
         title: args.input.title.trim(),
         orderKey: `z-document-visual-${index}`,
@@ -164,16 +164,43 @@
       return documentMutationResponse("rename");
     }
     if (command === "reorder_document") {
-      workspace.documents.sort((left, right) => left.orderKey.localeCompare(right.orderKey));
-      const index = workspace.documents.findIndex((item) => item.id === args.input.documentId);
+      const document = workspace.documents.find((item) => item.id === args.input.documentId);
+      const siblings = workspace.documents
+        .filter((item) => item.parentId === document?.parentId)
+        .sort((left, right) => left.orderKey.localeCompare(right.orderKey));
+      const index = siblings.findIndex((item) => item.id === args.input.documentId);
       const target = args.input.direction === "up" ? index - 1 : index + 1;
-      if (index < 0 || target < 0 || target >= workspace.documents.length) throw { code: "NO_CHANGES", message: "No changes" };
-      workspace.documents.splice(target, 0, workspace.documents.splice(index, 1)[0]);
-      workspace.documents.forEach((document, position) => {
-        document.orderKey = `d-${String(position).padStart(8, "0")}-visual`;
-        document.revision += 1;
+      if (index < 0 || target < 0 || target >= siblings.length) throw { code: "NO_CHANGES", message: "No changes" };
+      siblings.splice(target, 0, siblings.splice(index, 1)[0]);
+      siblings.forEach((item, position) => {
+        item.orderKey = `d-${String(position).padStart(8, "0")}-visual`;
+        item.revision += 1;
       });
       return documentMutationResponse("reorder");
+    }
+    if (command === "change_document_depth") {
+      const document = workspace.documents.find((item) => item.id === args.input.documentId);
+      if (!document || document.revision !== args.input.expectedRevision) throw { code: "CONFLICT", message: "Document changed" };
+      if (args.input.direction === "indent") {
+        const siblings = workspace.documents
+          .filter((item) => item.parentId === document.parentId)
+          .sort((left, right) => left.orderKey.localeCompare(right.orderKey));
+        const index = siblings.findIndex((item) => item.id === document.id);
+        if (index <= 0) throw { code: "NO_CHANGES", message: "No changes" };
+        document.parentId = siblings[index - 1].id;
+      } else {
+        const parent = workspace.documents.find((item) => item.id === document.parentId);
+        if (!parent) throw { code: "NO_CHANGES", message: "No changes" };
+        document.parentId = parent.parentId;
+      }
+      const destination = workspace.documents
+        .filter((item) => item.parentId === document.parentId)
+        .sort((left, right) => left.orderKey.localeCompare(right.orderKey));
+      destination.forEach((item, position) => {
+        item.orderKey = `d-${String(position).padStart(8, "0")}-depth`;
+        item.revision += 1;
+      });
+      return documentMutationResponse("reparent");
     }
     if (command === "set_document_archived") {
       if (args.input.archived) {

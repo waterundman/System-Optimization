@@ -12,6 +12,7 @@ pub const REGISTERED_COMMANDS: &[&str] = &[
     "list_summary_invalidations",
     "rename_document",
     "reorder_document",
+    "change_document_depth",
     "set_document_archived",
     "export_markdown",
     "list_style_samples",

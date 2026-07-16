@@ -3,17 +3,17 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use optimizer_host::{
     ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, ArchivedDocument,
-    CancelModelRequestResponse, CheckpointSummary, CreateDocumentResponse, CreateDocumentSpec,
-    CreateStyleSampleSpec, DocumentMoveDirection, DocumentMutationResponse, ExportMarkdownResponse,
-    ModelAuthorizationScope, ModelExecutionHost, ModelExecutionRequest, ModelExecutionSummary,
-    ModelGatewayError, ModelProviderId, ModelRequestAuthorization, ModelStreamEvent,
-    NewProjectSpec, OllamaModelList, OpenedProject, OperationAuditResponse, OperationCommandError,
-    PersistOperationResponse, PersistReviewResponse, ProjectInfo, ProjectPackageError,
-    ProjectWorkspace, RecentProject, RecentProjectError, RecentProjectRegistry, RenameDocumentSpec,
-    ReorderDocumentSpec, RestoreCheckpointResponse, RestoreCheckpointSpec, SaveBlockResponse,
-    SaveBlockSpec, SecretReference, SecretStore, SecretStoreError, SecretValue,
-    SetDocumentArchivedSpec, SetStyleSampleStatusSpec, StyleSample, SummaryInvalidation,
-    VersionHistory, WorkspaceCommandError,
+    CancelModelRequestResponse, ChangeDocumentDepthSpec, CheckpointSummary, CreateDocumentResponse,
+    CreateDocumentSpec, CreateStyleSampleSpec, DocumentDepthDirection, DocumentMoveDirection,
+    DocumentMutationResponse, ExportMarkdownResponse, ModelAuthorizationScope, ModelExecutionHost,
+    ModelExecutionRequest, ModelExecutionSummary, ModelGatewayError, ModelProviderId,
+    ModelRequestAuthorization, ModelStreamEvent, NewProjectSpec, OllamaModelList, OpenedProject,
+    OperationAuditResponse, OperationCommandError, PersistOperationResponse, PersistReviewResponse,
+    ProjectInfo, ProjectPackageError, ProjectWorkspace, RecentProject, RecentProjectError,
+    RecentProjectRegistry, RenameDocumentSpec, ReorderDocumentSpec, RestoreCheckpointResponse,
+    RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec, SecretReference, SecretStore,
+    SecretStoreError, SecretValue, SetDocumentArchivedSpec, SetStyleSampleStatusSpec, StyleSample,
+    SummaryInvalidation, VersionHistory, WorkspaceCommandError,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Runtime, State, ipc::Channel};
@@ -170,6 +170,7 @@ impl DesktopState {
             .create_document(&CreateDocumentSpec {
                 title: input.title,
                 initial_text: input.initial_text,
+                parent_id: input.parent_document_id,
             })
             .map_err(CommandError::from)
     }
@@ -214,6 +215,24 @@ impl DesktopState {
                 direction: match input.direction {
                     DocumentMoveDirectionRequest::Up => DocumentMoveDirection::Up,
                     DocumentMoveDirectionRequest::Down => DocumentMoveDirection::Down,
+                },
+            })
+            .map_err(CommandError::from)
+    }
+
+    pub fn change_document_depth(
+        &self,
+        input: ChangeDocumentDepthRequest,
+    ) -> CommandResult<DocumentMutationResponse> {
+        input.validate()?;
+        let mut project = self.current_project()?;
+        project
+            .change_document_depth(&ChangeDocumentDepthSpec {
+                document_id: input.document_id,
+                expected_revision: input.expected_revision,
+                direction: match input.direction {
+                    DocumentDepthDirectionRequest::Indent => DocumentDepthDirection::Indent,
+                    DocumentDepthDirectionRequest::Outdent => DocumentDepthDirection::Outdent,
                 },
             })
             .map_err(CommandError::from)
@@ -701,6 +720,8 @@ pub struct CreateDocumentRequest {
     pub title: String,
     #[serde(default)]
     pub initial_text: String,
+    #[serde(default)]
+    pub parent_document_id: Option<String>,
 }
 
 impl CreateDocumentRequest {
@@ -743,6 +764,28 @@ pub struct ReorderDocumentRequest {
     pub document_id: String,
     pub expected_revision: i64,
     pub direction: DocumentMoveDirectionRequest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DocumentDepthDirectionRequest {
+    Indent,
+    Outdent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChangeDocumentDepthRequest {
+    pub schema_version: u32,
+    pub document_id: String,
+    pub expected_revision: i64,
+    pub direction: DocumentDepthDirectionRequest,
+}
+
+impl ChangeDocumentDepthRequest {
+    fn validate(&self) -> CommandResult<()> {
+        validate_request_schema(self.schema_version)
+    }
 }
 
 impl ReorderDocumentRequest {
@@ -1069,6 +1112,7 @@ pub fn attach<R: Runtime>(builder: tauri::Builder<R>, state: DesktopState) -> ta
             list_summary_invalidations,
             rename_document,
             reorder_document,
+            change_document_depth,
             set_document_archived,
             export_markdown,
             list_style_samples,
@@ -1182,6 +1226,14 @@ async fn reorder_document(
     state: State<'_, DesktopState>,
 ) -> CommandResult<DocumentMutationResponse> {
     spawn_host_task(state, move |state| state.reorder_document(input)).await
+}
+
+#[tauri::command]
+async fn change_document_depth(
+    input: ChangeDocumentDepthRequest,
+    state: State<'_, DesktopState>,
+) -> CommandResult<DocumentMutationResponse> {
+    spawn_host_task(state, move |state| state.change_document_depth(input)).await
 }
 
 #[tauri::command]
@@ -1641,6 +1693,7 @@ mod tests {
                 schema_version: 1,
                 title: "第二章".into(),
                 initial_text: "雾从海面升起。".into(),
+                parent_document_id: None,
             })
             .unwrap();
         assert_eq!(created.document.title, "第二章");
@@ -1679,6 +1732,7 @@ mod tests {
                 schema_version: 1,
                 title: "Chapter two".into(),
                 initial_text: "The rain reached the platform.".into(),
+                parent_document_id: None,
             })
             .unwrap();
         let renamed = state
@@ -1705,6 +1759,50 @@ mod tests {
             .unwrap();
         assert_eq!(reordered.workspace.documents[0].id, created.document.id);
         let reordered_document = &reordered.workspace.documents[0];
+        let moved_down = state
+            .reorder_document(ReorderDocumentRequest {
+                schema_version: 1,
+                document_id: reordered_document.id.clone(),
+                expected_revision: reordered_document.revision,
+                direction: DocumentMoveDirectionRequest::Down,
+            })
+            .unwrap();
+        let moved_document = moved_down
+            .workspace
+            .documents
+            .iter()
+            .find(|document| document.id == created.document.id)
+            .unwrap();
+        let indented = state
+            .change_document_depth(ChangeDocumentDepthRequest {
+                schema_version: 1,
+                document_id: moved_document.id.clone(),
+                expected_revision: moved_document.revision,
+                direction: DocumentDepthDirectionRequest::Indent,
+            })
+            .unwrap();
+        let indented_document = indented
+            .workspace
+            .documents
+            .iter()
+            .find(|document| document.id == created.document.id)
+            .unwrap();
+        assert!(indented_document.parent_id.is_some());
+        let outdented = state
+            .change_document_depth(ChangeDocumentDepthRequest {
+                schema_version: 1,
+                document_id: indented_document.id.clone(),
+                expected_revision: indented_document.revision,
+                direction: DocumentDepthDirectionRequest::Outdent,
+            })
+            .unwrap();
+        let reordered_document = outdented
+            .workspace
+            .documents
+            .iter()
+            .find(|document| document.id == created.document.id)
+            .unwrap();
+        assert_eq!(reordered_document.parent_id, None);
         let archived = state
             .set_document_archived(SetDocumentArchivedRequest {
                 schema_version: 1,

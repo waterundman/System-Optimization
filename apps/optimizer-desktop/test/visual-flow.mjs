@@ -56,7 +56,7 @@ await page.screenshot({ path: resolve(screenshotDirectory, "style-library.png"),
 await page.getByRole("button", { name: "收起风格" }).click();
 
 page.once("dialog", (dialog) => dialog.accept("第二章"));
-await page.getByRole("button", { name: "＋", exact: true }).click();
+await page.getByRole("button", { name: "新建顶层章节" }).click();
 await page.getByRole("heading", { name: "第二章" }).waitFor();
 await page.getByText(/已创建章节/).waitFor();
 await page.screenshot({ path: resolve(screenshotDirectory, "document-created.png"), fullPage: true });
@@ -74,6 +74,17 @@ await page.getByRole("button", { name: "归档 第二章：雨夜" }).click();
 await page.getByText("已归档 · 1").waitFor();
 await page.getByRole("button", { name: "恢复 第二章：雨夜" }).click();
 await page.getByRole("heading", { name: "第二章：雨夜" }).waitFor();
+await page.getByRole("button", { name: "章 第二章：雨夜", exact: true }).locator("..").hover();
+await page.getByRole("button", { name: "下移 第二章：雨夜" }).click();
+await page.getByText(/已下移“第二章：雨夜”/).waitFor();
+await page.getByRole("button", { name: "缩进 第二章：雨夜" }).click();
+await page.getByText(/缩进为上一章节的子章节/).waitFor();
+assert.equal(
+  await page.getByRole("button", { name: "章 第二章：雨夜", exact: true }).locator(".document-indent").textContent(),
+  "· ",
+);
+await page.getByRole("button", { name: "移出 第二章：雨夜" }).click();
+await page.getByText(/移出到上一层/).waitFor();
 await page.screenshot({ path: resolve(screenshotDirectory, "document-lifecycle.png"), fullPage: true });
 
 const fileChooserPromise = page.waitForEvent("filechooser");

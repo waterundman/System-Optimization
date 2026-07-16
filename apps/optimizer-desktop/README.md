@@ -49,7 +49,7 @@ Ollama 是无凭据的显式本地 Provider：宿主只连接 `127.0.0.1:11434/v
 
 风格库使用独立 `allow-style-library` permission。选中的正文可固定为项目样本；启用样本作为 L4 Context 候选，归档样本和远程调用中的 `never_send` 样本由 Context Compiler 在模型调用前排除。实际入选内容始终出现在发送确认弹窗中。
 
-文档侧栏可创建版本化章节。原生文件选择器可把最大 2 MiB 的 Markdown/Text 文件导入为一个章节；宿主不接受任意读取路径。导出由独立 `allow-project-export` permission 写入项目包 `exports/`，采用临时文件加原子 rename。检查点恢复支持在章节创建前后软归档与复活结构。
+文档侧栏按 `parentId + orderKey` 渲染真正的父子树，可创建顶层或子章节、在同一父节点内移动、缩进到上一兄弟节点、移出到上一层，并重命名。所有命令绑定 Document revision 与项目 HEAD；归档父节点会原子归档整个活动子树，恢复子节点前必须先恢复父节点。原生文件选择器可把最大 2 MiB 的 Markdown/Text 文件导入为顶层章节；宿主不接受任意读取路径。导出由独立 `allow-project-export` permission 写入项目包 `exports/`，采用临时文件加原子 rename。检查点恢复可恢复父子关系、同级顺序与归档状态。
 
 摘要状态读取使用独立的 `allow-summary-status-read` permission。正文自动保存、AI 接受、章节生命周期与检查点恢复会在对应 Store 事务中合并更新作用域失效项；页面只在权威写入完成后刷新计数。后台摘要生成与队列消费保留在 Rust 信任边界，不开放给 WebView。
 

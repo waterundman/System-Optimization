@@ -31,7 +31,7 @@ Rust 宿主安全边界与跨语言命令适配层。
 
 ## 工作区命令
 
-`OpenedProject` 现在提供结构化工作区读取、单 Block 乐观保存、检查点创建、版本历史和检查点恢复。Host 生成持久化 ID/时间戳与内容/根哈希；Store 同时校验 Block revision/hash 和项目 revision/HEAD，并在一个事务中更新正文、编辑日志、Document revision、Commit DAG 与分支/项目 HEAD。恢复始终形成新 Commit。
+`OpenedProject` 现在提供树形结构化工作区读取、顶层/子章节创建、同级移动、缩进/移出、子树归档、单 Block 乐观保存、检查点创建、版本历史和检查点恢复。Host 生成持久化 ID/时间戳与内容/根哈希；Store 同时校验 Block revision/hash、Document revision 和项目 revision/HEAD，并在一个事务中更新正文、结构、编辑日志、Commit DAG 与分支/项目 HEAD。恢复始终形成新 Commit。
 
 Tauri Adapter 已在 `apps/optimizer-desktop` 注册最小权限 commands/capabilities。Windows Provider 网络执行已经完全位于宿主；macOS Keychain/Linux Secret Service 与对应原生 HTTP 后端、宿主 Operation capability 和 WASM 插件资源限制仍属于后续能力。
 
