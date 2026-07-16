@@ -158,6 +158,9 @@ test("runs Context Compiler to host stream to persisted patch proposal without p
       assert.equal(args.input.binding.targetBlockId, block.id);
       assert.equal(args.input.binding.targetBlockRevision, block.revision);
       assert.equal(args.input.binding.targetBlockHash, block.contentHash);
+      assert.equal(args.input.binding.targetFrom, 0);
+      assert.equal(args.input.binding.targetTo, 0);
+      assert.deepEqual(args.input.contextPacket, confirmedContext);
       authorizedRequest = args.input.request;
       return {
         schemaVersion: 1,

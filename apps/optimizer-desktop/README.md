@@ -10,7 +10,7 @@ WebView 只允许：
 - 写入 Patch review 事件；
 - 读取 Operation 审计；
 - 写入、检查和删除 provider secret。
-- 通过一次性、短期、绑定当前项目 HEAD/Context Packet/目标 Block 的 Rust capability，执行 DeepSeek、Qwen、Kimi、MiniMax 固定 HTTPS 端点，以及 Ollama 固定回环端点的流式请求与取消。
+- 通过一次性、短期、绑定当前项目 HEAD/完整 Context Packet/受控 Prompt/目标 Block 的 Rust capability，执行 DeepSeek、Qwen、Kimi、MiniMax 固定 HTTPS 端点，以及 Ollama 固定回环端点的流式请求与取消。
 - 复用 Kernel/Operation Runner/Patch Engine 完成 AI 操作、Findings 与逐 hunk 审查。
 - 原子应用已审查 Proposal，同时写入 `ai_accept` Commit 与完整 Operation/Review 审计。
 - 读取文档树并用版本基线保存 Block；
@@ -18,7 +18,7 @@ WebView 只允许：
 
 WebView 不存在“读取 secret 明文”命令。云端模型请求由 Rust 信任边界解析 `credentialRef` 并执行，API Key 不会返回 JavaScript。
 
-WebView 也不存在原始 `execute_model_stream` 命令。用户确认 Context 后，`authorize_model_request` 先由 Host 校验项目、HEAD、目标 Block、Provider locality 和完整模型请求，再返回最多 120 秒有效且只可消费一次的 capability；`execute_authorized_model_stream` 只接收 capability ID。项目变化、取消或关闭会使授权失效。
+WebView 也不存在原始 `execute_model_stream` 命令。用户确认 Context 后，`authorize_model_request` 会重新读取当前 HEAD 的全部候选，复算 Packet stable hash、token、评分、预算和 `never_send` 等策略，并验证实际 system/user Prompt 逐项等于确认 Packet；通过后才返回最多 120 秒有效且只可消费一次的 capability。该 capability 在 Host 内持有完整不可变 Packet，但调试输出只暴露 ID/hash/字节数；`execute_authorized_model_stream` 只接收 capability ID。项目变化、取消或关闭会使授权失效。
 
 Ollama 是无凭据的显式本地 Provider：宿主只连接 `127.0.0.1:11434/v1/chat/completions` 并禁用系统代理，不接受页面提交的地址。模型需由用户预先在 Ollama 中拉取；运行失败不会自动把本地 Context Packet 发往云端。
 
@@ -58,7 +58,7 @@ Ollama 是无凭据的显式本地 Provider：宿主只连接 `127.0.0.1:11434/v
 
 摘要状态读取使用独立的 `allow-summary-status-read` permission。正文自动保存、AI 接受、章节生命周期与检查点恢复会在对应 Store 事务中合并更新作用域失效项；页面只在权威写入完成后刷新计数。`allow-summary-worker` 仅允许页面触发 Host 内置的零外发 worker，以及按当前目标领取已就绪摘要；正文读取、作用域构造、source hash、写回和队列消费仍保留在 Rust 信任边界。返回的摘要内容在加入 Context Compiler 前由页面复算 SHA-256，并完整展示在发送确认弹窗中。
 
-统一 Context 读取使用独立的 `allow-operation-context` permission。所有候选均带当前 source Commit、稳定 source ref、policy 和评分信号；页面校验集合中恰有一个匹配当前选区的 L0、没有重复 ID/source ref，且非 L0 不得被标记为 mandatory。Kernel 继续负责预算、去重、远程 `never_send` 排除和最终 Packet hash。
+统一 Context 读取使用独立的 `allow-operation-context` permission。所有候选均带当前 source Commit、稳定 source ref、policy 和评分信号；页面校验集合中恰有一个匹配当前选区的 L0、没有重复 ID/source ref，且非 L0 不得被标记为 mandatory。Kernel 负责跨宿主的预算、去重、远程 `never_send` 排除和最终 Packet hash；模型授权入口再由 Host 独立复算同一套确定性结果，并要求 Packet 对每个 Host 候选恰好给出入选或受控排除结果。
 
 ## 前端与运行
 

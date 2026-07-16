@@ -2,6 +2,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+mod confirmed_context;
 mod model_gateway;
 mod model_transport;
 mod operation_commands;
@@ -12,6 +13,7 @@ mod secrets;
 mod summary_worker;
 mod workspace_commands;
 
+pub use confirmed_context::ConfirmedContextPacket;
 pub use model_gateway::{
     CancelModelRequestResponse, ModelAuthorizationScope, ModelExecutionHost, ModelExecutionRequest,
     ModelExecutionSummary, ModelGatewayError, ModelProviderConfiguration, ModelProviderId,

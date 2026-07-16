@@ -112,19 +112,24 @@ export async function runDesktopOperation(input) {
     invokeHost: input.invokeHost,
     createChannel: input.createChannel,
     nextId: () => ids.next("request"),
-    authorizationBinding() {
+    authorizationContext() {
       if (!confirmedPacket) return null;
       return {
-        schemaVersion: 1,
-        projectId: confirmedPacket.projectId,
-        baseCommitId: confirmedPacket.baseCommitId,
-        operationIntentId: confirmedPacket.operationIntentId,
-        contextPacketId: confirmedPacket.id,
-        contextPacketHash: confirmedPacket.packetHash,
-        providerLocality: confirmedPacket.providerLocality,
-        targetBlockId: intent.target.blockId,
-        targetBlockRevision: intent.target.baseRevision,
-        targetBlockHash: intent.target.baseHash,
+        binding: {
+          schemaVersion: 1,
+          projectId: confirmedPacket.projectId,
+          baseCommitId: confirmedPacket.baseCommitId,
+          operationIntentId: confirmedPacket.operationIntentId,
+          contextPacketId: confirmedPacket.id,
+          contextPacketHash: confirmedPacket.packetHash,
+          providerLocality: confirmedPacket.providerLocality,
+          targetBlockId: intent.target.blockId,
+          targetBlockRevision: intent.target.baseRevision,
+          targetBlockHash: intent.target.baseHash,
+          targetFrom: intent.target.from.offset,
+          targetTo: intent.target.to.offset,
+        },
+        contextPacket: confirmedPacket,
       };
     },
   });
@@ -291,7 +296,7 @@ class HostModelProvider {
     this.invokeHost = input.invokeHost;
     this.createChannel = input.createChannel;
     this.nextId = input.nextId;
-    this.authorizationBinding = input.authorizationBinding;
+    this.authorizationContext = input.authorizationContext;
   }
 
   async *stream(request, options = {}) {
@@ -316,12 +321,14 @@ class HostModelProvider {
     options.signal?.addEventListener("abort", onAbort, { once: true });
     let authorization;
     try {
-      const binding = this.authorizationBinding?.();
-      if (!binding) throw new Error("Confirmed Context Packet is required before model execution");
+      const authorizationContext = this.authorizationContext?.();
+      if (!authorizationContext) {
+        throw new Error("Confirmed Context Packet is required before model execution");
+      }
       authorization = await this.invokeHost("authorize_model_request", {
         input: {
           schemaVersion: 1,
-          binding,
+          ...authorizationContext,
           request: {
             schemaVersion: 1,
             requestId,

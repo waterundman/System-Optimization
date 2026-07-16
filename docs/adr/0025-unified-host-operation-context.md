@@ -22,4 +22,4 @@
 
 - 一次 AI 操作的全部 Context 来源来自同一个 Host 权威基线；页面缓存只用于再次核对 L0，不再决定来源资格。
 - Kernel 仍负责确定性预算、优先级、Provider locality 策略、去重和 Packet hash，保持跨宿主复用。
-- 当前模型授权仍只绑定页面编译后的 Packet ID/hash，并未由 Host 重新编译或持有完整 Packet。把已确认 Packet 作为短期 Host capability 的不可变载荷，是 FR-05 剩余工作。
+- ADR 0026 已完成后续闭环：模型授权会重新收集本 ADR 定义的候选，复算最终 Packet 与实际 Prompt，并把完整确认载荷纳入短期单次 Host capability。

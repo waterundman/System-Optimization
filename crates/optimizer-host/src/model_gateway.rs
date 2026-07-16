@@ -12,6 +12,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::{Rfc2822, Rfc3339};
 use uuid::Uuid;
 
+use crate::confirmed_context::ConfirmedContextPacket;
 use crate::{SecretReference, SecretStore, SecretStoreError, SecretValue};
 
 const REQUEST_SCHEMA_VERSION: u32 = 1;
@@ -296,8 +297,7 @@ pub struct ModelAuthorizationScope {
     pub project_id: String,
     pub base_commit_id: String,
     pub operation_intent_id: String,
-    pub context_packet_id: String,
-    pub context_packet_hash: String,
+    pub confirmed_context: ConfirmedContextPacket,
     pub target_block_id: String,
     pub target_block_revision: i64,
     pub target_block_hash: String,
@@ -2527,8 +2527,11 @@ mod tests {
             project_id: "project-1".into(),
             base_commit_id: "commit-1".into(),
             operation_intent_id: "intent-1".into(),
-            context_packet_id: "packet-1".into(),
-            context_packet_hash: format!("sha256:{}", "1".repeat(64)),
+            confirmed_context: ConfirmedContextPacket {
+                id: "packet-1".into(),
+                hash: format!("sha256:{}", "1".repeat(64)),
+                payload_json: r#"{"content":"confirmed-context-secret-marker"}"#.into(),
+            },
             target_block_id: "block-1".into(),
             target_block_revision: 0,
             target_block_hash: format!("sha256:{}", "2".repeat(64)),
@@ -2670,6 +2673,9 @@ mod tests {
         let transport = Arc::new(ScriptedTransport::sse(Vec::new()));
         let host = host_with_secret(transport);
         let request = model_request(ModelProviderId::Deepseek);
+        let scope_debug = format!("{:?}", authorization_scope());
+        assert!(!scope_debug.contains("confirmed-context-secret-marker"));
+        assert!(scope_debug.contains("payload_bytes"));
         let authorization = host
             .authorize(request.clone(), authorization_scope())
             .unwrap();

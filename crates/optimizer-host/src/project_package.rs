@@ -10,6 +10,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
+use crate::confirmed_context::{ConfirmContextPacketInput, confirm_context_packet};
 use crate::operation_context::collect_operation_context;
 use crate::summary_worker::{refresh_summaries, summary_context};
 use crate::workspace_commands::{
@@ -22,15 +23,15 @@ use crate::workspace_commands::{
 };
 use crate::{
     ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, ArchivedDocument,
-    ChangeDocumentDepthSpec, CheckpointSummary, CreateDocumentResponse, CreateDocumentSpec,
-    CreateKnowledgeItemSpec, CreateStyleSampleSpec, DocumentMutationResponse, HostError,
-    KnowledgeContextCandidate, KnowledgeContextSpec, KnowledgeItem, OperationCommandHost,
-    OperationContextCandidate, OperationContextSpec, ProjectRoot, ProjectWorkspace,
-    RefreshSummariesSpec, RenameDocumentSpec, ReorderDocumentSpec, RestoreCheckpointResponse,
-    RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec, SetDocumentArchivedSpec,
-    SetKnowledgeItemStatusSpec, SetStyleSampleStatusSpec, StyleSample, SummaryContextCandidate,
-    SummaryContextSpec, SummaryInvalidation, SummaryRefreshReport, VersionHistory,
-    WorkspaceCommandError,
+    ChangeDocumentDepthSpec, CheckpointSummary, ConfirmedContextPacket, CreateDocumentResponse,
+    CreateDocumentSpec, CreateKnowledgeItemSpec, CreateStyleSampleSpec, DocumentMutationResponse,
+    HostError, KnowledgeContextCandidate, KnowledgeContextSpec, KnowledgeItem,
+    ModelExecutionRequest, OperationCommandHost, OperationContextCandidate, OperationContextSpec,
+    ProjectRoot, ProjectWorkspace, RefreshSummariesSpec, RenameDocumentSpec, ReorderDocumentSpec,
+    RestoreCheckpointResponse, RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec,
+    SetDocumentArchivedSpec, SetKnowledgeItemStatusSpec, SetStyleSampleStatusSpec, StyleSample,
+    SummaryContextCandidate, SummaryContextSpec, SummaryInvalidation, SummaryRefreshReport,
+    VersionHistory, WorkspaceCommandError,
 };
 
 const PACKAGE_SCHEMA_VERSION: u32 = 1;
@@ -415,6 +416,27 @@ impl OpenedProject {
         spec: &OperationContextSpec,
     ) -> Result<Vec<OperationContextCandidate>, WorkspaceCommandError> {
         collect_operation_context(self.operations.store(), &self.project_id, spec)
+    }
+
+    pub fn confirm_context_packet(
+        &self,
+        operation_context: &OperationContextSpec,
+        operation_intent_id: &str,
+        provider_locality: &str,
+        payload: &serde_json::Value,
+        request: &ModelExecutionRequest,
+    ) -> Result<ConfirmedContextPacket, WorkspaceCommandError> {
+        confirm_context_packet(
+            self.operations.store(),
+            &self.project_id,
+            &ConfirmContextPacketInput {
+                operation_context,
+                operation_intent_id,
+                provider_locality,
+                payload,
+                request,
+            },
+        )
     }
 
     pub fn save_block(
