@@ -19,6 +19,8 @@
     "allow-version-write",
     "allow-operation-write",
     "allow-operation-audit-read",
+    "allow-review-candidate-read",
+    "allow-review-candidate-branch",
     "allow-provider-secret-manage",
     "allow-model-execution"
   ]

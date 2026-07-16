@@ -15,23 +15,25 @@ use crate::operation_context::collect_operation_context;
 use crate::summary_worker::{refresh_summaries, summary_context};
 use crate::workspace_commands::{
     apply_reviewed_proposal, block_content_hash, change_document_depth, create_checkpoint,
-    create_document, create_knowledge_item, create_style_sample, knowledge_context,
-    list_archived_documents, list_knowledge_items, list_style_samples, list_summary_invalidations,
-    load_project_workspace, load_version_history, project_root_hash, rename_document,
-    reorder_document, restore_checkpoint, save_block, set_document_archived,
-    set_knowledge_item_status, set_style_sample_status,
+    create_document, create_knowledge_item, create_review_candidate_branch, create_style_sample,
+    knowledge_context, list_archived_documents, list_knowledge_items, list_review_candidates,
+    list_style_samples, list_summary_invalidations, load_project_workspace, load_review_candidate,
+    load_version_history, project_root_hash, rename_document, reorder_document, restore_checkpoint,
+    save_block, set_document_archived, set_knowledge_item_status, set_style_sample_status,
 };
 use crate::{
     ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, ArchivedDocument,
     ChangeDocumentDepthSpec, CheckpointSummary, ConfirmedContextPacket, CreateDocumentResponse,
-    CreateDocumentSpec, CreateKnowledgeItemSpec, CreateStyleSampleSpec, DocumentMutationResponse,
-    HostError, KnowledgeContextCandidate, KnowledgeContextSpec, KnowledgeItem,
-    ModelExecutionRequest, OperationCommandHost, OperationContextCandidate, OperationContextSpec,
-    ProjectRoot, ProjectWorkspace, RefreshSummariesSpec, RenameDocumentSpec, ReorderDocumentSpec,
-    RestoreCheckpointResponse, RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec,
-    SetDocumentArchivedSpec, SetKnowledgeItemStatusSpec, SetStyleSampleStatusSpec, StyleSample,
-    SummaryContextCandidate, SummaryContextSpec, SummaryInvalidation, SummaryRefreshReport,
-    VersionHistory, WorkspaceCommandError,
+    CreateDocumentSpec, CreateKnowledgeItemSpec, CreateReviewCandidateBranchResponse,
+    CreateReviewCandidateBranchSpec, CreateStyleSampleSpec, DocumentMutationResponse, HostError,
+    KnowledgeContextCandidate, KnowledgeContextSpec, KnowledgeItem, ModelExecutionRequest,
+    OperationCommandHost, OperationContextCandidate, OperationContextSpec, ProjectRoot,
+    ProjectWorkspace, RefreshSummariesSpec, RenameDocumentSpec, ReorderDocumentSpec,
+    RestoreCheckpointResponse, RestoreCheckpointSpec, ReviewCandidateDetail,
+    ReviewCandidateSummary, SaveBlockResponse, SaveBlockSpec, SetDocumentArchivedSpec,
+    SetKnowledgeItemStatusSpec, SetStyleSampleStatusSpec, StyleSample, SummaryContextCandidate,
+    SummaryContextSpec, SummaryInvalidation, SummaryRefreshReport, VersionHistory,
+    WorkspaceCommandError,
 };
 
 const PACKAGE_SCHEMA_VERSION: u32 = 1;
@@ -461,6 +463,24 @@ impl OpenedProject {
             &self.main_branch_id,
             spec,
         )
+    }
+
+    pub fn review_candidates(&self) -> Result<Vec<ReviewCandidateSummary>, WorkspaceCommandError> {
+        list_review_candidates(self.operations.store(), &self.project_id)
+    }
+
+    pub fn review_candidate(
+        &self,
+        proposal_id: &str,
+    ) -> Result<ReviewCandidateDetail, WorkspaceCommandError> {
+        load_review_candidate(self.operations.store(), &self.project_id, proposal_id)
+    }
+
+    pub fn create_review_candidate_branch(
+        &mut self,
+        spec: &CreateReviewCandidateBranchSpec,
+    ) -> Result<CreateReviewCandidateBranchResponse, WorkspaceCommandError> {
+        create_review_candidate_branch(self.operations.store_mut(), &self.project_id, spec)
     }
 
     pub fn create_checkpoint(&mut self) -> Result<CheckpointSummary, WorkspaceCommandError> {
@@ -1520,6 +1540,43 @@ mod tests {
                 .to_string(),
             )
             .unwrap();
+
+        let candidates = project.review_candidates().unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].proposal_id, proposal_id);
+        assert_eq!(candidates[0].status, "ready");
+        let detail = project.review_candidate(proposal_id).unwrap();
+        assert_eq!(detail.session.revision, 1);
+        assert_eq!(
+            detail.session.decisions.get("proposal-apply-test:h1"),
+            Some(&"accepted".into())
+        );
+        let branch = project
+            .create_review_candidate_branch(&CreateReviewCandidateBranchSpec {
+                proposal_id: proposal_id.into(),
+                expected_review_revision: 1,
+                branch_name: "AI 候选：车站续写".into(),
+            })
+            .unwrap();
+        assert_eq!(branch.main_head_commit_id, workspace.head_commit_id);
+        assert_eq!(project.workspace().unwrap(), workspace);
+        assert!(
+            project
+                .version_history()
+                .unwrap()
+                .checkpoints
+                .iter()
+                .all(|checkpoint| checkpoint.id != branch.branch.snapshot_id)
+        );
+        assert_eq!(
+            project
+                .review_candidates()
+                .unwrap()
+                .first()
+                .and_then(|candidate| candidate.candidate_branch.as_ref())
+                .map(|candidate| candidate.branch_name.as_str()),
+            Some("AI 候选：车站续写")
+        );
 
         let applied = project
             .apply_reviewed_proposal(&ApplyReviewedProposalSpec {

@@ -4,10 +4,12 @@ use std::fmt::Write as _;
 
 use optimizer_store::{
     AppendReviewEvent, ApplyBlockEdit, ApplyDocumentBatch, BlockRecord, CommitRecord,
-    CreateDocumentWithBlock, CreateKnowledgeItem, CreateStyleSample, DocumentMutation,
-    DocumentRecord, EditReceipt, KnowledgeItemRecord, OperationArtifactKind, OptimizerStore,
-    RestoreSnapshot, ReviewDecision, ReviewEventKind, ReviewSessionStatus, SetKnowledgeItemStatus,
-    SetStyleSampleStatus, SnapshotRecord, StoreError, StyleSampleRecord,
+    CreateDocumentWithBlock, CreateKnowledgeItem, CreateReviewCandidateBranch, CreateStyleSample,
+    DocumentMutation, DocumentRecord, EditReceipt, KnowledgeItemRecord, OperationArtifactKind,
+    OperationRunRecord, OptimizerStore, RestoreSnapshot, ReviewCandidateBranchRecord,
+    ReviewCandidateSummaryRecord, ReviewDecision, ReviewEventKind, ReviewEventRecord,
+    ReviewSessionRecord, ReviewSessionStatus, SetKnowledgeItemStatus, SetStyleSampleStatus,
+    SnapshotRecord, StoreError, StyleSampleRecord,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -281,6 +283,72 @@ pub struct ApplyReviewedProposalResponse {
     pub accepted_hunks: usize,
     pub rejected_hunks: usize,
     pub save: SaveBlockResponse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewCandidateBranch {
+    pub proposal_id: String,
+    pub branch_id: String,
+    pub branch_name: String,
+    pub commit_id: String,
+    pub snapshot_id: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewCandidateSummary {
+    pub schema_version: u32,
+    pub proposal_id: String,
+    pub run_id: String,
+    pub operation_intent_id: String,
+    pub provider_id: String,
+    pub model: String,
+    pub base_commit_id: String,
+    pub target_document_id: String,
+    pub target_block_id: String,
+    pub hunk_count: usize,
+    pub summary: Option<String>,
+    pub revision: i64,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub candidate_branch: Option<ReviewCandidateBranch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewCandidateSession {
+    pub proposal_id: String,
+    pub proposal_hash: String,
+    pub revision: i64,
+    pub status: String,
+    pub decisions: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewCandidateDetail {
+    pub schema_version: u32,
+    pub summary: ReviewCandidateSummary,
+    pub proposal: Value,
+    pub session: ReviewCandidateSession,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateReviewCandidateBranchSpec {
+    pub proposal_id: String,
+    pub expected_review_revision: i64,
+    pub branch_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateReviewCandidateBranchResponse {
+    pub schema_version: u32,
+    pub branch: ReviewCandidateBranch,
+    pub main_head_commit_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1248,6 +1316,54 @@ pub(crate) fn save_block(
     save_response(store, project_id, receipt)
 }
 
+pub(crate) fn list_review_candidates(
+    store: &OptimizerStore,
+    project_id: &str,
+) -> Result<Vec<ReviewCandidateSummary>, WorkspaceCommandError> {
+    store
+        .list_review_candidates(project_id, 100)?
+        .into_iter()
+        .map(review_candidate_summary)
+        .collect()
+}
+
+pub(crate) fn load_review_candidate(
+    store: &OptimizerStore,
+    project_id: &str,
+    proposal_id: &str,
+) -> Result<ReviewCandidateDetail, WorkspaceCommandError> {
+    if proposal_id.trim().is_empty() || proposal_id.len() > 200 {
+        return Err(WorkspaceCommandError::Validation(
+            "Proposal id is invalid".into(),
+        ));
+    }
+    let loaded = load_stored_review_candidate(store, project_id, proposal_id)?;
+    let decisions = loaded
+        .decisions
+        .into_iter()
+        .map(|(id, decision)| {
+            (
+                id,
+                decision
+                    .map(|value| value.as_str().to_owned())
+                    .unwrap_or_else(|| "pending".into()),
+            )
+        })
+        .collect();
+    Ok(ReviewCandidateDetail {
+        schema_version: WORKSPACE_SCHEMA_VERSION,
+        summary: review_candidate_summary(loaded.summary)?,
+        proposal: loaded.payload,
+        session: ReviewCandidateSession {
+            proposal_id: loaded.session.proposal_id,
+            proposal_hash: loaded.proposal.proposal_hash,
+            revision: loaded.session.revision,
+            status: loaded.session.status.as_str().into(),
+            decisions,
+        },
+    })
+}
+
 pub(crate) fn apply_reviewed_proposal(
     store: &mut OptimizerStore,
     project_id: &str,
@@ -1336,30 +1452,10 @@ pub(crate) fn apply_reviewed_proposal(
 
     let events = store.list_review_events(&spec.proposal_id)?;
     validate_proposal_hunks(&current.plain_text, &proposal.target, &proposal.hunks)?;
-    let mut decisions = BTreeMap::new();
-    for event in events {
-        if event.kind == ReviewEventKind::Decision {
-            let hunk_id = event.hunk_id.ok_or_else(|| {
-                WorkspaceCommandError::Validation("Decision event has no hunk id".into())
-            })?;
-            let decision = event.decision.ok_or_else(|| {
-                WorkspaceCommandError::Validation("Decision event has no decision".into())
-            })?;
-            decisions.insert(hunk_id, decision);
-        }
-    }
-    let hunk_ids = proposal
-        .hunks
-        .iter()
-        .map(|hunk| hunk.id.as_str())
-        .collect::<BTreeSet<_>>();
-    if decisions.len() != proposal.hunks.len()
-        || decisions.keys().any(|id| !hunk_ids.contains(id.as_str()))
-    {
-        return Err(WorkspaceCommandError::Validation(
-            "Review decisions do not cover exactly every proposal hunk".into(),
-        ));
-    }
+    let decisions = complete_review_decisions(
+        &proposal.hunks,
+        replay_review_decisions(&proposal.hunks, &events)?,
+    )?;
     validate_atomic_decisions(&proposal.hunks, &decisions)?;
 
     let mut accepted = Vec::new();
@@ -1474,6 +1570,153 @@ pub(crate) fn apply_reviewed_proposal(
     })
 }
 
+pub(crate) fn create_review_candidate_branch(
+    store: &mut OptimizerStore,
+    project_id: &str,
+    spec: &CreateReviewCandidateBranchSpec,
+) -> Result<CreateReviewCandidateBranchResponse, WorkspaceCommandError> {
+    let branch_name = spec.branch_name.trim();
+    if spec.proposal_id.trim().is_empty()
+        || spec.proposal_id.len() > 200
+        || spec.expected_review_revision < 0
+        || branch_name.is_empty()
+        || branch_name.chars().count() > 120
+    {
+        return Err(WorkspaceCommandError::Validation(
+            "Candidate proposal, review revision and branch name are invalid".into(),
+        ));
+    }
+    let loaded = load_stored_review_candidate(store, project_id, &spec.proposal_id)?;
+    if loaded.session.revision != spec.expected_review_revision
+        || loaded.session.status != ReviewSessionStatus::Ready
+    {
+        return Err(WorkspaceCommandError::Store(StoreError::StateConflict {
+            entity: "patch_review",
+            id: spec.proposal_id.clone(),
+            expected_revision: spec.expected_review_revision,
+            actual_revision: loaded.session.revision,
+            expected_state: ReviewSessionStatus::Ready.as_str().into(),
+            actual_state: loaded.session.status.as_str().into(),
+        }));
+    }
+    if loaded.summary.candidate_branch.is_some() {
+        return Err(WorkspaceCommandError::Validation(
+            "Candidate already has a branch".into(),
+        ));
+    }
+    let project = store.get_project(project_id)?;
+    if project.head_commit_id != loaded.run.base_commit_id {
+        return Err(WorkspaceCommandError::Store(StoreError::StateConflict {
+            entity: "candidate_branch_base",
+            id: spec.proposal_id.clone(),
+            expected_revision: spec.expected_review_revision,
+            actual_revision: loaded.session.revision,
+            expected_state: loaded.run.base_commit_id,
+            actual_state: project.head_commit_id,
+        }));
+    }
+    let current = store.get_project_block(project_id, &loaded.proposal.target.block_id)?;
+    if current.document_id != loaded.proposal.target.document_id
+        || current.revision != loaded.proposal.target.base_revision
+        || current.content_hash != loaded.proposal.target.base_hash
+        || current.locked
+    {
+        return Err(WorkspaceCommandError::Store(StoreError::Conflict {
+            entity: "candidate_branch_target",
+            id: current.id,
+            expected_revision: loaded.proposal.target.base_revision,
+            actual_revision: current.revision,
+            expected_hash: loaded.proposal.target.base_hash,
+            actual_hash: current.content_hash,
+        }));
+    }
+    validate_proposal_hunks(
+        &current.plain_text,
+        &loaded.proposal.target,
+        &loaded.proposal.hunks,
+    )?;
+    let decisions = complete_review_decisions(&loaded.proposal.hunks, loaded.decisions)?;
+    validate_atomic_decisions(&loaded.proposal.hunks, &decisions)?;
+    let accepted = loaded
+        .proposal
+        .hunks
+        .iter()
+        .filter(|hunk| decisions.get(&hunk.id) == Some(&ReviewDecision::Accepted))
+        .collect::<Vec<_>>();
+    if accepted.is_empty() {
+        return Err(WorkspaceCommandError::Validation(
+            "A candidate branch requires at least one accepted hunk".into(),
+        ));
+    }
+    let next_plain_text = apply_proposal_hunks(&current.plain_text, &accepted)?;
+    if next_plain_text.len() > MAX_PLAIN_TEXT_BYTES {
+        return Err(WorkspaceCommandError::Validation(format!(
+            "Block plain text exceeds {MAX_PLAIN_TEXT_BYTES} bytes"
+        )));
+    }
+    let mut next_content: Value =
+        serde_json::from_str(&current.content_json).map_err(WorkspaceCommandError::Json)?;
+    let content = next_content.as_object_mut().ok_or_else(|| {
+        WorkspaceCommandError::Validation("Stored Block content must be an object".into())
+    })?;
+    content.remove("text");
+    content.insert(
+        "content".into(),
+        if next_plain_text.is_empty() {
+            Value::Array(Vec::new())
+        } else {
+            json!([{ "type": "text", "text": next_plain_text }])
+        },
+    );
+    let content_json = serde_json::to_string(&next_content).map_err(WorkspaceCommandError::Json)?;
+    let content_hash = block_content_hash(
+        &current.kind,
+        &next_content,
+        &next_plain_text,
+        current.locked,
+    )?;
+    let documents = store.list_documents(project_id)?;
+    let blocks = store.list_blocks(project_id)?;
+    let root_hash = project_root_hash(
+        documents.iter(),
+        blocks.iter().map(|block| {
+            (
+                block.id.as_str(),
+                if block.id == current.id {
+                    content_hash.as_str()
+                } else {
+                    block.content_hash.as_str()
+                },
+            )
+        }),
+    );
+    let occurred_at = now()?;
+    let branch = store.create_review_candidate_branch(&CreateReviewCandidateBranch {
+        proposal_id: spec.proposal_id.clone(),
+        expected_review_revision: spec.expected_review_revision,
+        project_id: project_id.into(),
+        expected_project_head_commit_id: project.head_commit_id.clone(),
+        branch_id: generated_id("branch"),
+        branch_name: branch_name.into(),
+        commit_id: generated_id("commit"),
+        snapshot_id: generated_id("snapshot"),
+        target_document_id: current.document_id,
+        target_block_id: current.id,
+        expected_block_revision: current.revision,
+        expected_block_hash: current.content_hash,
+        new_content_json: content_json,
+        new_plain_text: next_plain_text,
+        new_content_hash: content_hash,
+        new_root_hash: root_hash,
+        occurred_at,
+    })?;
+    Ok(CreateReviewCandidateBranchResponse {
+        schema_version: WORKSPACE_SCHEMA_VERSION,
+        branch: review_candidate_branch(branch),
+        main_head_commit_id: project.head_commit_id,
+    })
+}
+
 pub(crate) fn create_checkpoint(
     store: &mut OptimizerStore,
     project_id: &str,
@@ -1579,6 +1822,191 @@ struct StoredProposalHunk {
 struct StoredTextAnchor {
     block_id: String,
     offset: usize,
+}
+
+struct LoadedStoredReviewCandidate {
+    summary: ReviewCandidateSummaryRecord,
+    session: ReviewSessionRecord,
+    run: OperationRunRecord,
+    payload: Value,
+    proposal: StoredPatchProposal,
+    decisions: BTreeMap<String, Option<ReviewDecision>>,
+}
+
+fn load_stored_review_candidate(
+    store: &OptimizerStore,
+    project_id: &str,
+    proposal_id: &str,
+) -> Result<LoadedStoredReviewCandidate, WorkspaceCommandError> {
+    let summary = store.get_review_candidate_summary(proposal_id)?;
+    if summary.project_id != project_id {
+        return Err(WorkspaceCommandError::Validation(
+            "Proposal belongs to another project".into(),
+        ));
+    }
+    let session = store.get_review_session(proposal_id)?;
+    let run = store.get_operation_run(&session.run_id)?;
+    let artifact = store.get_operation_artifact_by_id(proposal_id)?;
+    if session.run_id != summary.run_id
+        || run.id != summary.run_id
+        || run.project_id != project_id
+        || artifact.run_id != run.id
+        || artifact.kind != OperationArtifactKind::PatchProposal
+    {
+        return Err(WorkspaceCommandError::Store(
+            StoreError::InvariantViolation(
+                "review candidate store bindings are inconsistent".into(),
+            ),
+        ));
+    }
+    let payload: Value =
+        serde_json::from_str(&artifact.payload_json).map_err(WorkspaceCommandError::Json)?;
+    verify_stored_proposal_hash(&payload, &artifact.binding_hash)?;
+    let proposal: StoredPatchProposal =
+        serde_json::from_value(payload.clone()).map_err(WorkspaceCommandError::Json)?;
+    if proposal.schema_version != 2
+        || proposal.id != proposal_id
+        || proposal.operation_run_id != run.id
+        || proposal.base_commit_id != run.base_commit_id
+        || proposal.proposal_hash != artifact.binding_hash
+        || proposal.status != "review"
+        || proposal.target.document_id != summary.target_document_id
+        || proposal.target.block_id != summary.target_block_id
+        || proposal.hunks.len() != usize::try_from(summary.hunk_count).unwrap_or(usize::MAX)
+    {
+        return Err(WorkspaceCommandError::Validation(
+            "Stored proposal metadata is not bound to its candidate summary".into(),
+        ));
+    }
+    let events = store.list_review_events(proposal_id)?;
+    let decisions = replay_review_decisions(&proposal.hunks, &events)?;
+    let all_decided = decisions.values().all(Option::is_some);
+    if matches!(
+        session.status,
+        ReviewSessionStatus::Ready | ReviewSessionStatus::Applied
+    ) && !all_decided
+        || session.status == ReviewSessionStatus::Review && all_decided
+    {
+        return Err(WorkspaceCommandError::Store(
+            StoreError::InvariantViolation(
+                "review candidate status disagrees with replayed decisions".into(),
+            ),
+        ));
+    }
+    Ok(LoadedStoredReviewCandidate {
+        summary,
+        session,
+        run,
+        payload,
+        proposal,
+        decisions,
+    })
+}
+
+fn replay_review_decisions(
+    hunks: &[StoredProposalHunk],
+    events: &[ReviewEventRecord],
+) -> Result<BTreeMap<String, Option<ReviewDecision>>, WorkspaceCommandError> {
+    let mut decisions = hunks
+        .iter()
+        .map(|hunk| (hunk.id.clone(), None))
+        .collect::<BTreeMap<_, _>>();
+    for event in events {
+        if event.kind != ReviewEventKind::Decision {
+            continue;
+        }
+        let hunk_id = event.hunk_id.as_deref().ok_or_else(|| {
+            WorkspaceCommandError::Validation("Decision event has no hunk id".into())
+        })?;
+        let decision = event.decision.ok_or_else(|| {
+            WorkspaceCommandError::Validation("Decision event has no decision".into())
+        })?;
+        let selected = hunks
+            .iter()
+            .find(|hunk| hunk.id == hunk_id)
+            .ok_or_else(|| {
+                WorkspaceCommandError::Validation(
+                    "Decision event references an unknown hunk".into(),
+                )
+            })?;
+        if let Some(group) = selected.atomic_group.as_deref() {
+            if group.trim().is_empty() {
+                return Err(WorkspaceCommandError::Validation(
+                    "Atomic proposal group cannot be empty".into(),
+                ));
+            }
+            for hunk in hunks
+                .iter()
+                .filter(|hunk| hunk.atomic_group.as_deref() == Some(group))
+            {
+                decisions.insert(hunk.id.clone(), Some(decision));
+            }
+        } else {
+            decisions.insert(selected.id.clone(), Some(decision));
+        }
+    }
+    Ok(decisions)
+}
+
+fn complete_review_decisions(
+    hunks: &[StoredProposalHunk],
+    decisions: BTreeMap<String, Option<ReviewDecision>>,
+) -> Result<BTreeMap<String, ReviewDecision>, WorkspaceCommandError> {
+    if decisions.len() != hunks.len()
+        || hunks
+            .iter()
+            .any(|hunk| !matches!(decisions.get(&hunk.id), Some(Some(_))))
+    {
+        return Err(WorkspaceCommandError::Validation(
+            "Review decisions do not cover exactly every proposal hunk".into(),
+        ));
+    }
+    decisions
+        .into_iter()
+        .map(|(id, decision)| {
+            decision.map(|value| (id, value)).ok_or_else(|| {
+                WorkspaceCommandError::Validation("Review decision is still pending".into())
+            })
+        })
+        .collect()
+}
+
+fn review_candidate_summary(
+    record: ReviewCandidateSummaryRecord,
+) -> Result<ReviewCandidateSummary, WorkspaceCommandError> {
+    Ok(ReviewCandidateSummary {
+        schema_version: WORKSPACE_SCHEMA_VERSION,
+        proposal_id: record.proposal_id,
+        run_id: record.run_id,
+        operation_intent_id: record.operation_intent_id,
+        provider_id: record.provider_id,
+        model: record.model,
+        base_commit_id: record.base_commit_id,
+        target_document_id: record.target_document_id,
+        target_block_id: record.target_block_id,
+        hunk_count: usize::try_from(record.hunk_count).map_err(|_| {
+            WorkspaceCommandError::Store(StoreError::InvariantViolation(
+                "review candidate hunk count is invalid".into(),
+            ))
+        })?,
+        summary: record.summary,
+        revision: record.revision,
+        status: record.status.as_str().into(),
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+        candidate_branch: record.candidate_branch.map(review_candidate_branch),
+    })
+}
+
+fn review_candidate_branch(record: ReviewCandidateBranchRecord) -> ReviewCandidateBranch {
+    ReviewCandidateBranch {
+        proposal_id: record.proposal_id,
+        branch_id: record.branch_id,
+        branch_name: record.branch_name,
+        commit_id: record.commit_id,
+        snapshot_id: record.snapshot_id,
+        created_at: record.created_at,
+    }
 }
 
 fn verify_stored_proposal_hash(
@@ -2106,4 +2534,77 @@ fn sha256(payload: &[u8]) -> String {
         let _ = write!(encoded, "{byte:02x}");
     }
     encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use optimizer_store::{
+        ReviewDecision, ReviewEventKind, ReviewEventRecord, ReviewSessionStatus,
+    };
+
+    use super::{
+        StoredProposalHunk, StoredTextAnchor, complete_review_decisions, replay_review_decisions,
+    };
+
+    fn hunk(id: &str, group: Option<&str>, from: usize, to: usize) -> StoredProposalHunk {
+        StoredProposalHunk {
+            id: id.into(),
+            from: StoredTextAnchor {
+                block_id: "block-1".into(),
+                offset: from,
+            },
+            to: StoredTextAnchor {
+                block_id: "block-1".into(),
+                offset: to,
+            },
+            original: "a".into(),
+            replacement: "b".into(),
+            atomic_group: group.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn replays_one_persisted_atomic_decision_across_the_whole_group() {
+        let hunks = vec![
+            hunk("hunk-1", Some("group-1"), 0, 1),
+            hunk("hunk-2", Some("group-1"), 1, 2),
+            hunk("hunk-3", None, 2, 3),
+        ];
+        let events = vec![
+            ReviewEventRecord {
+                id: "event-1".into(),
+                proposal_id: "proposal-1".into(),
+                sequence: 1,
+                base_revision: 0,
+                new_revision: 1,
+                kind: ReviewEventKind::Decision,
+                previous_status: ReviewSessionStatus::Review,
+                next_status: ReviewSessionStatus::Review,
+                hunk_id: Some("hunk-1".into()),
+                decision: Some(ReviewDecision::Accepted),
+                payload_json: None,
+                occurred_at: "2026-07-16T00:00:00Z".into(),
+            },
+            ReviewEventRecord {
+                id: "event-2".into(),
+                proposal_id: "proposal-1".into(),
+                sequence: 2,
+                base_revision: 1,
+                new_revision: 2,
+                kind: ReviewEventKind::Decision,
+                previous_status: ReviewSessionStatus::Review,
+                next_status: ReviewSessionStatus::Ready,
+                hunk_id: Some("hunk-3".into()),
+                decision: Some(ReviewDecision::Rejected),
+                payload_json: None,
+                occurred_at: "2026-07-16T00:00:01Z".into(),
+            },
+        ];
+        let decisions =
+            complete_review_decisions(&hunks, replay_review_decisions(&hunks, &events).unwrap())
+                .unwrap();
+        assert_eq!(decisions["hunk-1"], ReviewDecision::Accepted);
+        assert_eq!(decisions["hunk-2"], ReviewDecision::Accepted);
+        assert_eq!(decisions["hunk-3"], ReviewDecision::Rejected);
+    }
 }

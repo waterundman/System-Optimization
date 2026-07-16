@@ -74,6 +74,16 @@ description = "Allows the bundled editor to read the complete audit record for o
 commands.allow = ["get_operation_audit"]
 
 [[permission]]
+identifier = "allow-review-candidate-read"
+description = "Allows the bundled editor to list project-scoped review candidates and reload one immutable proposal with its replayed decisions."
+commands.allow = ["list_review_candidates", "load_review_candidate"]
+
+[[permission]]
+identifier = "allow-review-candidate-branch"
+description = "Allows one ready reviewed proposal to create an immutable snapshot-backed candidate branch without moving the main project head."
+commands.allow = ["create_review_candidate_branch"]
+
+[[permission]]
 identifier = "allow-provider-secret-manage"
 description = "Allows write, presence check and deletion of provider secrets without exposing plaintext reads."
 commands.allow = ["store_provider_secret", "has_provider_secret", "delete_provider_secret"]

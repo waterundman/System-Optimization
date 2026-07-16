@@ -678,3 +678,54 @@ pub struct ReviewEventRecord {
     pub payload_json: Option<String>,
     pub occurred_at: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewCandidateBranchRecord {
+    pub proposal_id: String,
+    pub branch_id: String,
+    pub branch_name: String,
+    pub commit_id: String,
+    pub snapshot_id: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewCandidateSummaryRecord {
+    pub proposal_id: String,
+    pub run_id: String,
+    pub project_id: String,
+    pub operation_intent_id: String,
+    pub provider_id: String,
+    pub model: String,
+    pub base_commit_id: String,
+    pub target_document_id: String,
+    pub target_block_id: String,
+    pub hunk_count: i64,
+    pub summary: Option<String>,
+    pub revision: i64,
+    pub status: ReviewSessionStatus,
+    pub created_at: String,
+    pub updated_at: String,
+    pub candidate_branch: Option<ReviewCandidateBranchRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateReviewCandidateBranch {
+    pub proposal_id: String,
+    pub expected_review_revision: i64,
+    pub project_id: String,
+    pub expected_project_head_commit_id: String,
+    pub branch_id: String,
+    pub branch_name: String,
+    pub commit_id: String,
+    pub snapshot_id: String,
+    pub target_document_id: String,
+    pub target_block_id: String,
+    pub expected_block_revision: i64,
+    pub expected_block_hash: String,
+    pub new_content_json: String,
+    pub new_plain_text: String,
+    pub new_content_hash: String,
+    pub new_root_hash: String,
+    pub occurred_at: String,
+}

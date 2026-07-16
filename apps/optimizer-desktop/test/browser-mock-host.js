@@ -70,7 +70,7 @@
       title: "雾港来信",
       language: "zh-CN",
       directory: "W:\\写作\\雾港来信.optimizer",
-      databaseSchemaVersion: 6,
+      databaseSchemaVersion: 7,
       headCommitId: workspace.headCommitId,
       revision: 0,
       createdAt: "2026-07-15T00:00:00Z",
@@ -81,6 +81,9 @@
     onmessage = null;
   }
   let authorizedModelRequest = null;
+  let reviewCandidate = null;
+  let reviewSession = null;
+  let candidateBranch = null;
   let summariesReady = false;
   async function contentHash(value) {
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
@@ -114,6 +117,27 @@
       workspace: structuredClone(workspace),
     };
   }
+  function reviewCandidateSummary() {
+    if (!reviewCandidate || !reviewSession) return null;
+    return {
+      schemaVersion: 1,
+      proposalId: reviewCandidate.proposal.id,
+      runId: reviewCandidate.run.id,
+      operationIntentId: reviewCandidate.run.operationIntentId,
+      providerId: reviewCandidate.run.providerId,
+      model: reviewCandidate.run.model,
+      baseCommitId: reviewCandidate.run.baseCommitId,
+      targetDocumentId: reviewCandidate.proposal.target.documentId,
+      targetBlockId: reviewCandidate.proposal.target.blockId,
+      hunkCount: reviewCandidate.proposal.hunks.length,
+      summary: reviewCandidate.proposal.summary ?? null,
+      revision: reviewSession.revision,
+      status: reviewSession.status,
+      createdAt: reviewCandidate.artifact.createdAt,
+      updatedAt: reviewSession.updatedAt,
+      candidateBranch,
+    };
+  }
   async function invoke(command, args = {}) {
     if (command === "get_project_session") return structuredClone(session);
     if (command === "list_recent_projects") {
@@ -140,6 +164,40 @@
       return { schemaVersion: 1, isOpen: false, project: null };
     }
     if (command === "get_project_workspace") return structuredClone(workspace);
+    if (command === "list_review_candidates") {
+      const summary = reviewCandidateSummary();
+      return summary ? [structuredClone(summary)] : [];
+    }
+    if (command === "load_review_candidate") {
+      const summary = reviewCandidateSummary();
+      if (!summary || summary.proposalId !== args.input.proposalId) {
+        throw { code: "REVIEW_CANDIDATE_NOT_FOUND", message: "Missing review candidate" };
+      }
+      return {
+        schemaVersion: 1,
+        summary: structuredClone(summary),
+        proposal: structuredClone(reviewCandidate.proposal),
+        session: structuredClone(reviewSession),
+      };
+    }
+    if (command === "create_review_candidate_branch") {
+      if (!reviewSession || reviewSession.status !== "ready" || reviewSession.revision !== args.input.expectedReviewRevision) {
+        throw { code: "CONFLICT", message: "Review candidate is not ready" };
+      }
+      candidateBranch = {
+        proposalId: reviewCandidate.proposal.id,
+        branchId: "branch-candidate-visual-1",
+        branchName: args.input.branchName,
+        commitId: "commit-candidate-visual-1",
+        snapshotId: "snapshot-candidate-visual-1",
+        createdAt: "2026-07-16T00:03:00Z",
+      };
+      return {
+        schemaVersion: 1,
+        branch: structuredClone(candidateBranch),
+        mainHeadCommitId: workspace.headCommitId,
+      };
+    }
     if (command === "list_archived_documents") return structuredClone(archivedDocuments);
     if (command === "list_summary_invalidations") {
       if (summariesReady) return [];
@@ -547,10 +605,56 @@
       };
     }
     if (command === "persist_operation_bundle") {
-      return { schemaVersion: 1, runId: "run-visual-1", state: "review", artifactId: "proposal-visual-1" };
+      const bundle = JSON.parse(args.input);
+      reviewCandidate = {
+        run: structuredClone(bundle.run),
+        artifact: structuredClone(bundle.artifact),
+        proposal: structuredClone(bundle.artifact.payload),
+      };
+      reviewSession = {
+        proposalId: reviewCandidate.proposal.id,
+        proposalHash: reviewCandidate.proposal.proposalHash,
+        revision: 0,
+        status: "review",
+        decisions: Object.fromEntries(reviewCandidate.proposal.hunks.map((hunk) => [hunk.id, "pending"])),
+        updatedAt: bundle.artifact.createdAt,
+      };
+      candidateBranch = null;
+      return {
+        schemaVersion: 1,
+        runId: bundle.run.id,
+        state: "review",
+        artifactId: bundle.artifact.id,
+      };
     }
     if (command === "append_review_event") {
-      return { schemaVersion: 1, proposalId: "proposal-visual-1", revision: 1, status: "ready", runId: "run-visual-1", operationState: "review" };
+      const event = JSON.parse(args.input);
+      if (
+        !reviewSession
+        || event.proposalId !== reviewSession.proposalId
+        || event.expectedRevision !== reviewSession.revision
+        || event.expectedStatus !== reviewSession.status
+      ) {
+        throw { code: "CONFLICT", message: "Review revision changed" };
+      }
+      if (event.kind === "decision") {
+        const selected = reviewCandidate.proposal.hunks.find((hunk) => hunk.id === event.hunkId);
+        const affected = selected.atomicGroup
+          ? reviewCandidate.proposal.hunks.filter((hunk) => hunk.atomicGroup === selected.atomicGroup)
+          : [selected];
+        for (const hunk of affected) reviewSession.decisions[hunk.id] = event.decision;
+      }
+      reviewSession.revision += 1;
+      reviewSession.status = event.nextStatus;
+      reviewSession.updatedAt = event.occurredAt;
+      return {
+        schemaVersion: 1,
+        proposalId: reviewSession.proposalId,
+        revision: reviewSession.revision,
+        status: reviewSession.status,
+        runId: reviewCandidate.run.id,
+        operationState: reviewSession.status === "rejected" ? "rejected" : "review",
+      };
     }
     if (command === "apply_reviewed_proposal") {
       const previousHeadCommitId = workspace.headCommitId;
@@ -566,6 +670,9 @@
       workspace.revision = 1;
       session.project.headCommitId = workspace.headCommitId;
       session.project.revision = workspace.revision;
+      reviewSession.revision += 1;
+      reviewSession.status = "applied";
+      reviewSession.updatedAt = "2026-07-16T00:04:00Z";
       summariesReady = false;
       return {
         schemaVersion: 1,

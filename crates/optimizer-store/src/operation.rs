@@ -5,7 +5,8 @@ use crate::model::{
     AppendReviewEvent, ContextPacketRecord, ModelUsageRecord, NewOperationLifecycleEvent,
     OperationArtifactKind, OperationArtifactRecord, OperationFailureRecord,
     OperationLifecycleEventRecord, OperationRunRecord, OperationState, PersistOperationBundle,
-    ReviewDecision, ReviewEventKind, ReviewEventRecord, ReviewSessionRecord, ReviewSessionStatus,
+    ReviewCandidateBranchRecord, ReviewCandidateSummaryRecord, ReviewDecision, ReviewEventKind,
+    ReviewEventRecord, ReviewSessionRecord, ReviewSessionStatus,
 };
 use crate::store::OptimizerStore;
 
@@ -210,6 +211,45 @@ impl OptimizerStore {
         })
     }
 
+    pub fn get_operation_artifact_by_id(
+        &self,
+        artifact_id: &str,
+    ) -> StoreResult<OperationArtifactRecord> {
+        let raw = self
+            .connection
+            .query_row(
+                "SELECT id, run_id, kind, binding_hash, payload_json, created_at
+                 FROM operation_artifact WHERE id = ?1",
+                [artifact_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NotFound {
+                entity: "operation_artifact",
+                id: artifact_id.to_owned(),
+            })?;
+        let kind = OperationArtifactKind::parse(&raw.2).ok_or_else(|| {
+            StoreError::InvariantViolation(format!("unknown operation artifact kind {}", raw.2))
+        })?;
+        Ok(OperationArtifactRecord {
+            id: raw.0,
+            run_id: raw.1,
+            kind,
+            binding_hash: raw.3,
+            payload_json: raw.4,
+            created_at: raw.5,
+        })
+    }
+
     pub fn list_operation_lifecycle_events(
         &self,
         run_id: &str,
@@ -334,6 +374,81 @@ impl OptimizerStore {
                 })
             })
             .collect()
+    }
+
+    pub fn list_review_candidates(
+        &self,
+        project_id: &str,
+        limit: usize,
+    ) -> StoreResult<Vec<ReviewCandidateSummaryRecord>> {
+        if project_id.trim().is_empty() || limit == 0 || limit > 200 {
+            return Err(StoreError::Validation(
+                "project id and review candidate limit 1..=200 are required".into(),
+            ));
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT h.proposal_id, h.run_id, r.project_id, r.operation_intent_id,
+                    r.provider_id, r.model, r.base_commit_id,
+                    json_extract(a.payload_json, '$.target.documentId'),
+                    json_extract(a.payload_json, '$.target.blockId'),
+                    json_array_length(json_extract(a.payload_json, '$.hunks')),
+                    json_extract(a.payload_json, '$.summary'),
+                    h.revision, h.status, a.created_at, h.updated_at,
+                    cb.branch_id, b.name, cb.commit_id, cb.snapshot_id, cb.created_at
+             FROM patch_review_head AS h
+             JOIN operation_run AS r ON r.id = h.run_id
+             JOIN operation_artifact AS a ON a.id = h.proposal_id AND a.run_id = h.run_id
+             LEFT JOIN patch_candidate_branch AS cb ON cb.proposal_id = h.proposal_id
+             LEFT JOIN branch AS b ON b.id = cb.branch_id
+             WHERE r.project_id = ?1
+             ORDER BY CASE
+                        WHEN h.status IN ('review', 'ready', 'conflicted') THEN 0
+                        ELSE 1
+                      END,
+                      h.updated_at DESC, h.proposal_id DESC
+             LIMIT ?2",
+        )?;
+        let rows = statement
+            .query_map(
+                params![project_id, limit as i64],
+                read_review_candidate_summary,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(parse_review_candidate_summary)
+            .collect()
+    }
+
+    pub fn get_review_candidate_summary(
+        &self,
+        proposal_id: &str,
+    ) -> StoreResult<ReviewCandidateSummaryRecord> {
+        let raw = self
+            .connection
+            .query_row(
+                "SELECT h.proposal_id, h.run_id, r.project_id, r.operation_intent_id,
+                        r.provider_id, r.model, r.base_commit_id,
+                        json_extract(a.payload_json, '$.target.documentId'),
+                        json_extract(a.payload_json, '$.target.blockId'),
+                        json_array_length(json_extract(a.payload_json, '$.hunks')),
+                        json_extract(a.payload_json, '$.summary'),
+                        h.revision, h.status, a.created_at, h.updated_at,
+                        cb.branch_id, b.name, cb.commit_id, cb.snapshot_id, cb.created_at
+                 FROM patch_review_head AS h
+                 JOIN operation_run AS r ON r.id = h.run_id
+                 JOIN operation_artifact AS a ON a.id = h.proposal_id AND a.run_id = h.run_id
+                 LEFT JOIN patch_candidate_branch AS cb ON cb.proposal_id = h.proposal_id
+                 LEFT JOIN branch AS b ON b.id = cb.branch_id
+                 WHERE h.proposal_id = ?1",
+                [proposal_id],
+                read_review_candidate_summary,
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NotFound {
+                entity: "review_candidate",
+                id: proposal_id.to_owned(),
+            })?;
+        parse_review_candidate_summary(raw)
     }
 
     pub(crate) fn verify_operation_invariants(&self) -> StoreResult<()> {
@@ -515,6 +630,102 @@ pub(crate) fn append_review_event_in_transaction(
         revision: new_revision,
         status: command.next_status,
         updated_at: command.occurred_at.clone(),
+    })
+}
+
+type RawReviewCandidateSummary = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    Option<String>,
+    i64,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+fn read_review_candidate_summary(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<RawReviewCandidateSummary> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+        row.get(9)?,
+        row.get(10)?,
+        row.get(11)?,
+        row.get(12)?,
+        row.get(13)?,
+        row.get(14)?,
+        row.get(15)?,
+        row.get(16)?,
+        row.get(17)?,
+        row.get(18)?,
+        row.get(19)?,
+    ))
+}
+
+fn parse_review_candidate_summary(
+    raw: RawReviewCandidateSummary,
+) -> StoreResult<ReviewCandidateSummaryRecord> {
+    let branch_fields = [&raw.15, &raw.16, &raw.17, &raw.18, &raw.19];
+    let present = branch_fields.iter().filter(|value| value.is_some()).count();
+    let candidate_branch = match present {
+        0 => None,
+        5 => Some(ReviewCandidateBranchRecord {
+            proposal_id: raw.0.clone(),
+            branch_id: raw.15.expect("branch field coverage checked"),
+            branch_name: raw.16.expect("branch field coverage checked"),
+            commit_id: raw.17.expect("branch field coverage checked"),
+            snapshot_id: raw.18.expect("branch field coverage checked"),
+            created_at: raw.19.expect("branch field coverage checked"),
+        }),
+        _ => {
+            return Err(StoreError::InvariantViolation(
+                "review candidate branch join is partially populated".into(),
+            ));
+        }
+    };
+    if raw.9 < 1 {
+        return Err(StoreError::InvariantViolation(
+            "review candidate has no proposal hunks".into(),
+        ));
+    }
+    Ok(ReviewCandidateSummaryRecord {
+        proposal_id: raw.0,
+        run_id: raw.1,
+        project_id: raw.2,
+        operation_intent_id: raw.3,
+        provider_id: raw.4,
+        model: raw.5,
+        base_commit_id: raw.6,
+        target_document_id: raw.7,
+        target_block_id: raw.8,
+        hunk_count: raw.9,
+        summary: raw.10,
+        revision: raw.11,
+        status: parse_review_status(&raw.12)?,
+        created_at: raw.13,
+        updated_at: raw.14,
+        candidate_branch,
     })
 }
 

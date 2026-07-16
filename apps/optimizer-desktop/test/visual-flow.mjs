@@ -147,8 +147,22 @@ await page.getByRole("heading", { name: "逐项审查 AI 修改" }).waitFor();
 assert.equal(await page.locator(".review-hunk").count(), 1);
 await page.screenshot({ path: resolve(screenshotDirectory, "patch-review.png"), fullPage: true });
 
+await page.getByRole("button", { name: "稍后审查" }).click();
+await page.getByRole("heading", { name: "候选中心" }).waitFor();
+await page.getByText("审查中", { exact: true }).waitFor();
+await page.screenshot({ path: resolve(screenshotDirectory, "candidate-center.png"), fullPage: true });
+await page.getByRole("button", { name: "继续审查" }).click();
+await page.getByRole("heading", { name: "逐项审查 AI 修改" }).waitFor();
+await page.getByText(/已从项目数据库恢复/).waitFor();
+
 await page.getByRole("button", { name: "全部接受", exact: true }).click();
 await page.getByText(/已接受全部 1 个修改项/).waitFor();
+page.once("dialog", (dialog) => dialog.accept("AI 候选：车站续写"));
+await page.getByRole("button", { name: "保存为分支" }).click();
+await page.getByText(/当前正文与主分支未改变/).waitFor();
+await page.getByText("雨停了。", { exact: true }).waitFor();
+await page.getByText("AI 候选：车站续写").waitFor();
+await page.screenshot({ path: resolve(screenshotDirectory, "candidate-branch.png"), fullPage: true });
 await page.getByRole("button", { name: "应用已接受修改" }).click();
 await page.getByText("雨停了。她推开车站的门。").waitFor();
 await page.getByText(/ai_accept Commit/).waitFor();

@@ -9,9 +9,10 @@ use crate::error::{StoreError, StoreResult};
 use crate::migration::{CURRENT_SCHEMA_VERSION, migrate};
 use crate::model::{
     ApplyBlockEdit, ApplyDocumentBatch, BlockRecord, BlockSearchHit, BranchRecord, CommitRecord,
-    CreateDocumentReceipt, CreateDocumentWithBlock, CreateKnowledgeItem, CreateSnapshot,
-    CreateStyleSample, DocumentBatchReceipt, DocumentRecord, EditReceipt, KnowledgeItemRecord,
-    ProjectRecord, ProjectSeed, PutSummaryRecord, RestoreReceipt, RestoreSnapshot, ReviewEventKind,
+    CreateDocumentReceipt, CreateDocumentWithBlock, CreateKnowledgeItem,
+    CreateReviewCandidateBranch, CreateSnapshot, CreateStyleSample, DocumentBatchReceipt,
+    DocumentRecord, EditReceipt, KnowledgeItemRecord, ProjectRecord, ProjectSeed, PutSummaryRecord,
+    RestoreReceipt, RestoreSnapshot, ReviewCandidateBranchRecord, ReviewEventKind,
     ReviewSessionStatus, SetKnowledgeItemStatus, SetStyleSampleStatus, SnapshotRecord,
     StyleSampleRecord, SummaryInvalidationRecord, SummaryRecord,
 };
@@ -255,6 +256,238 @@ impl OptimizerStore {
                 entity: "branch",
                 id: branch_id.to_owned(),
             })
+    }
+
+    pub fn create_review_candidate_branch(
+        &mut self,
+        command: &CreateReviewCandidateBranch,
+    ) -> StoreResult<ReviewCandidateBranchRecord> {
+        validate_review_candidate_branch(command)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let binding = transaction
+            .query_row(
+                "SELECT r.project_id, r.base_commit_id, h.revision, h.status,
+                        json_extract(a.payload_json, '$.target.documentId'),
+                        json_extract(a.payload_json, '$.target.blockId'),
+                        json_extract(a.payload_json, '$.target.baseRevision'),
+                        json_extract(a.payload_json, '$.target.baseHash')
+                 FROM patch_review_head AS h
+                 JOIN operation_run AS r ON r.id = h.run_id
+                 JOIN operation_artifact AS a ON a.id = h.proposal_id AND a.run_id = h.run_id
+                 WHERE h.proposal_id = ?1 AND a.kind = 'patch_proposal'",
+                [&command.proposal_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, String>(7)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NotFound {
+                entity: "review_candidate",
+                id: command.proposal_id.clone(),
+            })?;
+        let actual_status = ReviewSessionStatus::parse(&binding.3).ok_or_else(|| {
+            StoreError::InvariantViolation(format!("unknown review status {}", binding.3))
+        })?;
+        if binding.2 != command.expected_review_revision
+            || actual_status != ReviewSessionStatus::Ready
+        {
+            return Err(StoreError::StateConflict {
+                entity: "patch_review",
+                id: command.proposal_id.clone(),
+                expected_revision: command.expected_review_revision,
+                actual_revision: binding.2,
+                expected_state: ReviewSessionStatus::Ready.as_str().into(),
+                actual_state: actual_status.as_str().into(),
+            });
+        }
+        if binding.0 != command.project_id
+            || binding.1 != command.expected_project_head_commit_id
+            || binding.4 != command.target_document_id
+            || binding.5 != command.target_block_id
+            || binding.6 != command.expected_block_revision
+            || binding.7 != command.expected_block_hash
+        {
+            return Err(StoreError::Validation(
+                "candidate branch command does not match its immutable proposal binding".into(),
+            ));
+        }
+        let project_head: String = transaction
+            .query_row(
+                "SELECT head_commit_id FROM project WHERE id = ?1",
+                [&command.project_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NotFound {
+                entity: "project",
+                id: command.project_id.clone(),
+            })?;
+        if project_head != command.expected_project_head_commit_id {
+            return Err(StoreError::StateConflict {
+                entity: "candidate_branch_base",
+                id: command.proposal_id.clone(),
+                expected_revision: command.expected_review_revision,
+                actual_revision: binding.2,
+                expected_state: command.expected_project_head_commit_id.clone(),
+                actual_state: project_head,
+            });
+        }
+        let current = read_block_for_edit(&transaction, &command.target_block_id)?;
+        if current.project_id != command.project_id
+            || current.document_id != command.target_document_id
+            || current.revision != command.expected_block_revision
+            || current.content_hash != command.expected_block_hash
+            || current.locked
+        {
+            return Err(StoreError::Conflict {
+                entity: "candidate_branch_target",
+                id: command.target_block_id.clone(),
+                expected_revision: command.expected_block_revision,
+                actual_revision: current.revision,
+                expected_hash: command.expected_block_hash.clone(),
+                actual_hash: current.content_hash,
+            });
+        }
+        let already_exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM patch_candidate_branch WHERE proposal_id = ?1)",
+            [&command.proposal_id],
+            |row| row.get(0),
+        )?;
+        if already_exists {
+            return Err(StoreError::Validation(
+                "review candidate already has a branch".into(),
+            ));
+        }
+
+        let mut snapshot = read_head_snapshot(&transaction, &command.project_id)?;
+        if snapshot.commit.id != command.expected_project_head_commit_id {
+            return Err(StoreError::InvariantViolation(
+                "candidate snapshot does not match the expected project head".into(),
+            ));
+        }
+        let target = snapshot
+            .blocks
+            .iter_mut()
+            .find(|block| block.id == command.target_block_id)
+            .ok_or_else(|| {
+                StoreError::InvariantViolation(
+                    "candidate target is absent from head snapshot".into(),
+                )
+            })?;
+        target.content_json = command.new_content_json.clone();
+        target.plain_text = command.new_plain_text.clone();
+        target.content_hash = command.new_content_hash.clone();
+        target.revision += 1;
+        let target_document = snapshot
+            .documents
+            .iter_mut()
+            .find(|document| document.id == command.target_document_id)
+            .ok_or_else(|| {
+                StoreError::InvariantViolation(
+                    "candidate document is absent from head snapshot".into(),
+                )
+            })?;
+        target_document.revision += 1;
+        snapshot.commit.id = command.commit_id.clone();
+        snapshot.commit.root_hash = command.new_root_hash.clone();
+        snapshot.branches.push(SnapshotBranch {
+            id: command.branch_id.clone(),
+            name: command.branch_name.clone(),
+            head_commit_id: command.commit_id.clone(),
+        });
+        snapshot
+            .branches
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        let encoded =
+            encode_snapshot(&snapshot).map_err(|error| StoreError::Snapshot(error.to_string()))?;
+
+        transaction.execute(
+            "INSERT INTO commit_node(id, project_id, root_hash, reason, actor_type, actor_id, created_at)
+             VALUES (?1, ?2, ?3, 'ai_candidate_branch', 'model', ?4, ?5)",
+            params![
+                command.commit_id,
+                command.project_id,
+                command.new_root_hash,
+                command.proposal_id,
+                command.occurred_at,
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO commit_parent(commit_id, parent_id, position) VALUES (?1, ?2, 0)",
+            params![command.commit_id, command.expected_project_head_commit_id],
+        )?;
+        transaction.execute(
+            "INSERT INTO change_set(
+               commit_id, position, entity_type, entity_id, operation,
+               before_hash, after_hash, edit_journal_id
+             ) VALUES (?1, 0, 'block', ?2, 'candidate', ?3, ?4, NULL)",
+            params![
+                command.commit_id,
+                command.target_block_id,
+                command.expected_block_hash,
+                command.new_content_hash,
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO branch(id, project_id, name, head_commit_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![
+                command.branch_id,
+                command.project_id,
+                command.branch_name,
+                command.commit_id,
+                command.occurred_at,
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO materialized_snapshot(
+               id, project_id, commit_id, root_hash, codec, codec_version,
+               payload, checksum, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                command.snapshot_id,
+                command.project_id,
+                command.commit_id,
+                command.new_root_hash,
+                SNAPSHOT_CODEC,
+                SNAPSHOT_CODEC_VERSION,
+                encoded.payload,
+                encoded.checksum,
+                command.occurred_at,
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO patch_candidate_branch(
+               proposal_id, branch_id, commit_id, snapshot_id, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                command.proposal_id,
+                command.branch_id,
+                command.commit_id,
+                command.snapshot_id,
+                command.occurred_at,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(ReviewCandidateBranchRecord {
+            proposal_id: command.proposal_id.clone(),
+            branch_id: command.branch_id.clone(),
+            branch_name: command.branch_name.clone(),
+            commit_id: command.commit_id.clone(),
+            snapshot_id: command.snapshot_id.clone(),
+            created_at: command.occurred_at.clone(),
+        })
     }
 
     pub fn list_style_samples(&self, project_id: &str) -> StoreResult<Vec<StyleSampleRecord>> {
@@ -1497,7 +1730,12 @@ impl OptimizerStore {
         self.connection
             .query_row(
                 "SELECT id, project_id, commit_id, root_hash, codec, codec_version, payload, checksum, created_at
-                 FROM materialized_snapshot WHERE project_id = ?1 ORDER BY created_at DESC, id DESC LIMIT 1",
+                 FROM materialized_snapshot AS s
+                 WHERE project_id = ?1
+                   AND NOT EXISTS(
+                     SELECT 1 FROM patch_candidate_branch AS cb WHERE cb.snapshot_id = s.id
+                   )
+                 ORDER BY created_at DESC, id DESC LIMIT 1",
                 [project_id],
                 |row| {
                     Ok(SnapshotRecord {
@@ -1521,8 +1759,11 @@ impl OptimizerStore {
         let mut statement = self.connection.prepare(
             "SELECT id, project_id, commit_id, root_hash, codec, codec_version, payload,
                     checksum, created_at
-             FROM materialized_snapshot
+             FROM materialized_snapshot AS s
              WHERE project_id = ?1
+               AND NOT EXISTS(
+                 SELECT 1 FROM patch_candidate_branch AS cb WHERE cb.snapshot_id = s.id
+               )
              ORDER BY created_at DESC, id DESC",
         )?;
         statement
@@ -2278,6 +2519,29 @@ impl OptimizerStore {
             )));
         }
 
+        let broken_candidate_branches: i64 = self.connection.query_row(
+            "SELECT COUNT(*)
+             FROM patch_candidate_branch AS cb
+             JOIN patch_review_head AS h ON h.proposal_id = cb.proposal_id
+             JOIN operation_run AS r ON r.id = h.run_id
+             JOIN branch AS b ON b.id = cb.branch_id
+             JOIN commit_node AS c ON c.id = cb.commit_id
+             JOIN materialized_snapshot AS s ON s.id = cb.snapshot_id
+             WHERE b.project_id <> r.project_id
+                OR c.project_id <> r.project_id
+                OR s.project_id <> r.project_id
+                OR b.head_commit_id <> cb.commit_id
+                OR s.commit_id <> cb.commit_id
+                OR s.root_hash <> c.root_hash",
+            [],
+            |row| row.get(0),
+        )?;
+        if broken_candidate_branches != 0 {
+            return Err(StoreError::InvariantViolation(format!(
+                "{broken_candidate_branches} candidate branches are invalid"
+            )));
+        }
+
         let broken_project_heads: i64 = self.connection.query_row(
             "SELECT COUNT(*) FROM project p
              LEFT JOIN commit_node c ON c.id = p.head_commit_id
@@ -2508,6 +2772,61 @@ fn validate_edit(command: &ApplyBlockEdit) -> StoreResult<()> {
     if command.expected_project_revision < 0 {
         return Err(StoreError::Validation(
             "expected_project_revision must be non-negative".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_review_candidate_branch(command: &CreateReviewCandidateBranch) -> StoreResult<()> {
+    if command.expected_review_revision < 0 || command.expected_block_revision < 0 {
+        return Err(StoreError::Validation(
+            "candidate review and block revisions must be non-negative".into(),
+        ));
+    }
+    for (field, value) in [
+        ("proposal_id", command.proposal_id.as_str()),
+        ("project_id", command.project_id.as_str()),
+        (
+            "expected_project_head_commit_id",
+            command.expected_project_head_commit_id.as_str(),
+        ),
+        ("branch_id", command.branch_id.as_str()),
+        ("branch_name", command.branch_name.as_str()),
+        ("commit_id", command.commit_id.as_str()),
+        ("snapshot_id", command.snapshot_id.as_str()),
+        ("target_document_id", command.target_document_id.as_str()),
+        ("target_block_id", command.target_block_id.as_str()),
+        ("expected_block_hash", command.expected_block_hash.as_str()),
+        ("new_content_hash", command.new_content_hash.as_str()),
+        ("new_root_hash", command.new_root_hash.as_str()),
+        ("occurred_at", command.occurred_at.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(StoreError::Validation(format!("{field} must not be empty")));
+        }
+    }
+    if command.branch_name.trim() != command.branch_name
+        || command.branch_name.chars().count() > 120
+    {
+        return Err(StoreError::Validation(
+            "candidate branch name must be trimmed and at most 120 characters".into(),
+        ));
+    }
+    if command.expected_block_hash == command.new_content_hash
+        || command.new_plain_text.len() > 8 * 1024 * 1024
+        || command.new_content_json.len() > 16 * 1024 * 1024
+    {
+        return Err(StoreError::Validation(
+            "candidate branch content is unchanged or exceeds the storage bound".into(),
+        ));
+    }
+    let content: serde_json::Value =
+        serde_json::from_str(&command.new_content_json).map_err(|error| {
+            StoreError::Validation(format!("candidate content JSON is invalid: {error}"))
+        })?;
+    if !content.is_object() {
+        return Err(StoreError::Validation(
+            "candidate content JSON must be an object".into(),
         ));
     }
     Ok(())

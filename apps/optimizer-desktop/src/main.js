@@ -15,6 +15,7 @@ import {
   credentialReference,
   decideDesktopHunk,
   defaultProviderSettings,
+  hydrateDesktopReviewCandidate,
   persistDesktopReviewDecision,
   planDesktopReviewDecisions,
   providerRequiresCredential,
@@ -37,6 +38,7 @@ const state = {
   workspace: null,
   selectedDocumentId: null,
   versionsOpen: false,
+  candidatesOpen: false,
   providersOpen: false,
   stylesOpen: false,
   styleSamples: [],
@@ -52,6 +54,8 @@ const state = {
   providerSettings: loadProviderSettings(),
   ollamaDiscovery: null,
   versionHistory: null,
+  reviewCandidates: [],
+  candidateBusy: null,
   saveTimers: new Map(),
   pendingText: new Map(),
   savePromises: new Map(),
@@ -370,18 +374,20 @@ function setFormBusy(form, busy) {
 
 async function loadWorkspace() {
   const preferred = state.selectedDocumentId;
-  const [workspace, styleSamples, knowledgeItems, archivedDocuments, summaryInvalidations] = await Promise.all([
+  const [workspace, styleSamples, knowledgeItems, archivedDocuments, summaryInvalidations, reviewCandidates] = await Promise.all([
     invokeHost("get_project_workspace"),
     invokeHost("list_style_samples"),
     invokeHost("list_knowledge_items"),
     invokeHost("list_archived_documents"),
     invokeHost("list_summary_invalidations"),
+    invokeHost("list_review_candidates"),
   ]);
   state.workspace = workspace;
   state.styleSamples = styleSamples;
   state.knowledgeItems = knowledgeItems;
   state.archivedDocuments = archivedDocuments;
   state.summaryInvalidations = summaryInvalidations;
+  state.reviewCandidates = reviewCandidates;
   state.selectedDocumentId = selectInitialDocument(state.workspace, preferred);
   await refreshProviderSecretStatus();
   renderWorkspace();
@@ -391,6 +397,9 @@ async function loadWorkspace() {
 function renderWorkspace() {
   const project = state.session?.project;
   if (!project || !state.workspace) return renderWelcome();
+  const activeCandidates = state.reviewCandidates.filter(
+    (candidate) => candidate.status === "review" || candidate.status === "ready" || candidate.status === "conflicted",
+  ).length;
   const topbar = element("header", { className: "topbar" }, [
     element("div", { className: "topbar-brand" }, [
       element("div", { className: "brand-mark", text: "优" }),
@@ -410,6 +419,18 @@ function renderWorkspace() {
       button("导入 MD", "ghost-button", importMarkdown),
       button("导出 MD", "ghost-button", exportMarkdown),
       button("建立检查点", "ghost-button", createCheckpoint),
+      button(
+        state.candidatesOpen ? "收起候选" : "候选 " + activeCandidates,
+        "ghost-button",
+        toggleCandidates,
+        {
+          attrs: {
+            "aria-label": state.candidatesOpen
+              ? "收起候选"
+              : "候选中心，" + activeCandidates + " 个待处理",
+          },
+        },
+      ),
       button(state.versionsOpen ? "收起版本" : "版本历史", "ghost-button", toggleVersions),
       button(state.stylesOpen ? "收起知识" : "知识 / 风格", "ghost-button", toggleStyles),
       button(state.providersOpen ? "收起模型" : "模型设置", "ghost-button", toggleProviders),
@@ -422,9 +443,11 @@ function renderWorkspace() {
     ? providerDrawer()
     : state.stylesOpen
       ? styleDrawer()
-      : state.versionsOpen
-        ? versionDrawer()
-        : null;
+      : state.candidatesOpen
+        ? candidateDrawer()
+        : state.versionsOpen
+          ? versionDrawer()
+          : null;
   const body = element("div", { className: `workspace-body${drawer ? " with-versions" : ""}` }, [
     sidebar,
     editor,
@@ -1033,6 +1056,7 @@ async function runAiOperation(operationType) {
     state.providersOpen = true;
     state.versionsOpen = false;
     state.stylesOpen = false;
+    state.candidatesOpen = false;
     setNotice(
       "warning",
       credentialRequired
@@ -1094,8 +1118,10 @@ async function runAiOperation(operationType) {
         intent: execution.intent,
         result: execution.result,
         session: await createDesktopReview(execution.result.proposal),
+        candidateBranch: null,
         busy: false,
       };
+      await refreshReviewCandidates();
       setNotice("success", `AI 已生成 ${execution.result.proposal.hunks.length} 个可审查修改，正文尚未改变。`);
     } else {
       state.aiReview = {
@@ -1274,13 +1300,38 @@ function aiReviewView() {
       ]),
     ]),
     proposal.summary ? element("p", { className: "review-summary", text: proposal.summary }) : null,
+    review.candidateBranch
+      ? element("div", { className: "review-branch-notice" }, [
+          element("span", { text: "已保存候选分支" }),
+          element("code", { text: review.candidateBranch.branchName }),
+        ])
+      : null,
     ...proposal.hunks.map((hunk, index) => hunkReviewView(review, hunk, index)),
     element("div", { className: "review-footer" }, [
-      button("放弃提案", "quiet-button", rejectCurrentReview, { disabled: review.busy }),
-      button(accepted ? "应用已接受修改" : "完成审查（不改正文）", "primary-button review-apply", applyCurrentReview, {
-        disabled: review.busy || review.session.status !== "ready",
-        title: review.session.status === "ready" ? "创建 ai_accept Commit 并完成审计" : "请先处理全部修改项",
-      }),
+      element("div", { className: "review-footer-group" }, [
+        button("稍后审查", "quiet-button", deferCurrentReview, { disabled: review.busy }),
+        button("放弃提案", "quiet-button", rejectCurrentReview, { disabled: review.busy }),
+      ]),
+      element("div", { className: "review-footer-group" }, [
+        button(
+          review.candidateBranch ? "已保存分支" : "保存为分支",
+          "secondary-button",
+          createCurrentCandidateBranch,
+          {
+            disabled: review.busy
+              || review.session.status !== "ready"
+              || accepted === 0
+              || Boolean(review.candidateBranch),
+            title: accepted === 0
+              ? "至少接受一个修改项后才能建立候选分支"
+              : "创建独立快照分支，不改动当前正文",
+          },
+        ),
+        button(accepted ? "应用已接受修改" : "完成审查（不改正文）", "primary-button review-apply", applyCurrentReview, {
+          disabled: review.busy || review.session.status !== "ready",
+          title: review.session.status === "ready" ? "创建 ai_accept Commit 并完成审计" : "请先处理全部修改项",
+        }),
+      ]),
     ]),
   ]);
 }
@@ -1324,6 +1375,7 @@ async function decideCurrentHunk(hunkId, decision) {
       decision,
     });
     review.session = next;
+    await refreshReviewCandidates();
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
   } finally {
@@ -1350,11 +1402,73 @@ async function decideAllCurrentHunks(decision) {
       });
       review.session = step.next;
     }
+    await refreshReviewCandidates();
     setNotice(
       "success",
       decision === "accepted"
         ? `已接受全部 ${review.result.proposal.hunks.length} 个修改项；应用前正文仍未改变。`
         : `已拒绝全部 ${review.result.proposal.hunks.length} 个修改项；完成审查后正文不会改变。`,
+    );
+  } catch (error) {
+    setNotice("error", normalizeHostError(error).message);
+  } finally {
+    review.busy = false;
+    renderWorkspace();
+  }
+}
+
+async function deferCurrentReview() {
+  const review = state.aiReview;
+  if (review?.kind !== "patch_proposal" || review.busy) return;
+  state.aiReview = null;
+  state.candidatesOpen = true;
+  try {
+    await refreshReviewCandidates();
+    setNotice("success", "候选已保留，可从候选中心或重新打开项目后继续审查。");
+  } catch (error) {
+    setNotice("error", normalizeHostError(error).message);
+  }
+  renderWorkspace();
+}
+
+async function createCurrentCandidateBranch() {
+  const review = state.aiReview;
+  if (
+    review?.kind !== "patch_proposal"
+    || review.busy
+    || review.session.status !== "ready"
+    || review.candidateBranch
+    || !Object.values(review.session.decisions).includes("accepted")
+  ) return;
+  const suggested = "AI 候选 " + new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date());
+  const branchName = window.prompt("候选分支名称", suggested)?.trim();
+  if (!branchName) return;
+  if (branchName.length > 120) {
+    setNotice("error", "候选分支名称不能超过 120 个字符。");
+    renderWorkspace();
+    return;
+  }
+  review.busy = true;
+  renderWorkspace();
+  try {
+    const response = await invokeHost("create_review_candidate_branch", {
+      input: {
+        schemaVersion: 1,
+        proposalId: review.result.proposal.id,
+        expectedReviewRevision: review.session.revision,
+        branchName,
+      },
+    });
+    review.candidateBranch = response.branch;
+    await refreshReviewCandidates();
+    setNotice(
+      "success",
+      "已创建候选分支“" + response.branch.branchName + "”；当前正文与主分支未改变。",
     );
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
@@ -1376,6 +1490,7 @@ async function rejectCurrentReview() {
       session: review.session,
     });
     state.aiReview = null;
+    await refreshReviewCandidates();
     setNotice("success", "提案已拒绝，正文未发生变化，审计记录已保留。 ");
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
@@ -1402,6 +1517,7 @@ async function applyCurrentReview() {
         session: review.session,
       });
       state.aiReview = null;
+      await refreshReviewCandidates();
       setNotice("success", "所有修改项均已拒绝，正文未发生变化。 ");
       renderWorkspace();
       return;
@@ -1428,6 +1544,7 @@ async function applyCurrentReview() {
     };
     state.aiReview = null;
     state.versionHistory = null;
+    await refreshReviewCandidates();
     setNotice("success", `已应用 ${response.acceptedHunks} 个修改项，并创建可审计的 ai_accept Commit。`);
     scheduleSummaryRefresh();
   } catch (error) {
@@ -1591,11 +1708,152 @@ async function createCheckpoint() {
   }
 }
 
+async function refreshReviewCandidates({ render = false } = {}) {
+  state.reviewCandidates = await invokeHost("list_review_candidates");
+  if (render) renderWorkspace();
+}
+
+async function toggleCandidates() {
+  state.candidatesOpen = !state.candidatesOpen;
+  if (state.candidatesOpen) {
+    state.providersOpen = false;
+    state.stylesOpen = false;
+    state.versionsOpen = false;
+    try {
+      await refreshReviewCandidates();
+    } catch (error) {
+      state.candidatesOpen = false;
+      setNotice("error", normalizeHostError(error).message);
+    }
+  }
+  renderWorkspace();
+}
+
+function candidateDrawer() {
+  const active = state.reviewCandidates.filter(
+    (candidate) => candidate.status === "review" || candidate.status === "ready" || candidate.status === "conflicted",
+  );
+  const history = state.reviewCandidates.filter(
+    (candidate) => candidate.status === "applied" || candidate.status === "rejected",
+  );
+  const drawer = element("aside", { className: "version-drawer candidate-drawer" }, [
+    element("div", { className: "drawer-heading" }, [
+      element("div", {}, [
+        element("span", { className: "eyebrow", text: "PATCH CANDIDATES" }),
+        element("h2", { text: "候选中心" }),
+      ]),
+      button("×", "icon-button", toggleCandidates, { title: "关闭候选中心" }),
+    ]),
+    element("p", {
+      className: "drawer-intro",
+      text: "提案与审查决定保存在项目数据库中；稍后或重新打开项目仍可继续。",
+    }),
+    element("h3", { text: "待处理 · " + active.length }),
+  ]);
+  if (!active.length) {
+    drawer.append(element("p", { className: "drawer-empty", text: "没有待处理候选。" }));
+  } else {
+    drawer.append(...active.map(reviewCandidateCard));
+  }
+  if (history.length) {
+    drawer.append(element("h3", { text: "已完成 · " + history.length }));
+    drawer.append(...history.slice(0, 30).map(reviewCandidateCard));
+  }
+  return drawer;
+}
+
+function reviewCandidateCard(candidate) {
+  const document = state.workspace.documents.find((item) => item.id === candidate.targetDocumentId);
+  const isCurrent = state.aiReview?.kind === "patch_proposal"
+    && state.aiReview.result.proposal.id === candidate.proposalId;
+  const canResume = candidate.status === "review" || candidate.status === "ready";
+  const busy = state.candidateBusy === candidate.proposalId;
+  const card = element("article", { className: "candidate-card" }, [
+    element("div", { className: "candidate-card-heading" }, [
+      element("span", {
+        className: "candidate-status status-" + candidate.status,
+        text: reviewCandidateStatusLabel(candidate.status),
+      }),
+      element("span", { text: candidate.hunkCount + " 项" }),
+    ]),
+    element("strong", { text: candidate.summary || (document ? document.title : "AI 修改候选") }),
+    element("span", { text: candidate.providerId + " · " + candidate.model }),
+    element("span", { text: formatDate(candidate.updatedAt) }),
+    candidate.candidateBranch
+      ? element("div", { className: "candidate-branch-badge" }, [
+          element("span", { text: "分支" }),
+          element("code", { text: candidate.candidateBranch.branchName }),
+        ])
+      : null,
+  ]);
+  if (canResume) {
+    card.append(button(
+      isCurrent ? "正在审查" : busy ? "正在恢复…" : "继续审查",
+      "small-button candidate-resume",
+      () => openReviewCandidate(candidate.proposalId),
+      { disabled: isCurrent || busy || Boolean(state.aiRunning || state.aiReview) },
+    ));
+  } else if (candidate.status === "conflicted") {
+    card.append(element("p", {
+      className: "candidate-note",
+      text: "目标正文已变化；当前版本保留审计，等待后续重基工具。",
+    }));
+  }
+  return card;
+}
+
+function reviewCandidateStatusLabel(status) {
+  return {
+    review: "审查中",
+    ready: "可应用",
+    conflicted: "有冲突",
+    applied: "已应用",
+    rejected: "已拒绝",
+  }[status] || status;
+}
+
+async function openReviewCandidate(proposalId) {
+  if (state.aiRunning || state.aiReview || state.candidateBusy) return;
+  state.candidateBusy = proposalId;
+  renderWorkspace();
+  try {
+    await flushAll();
+    const detail = await invokeHost("load_review_candidate", {
+      input: { schemaVersion: 1, proposalId },
+    });
+    const hydrated = await hydrateDesktopReviewCandidate(detail);
+    if (hydrated.session.status !== "review" && hydrated.session.status !== "ready") {
+      throw { code: "REVIEW_FINALIZED", message: "这个候选当前不能继续审查。" };
+    }
+    state.aiReview = {
+      kind: "patch_proposal",
+      intent: null,
+      result: { kind: "patch_proposal", proposal: hydrated.proposal },
+      session: hydrated.session,
+      candidateBranch: hydrated.candidateBranch,
+      resumed: true,
+      busy: false,
+    };
+    if (state.workspace.documents.some((document) => document.id === hydrated.proposal.target.documentId)) {
+      state.selectedDocumentId = hydrated.proposal.target.documentId;
+    }
+    state.activeBlockId = hydrated.proposal.target.blockId;
+    state.candidatesOpen = false;
+    setNotice("success", "已从项目数据库恢复未完成的候选审查。");
+  } catch (error) {
+    setNotice("error", normalizeHostError(error).message);
+  } finally {
+    state.candidateBusy = null;
+    renderWorkspace();
+  }
+}
+
 async function toggleVersions() {
   state.versionsOpen = !state.versionsOpen;
   if (state.versionsOpen) {
     state.providersOpen = false;
     state.stylesOpen = false;
+    state.candidatesOpen = false;
   }
   if (state.versionsOpen) await loadVersionHistory();
   else renderWorkspace();
@@ -1606,6 +1864,7 @@ async function toggleProviders() {
   if (state.providersOpen) {
     state.versionsOpen = false;
     state.stylesOpen = false;
+    state.candidatesOpen = false;
     await refreshProviderSecretStatus();
   }
   renderWorkspace();
@@ -1616,6 +1875,7 @@ function toggleStyles() {
   if (state.stylesOpen) {
     state.providersOpen = false;
     state.versionsOpen = false;
+    state.candidatesOpen = false;
   }
   renderWorkspace();
 }
@@ -2132,6 +2392,9 @@ async function closeProject() {
     state.selectedDocumentId = null;
     state.versionHistory = null;
     state.versionsOpen = false;
+    state.candidatesOpen = false;
+    state.reviewCandidates = [];
+    state.candidateBusy = null;
     state.providersOpen = false;
     state.stylesOpen = false;
     state.styleSamples = [];

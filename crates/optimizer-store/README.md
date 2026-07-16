@@ -21,6 +21,8 @@
 - 摘要完成必须匹配该作用域当前排队的 source Commit，生成期间再次失效会以乐观冲突拒绝陈旧写回；
 - ready summary 读取以“不存在同作用域失效项”为必要条件；旧记录可留作派生缓存历史，但不能被 Host 作为当前 Context 返回；
 - schema v6 的项目事实/约束资产，显式区分 `canonical/archived/rejected`、authority、敏感级别与硬/软约束，并以 revision 拒绝并发状态覆盖；
+- schema v7 的不可变 `patch_candidate_branch` 映射，把一个 Proposal 绑定到唯一 branch、Commit 与物化 snapshot；候选分支创建不会移动主 HEAD、改写当前 Block/Document revision 或写入 edit journal；
+- review candidate 列表只读取有界元数据，完整 artifact payload 由 Host 在打开单个候选时按需读取并校验；候选快照从 `latest_snapshot` 和用户检查点列表中排除，但仍参与外键与 Store invariant 校验；
 
 恢复支持跨父子章节创建、改名、同级排序、缩进/移出、子树软归档和复活；恢复仍创建新的 Commit，不改写旧节点。归档章节不参与活动 FTS、工作区、导出或摘要队列，恢复时其活动 Block 会重新失效以避免漏掉未完成摘要。
 

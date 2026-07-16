@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   credentialReference,
   defaultProviderSettings,
+  hydrateDesktopReviewCandidate,
   providerConfiguration,
   providerRequiresCredential,
   planDesktopReviewDecisions,
@@ -351,6 +352,43 @@ test("runs Context Compiler to host stream to persisted patch proposal without p
   assert.equal(execution.result.kind, "patch_proposal");
   assert.equal(execution.result.proposal.hunks.length, 1);
   assert.equal(execution.result.proposal.hunks[0].replacement, "你好，世界");
+  const persistedSession = {
+    proposalId: execution.result.proposal.id,
+    proposalHash: execution.result.proposal.proposalHash,
+    revision: 1,
+    status: "ready",
+    decisions: Object.fromEntries(
+      execution.result.proposal.hunks.map((hunk) => [hunk.id, "accepted"]),
+    ),
+  };
+  const hydrated = await hydrateDesktopReviewCandidate({
+    schemaVersion: 1,
+    summary: { candidateBranch: null },
+    proposal: execution.result.proposal,
+    session: persistedSession,
+  });
+  assert.deepEqual(hydrated.session, persistedSession);
+  await assert.rejects(
+    hydrateDesktopReviewCandidate({
+      schemaVersion: 1,
+      summary: { candidateBranch: null },
+      proposal: execution.result.proposal,
+      session: {
+        ...persistedSession,
+        proposalHash: "sha256:" + "f".repeat(64),
+      },
+    }),
+    TypeError,
+  );
+  await assert.rejects(
+    hydrateDesktopReviewCandidate({
+      schemaVersion: 1,
+      summary: { candidateBranch: null },
+      proposal: execution.result.proposal,
+      session: { ...persistedSession, status: "review" },
+    }),
+    TypeError,
+  );
   assert.deepEqual(hostCalls.slice(0, 3), [
     "get_operation_context",
     "authorize_model_request",

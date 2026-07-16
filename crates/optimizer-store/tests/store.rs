@@ -4,13 +4,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use optimizer_store::{
     AppendReviewEvent, ApplyBlockEdit, ApplyDocumentBatch, CURRENT_SCHEMA_VERSION,
-    CreateDocumentWithBlock, CreateKnowledgeItem, CreateSnapshot, CreateStyleSample,
-    DocumentMutation, MINIMUM_SQLITE_VERSION, ModelUsageRecord, NewContextPacket,
-    NewOperationArtifact, NewOperationLifecycleEvent, NewOperationRun, OperationArtifactKind,
-    OperationFailureRecord, OperationState, OptimizerStore, PersistOperationBundle, ProjectSeed,
-    PutSummaryRecord, RestoreSnapshot, ReviewDecision, ReviewEventKind, ReviewSessionStatus,
-    SeedBlock, SeedDocument, SetKnowledgeItemStatus, SetStyleSampleStatus, StoreError,
-    encode_snapshot,
+    CreateDocumentWithBlock, CreateKnowledgeItem, CreateReviewCandidateBranch, CreateSnapshot,
+    CreateStyleSample, DocumentMutation, MINIMUM_SQLITE_VERSION, ModelUsageRecord,
+    NewContextPacket, NewOperationArtifact, NewOperationLifecycleEvent, NewOperationRun,
+    OperationArtifactKind, OperationFailureRecord, OperationState, OptimizerStore,
+    PersistOperationBundle, ProjectSeed, PutSummaryRecord, RestoreSnapshot, ReviewDecision,
+    ReviewEventKind, ReviewSessionStatus, SeedBlock, SeedDocument, SetKnowledgeItemStatus,
+    SetStyleSampleStatus, StoreError, encode_snapshot,
 };
 
 struct TempDatabase {
@@ -151,6 +151,39 @@ fn operation_bundle(run_id: &str, packet_id: &str, proposal_id: &str) -> Persist
             created_at: "2026-07-15T00:01:00.000Z".into(),
         }),
     }
+}
+
+fn candidate_operation_bundle() -> PersistOperationBundle {
+    let mut bundle = operation_bundle("run-candidate", "context-candidate", "proposal-candidate");
+    bundle.artifact.as_mut().unwrap().payload_json = r#"{
+      "schemaVersion": 2,
+      "id": "proposal-candidate",
+      "operationRunId": "run-candidate",
+      "baseCommitId": "commit-initial",
+      "target": {
+        "documentId": "document-1",
+        "blockId": "block-1",
+        "baseRevision": 0,
+        "baseHash": "sha256:block-initial",
+        "from": {"blockId": "block-1", "offset": 0},
+        "to": {"blockId": "block-1", "offset": 7}
+      },
+      "hunks": [{
+        "id": "candidate-hunk-1",
+        "from": {"blockId": "block-1", "offset": 0},
+        "to": {"blockId": "block-1", "offset": 7},
+        "original": "station",
+        "replacement": "harbor",
+        "granularity": "token"
+      }],
+      "summary": "Replace the location",
+      "warnings": [],
+      "status": "review",
+      "createdAt": "2026-07-15T00:01:00.000Z",
+      "proposalHash": "sha256:proposal-candidate"
+    }"#
+    .into();
+    bundle
 }
 
 fn open_seeded(path: &Path) -> OptimizerStore {
@@ -1136,6 +1169,140 @@ fn persists_operation_context_usage_events_and_patch_artifact_atomically() {
     assert_eq!(review.revision, 0);
     assert_eq!(review.status, ReviewSessionStatus::Review);
     store.verify_invariants().unwrap();
+}
+
+#[test]
+fn lists_persistent_review_candidates_and_creates_a_snapshot_backed_branch() {
+    let temp = TempDatabase::new();
+    let mut store = open_seeded(&temp.database);
+    store
+        .persist_operation_bundle(&candidate_operation_bundle())
+        .unwrap();
+    store
+        .append_review_event(&AppendReviewEvent {
+            id: "candidate-decision-1".into(),
+            proposal_id: "proposal-candidate".into(),
+            expected_revision: 0,
+            expected_status: ReviewSessionStatus::Review,
+            kind: ReviewEventKind::Decision,
+            next_status: ReviewSessionStatus::Ready,
+            hunk_id: Some("candidate-hunk-1".into()),
+            decision: Some(ReviewDecision::Accepted),
+            payload_json: None,
+            occurred_at: "2026-07-15T00:02:00.000Z".into(),
+        })
+        .unwrap();
+
+    let candidates = store.list_review_candidates("project-1", 100).unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].proposal_id, "proposal-candidate");
+    assert_eq!(candidates[0].target_block_id, "block-1");
+    assert_eq!(candidates[0].hunk_count, 1);
+    assert_eq!(
+        candidates[0].summary.as_deref(),
+        Some("Replace the location")
+    );
+    assert_eq!(candidates[0].status, ReviewSessionStatus::Ready);
+    assert!(candidates[0].candidate_branch.is_none());
+
+    let branch = store
+        .create_review_candidate_branch(&CreateReviewCandidateBranch {
+            proposal_id: "proposal-candidate".into(),
+            expected_review_revision: 1,
+            project_id: "project-1".into(),
+            expected_project_head_commit_id: "commit-initial".into(),
+            branch_id: "branch-candidate".into(),
+            branch_name: "AI 候选：港口".into(),
+            commit_id: "commit-candidate".into(),
+            snapshot_id: "snapshot-candidate".into(),
+            target_document_id: "document-1".into(),
+            target_block_id: "block-1".into(),
+            expected_block_revision: 0,
+            expected_block_hash: "sha256:block-initial".into(),
+            new_content_json: r#"{"type":"paragraph","text":"harbor platform"}"#.into(),
+            new_plain_text: "harbor platform".into(),
+            new_content_hash: "sha256:block-candidate".into(),
+            new_root_hash: "sha256:root-candidate".into(),
+            occurred_at: "2026-07-15T00:03:00.000Z".into(),
+        })
+        .unwrap();
+    assert_eq!(branch.branch_id, "branch-candidate");
+    assert_eq!(
+        store.get_project("project-1").unwrap().head_commit_id,
+        "commit-initial"
+    );
+    assert_eq!(
+        store.get_block("block-1").unwrap().plain_text,
+        "station platform"
+    );
+    assert_eq!(
+        store
+            .get_review_session("proposal-candidate")
+            .unwrap()
+            .status,
+        ReviewSessionStatus::Ready
+    );
+    assert_eq!(
+        store.get_branch("branch-candidate").unwrap().head_commit_id,
+        "commit-candidate"
+    );
+    let snapshot_record = store.get_snapshot("snapshot-candidate").unwrap();
+    let snapshot = store.decode_snapshot_record(&snapshot_record).unwrap();
+    assert_eq!(snapshot.commit.id, "commit-candidate");
+    assert_eq!(
+        snapshot
+            .blocks
+            .iter()
+            .find(|block| block.id == "block-1")
+            .unwrap()
+            .plain_text,
+        "harbor platform"
+    );
+    let candidate = store
+        .get_review_candidate_summary("proposal-candidate")
+        .unwrap();
+    assert_eq!(
+        candidate
+            .candidate_branch
+            .as_ref()
+            .map(|value| value.branch_name.as_str()),
+        Some("AI 候选：港口")
+    );
+    assert!(matches!(
+        store.create_review_candidate_branch(&CreateReviewCandidateBranch {
+            proposal_id: "proposal-candidate".into(),
+            expected_review_revision: 1,
+            project_id: "project-1".into(),
+            expected_project_head_commit_id: "commit-initial".into(),
+            branch_id: "branch-candidate-2".into(),
+            branch_name: "duplicate".into(),
+            commit_id: "commit-candidate-2".into(),
+            snapshot_id: "snapshot-candidate-2".into(),
+            target_document_id: "document-1".into(),
+            target_block_id: "block-1".into(),
+            expected_block_revision: 0,
+            expected_block_hash: "sha256:block-initial".into(),
+            new_content_json: r#"{"type":"paragraph","text":"harbor platform"}"#.into(),
+            new_plain_text: "harbor platform".into(),
+            new_content_hash: "sha256:block-candidate".into(),
+            new_root_hash: "sha256:root-candidate".into(),
+            occurred_at: "2026-07-15T00:04:00.000Z".into(),
+        }),
+        Err(StoreError::Validation(_))
+    ));
+    store.verify_invariants().unwrap();
+    drop(store);
+
+    let reopened = OptimizerStore::open(&temp.database).unwrap();
+    assert_eq!(
+        reopened
+            .list_review_candidates("project-1", 100)
+            .unwrap()
+            .first()
+            .and_then(|value| value.candidate_branch.as_ref())
+            .map(|value| value.commit_id.as_str()),
+        Some("commit-candidate")
+    );
 }
 
 #[test]

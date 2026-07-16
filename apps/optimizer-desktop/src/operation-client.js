@@ -220,6 +220,50 @@ export async function createDesktopReview(proposal) {
   return createPatchReview(proposal, browserHasher());
 }
 
+export async function hydrateDesktopReviewCandidate(detail) {
+  if (!detail || detail.schemaVersion !== 1 || !detail.proposal || !detail.session) {
+    throw new TypeError("Review candidate detail is invalid");
+  }
+  const base = await createPatchReview(detail.proposal, browserHasher());
+  const session = detail.session;
+  const decisions = session.decisions;
+  const decisionKeys = decisions && typeof decisions === "object" && !Array.isArray(decisions)
+    ? Object.keys(decisions)
+    : [];
+  const expectedKeys = Object.keys(base.decisions);
+  if (
+    session.proposalId !== base.proposalId
+    || session.proposalHash !== base.proposalHash
+    || !Number.isSafeInteger(session.revision)
+    || session.revision < 0
+    || !["review", "ready", "applied", "rejected", "conflicted"].includes(session.status)
+    || decisionKeys.length !== expectedKeys.length
+    || expectedKeys.some((id) => !Object.hasOwn(decisions, id))
+    || decisionKeys.some((id) => !Object.hasOwn(base.decisions, id))
+    || Object.values(decisions).some((decision) => !["pending", "accepted", "rejected"].includes(decision))
+  ) {
+    throw new TypeError("Review candidate session is not bound to the immutable proposal");
+  }
+  const allDecided = Object.values(decisions).every((decision) => decision !== "pending");
+  if (
+    (session.status === "ready" && !allDecided)
+    || (session.status === "review" && allDecided)
+  ) {
+    throw new TypeError("Review candidate status disagrees with its decisions");
+  }
+  return {
+    proposal: detail.proposal,
+    session: {
+      proposalId: session.proposalId,
+      proposalHash: session.proposalHash,
+      revision: session.revision,
+      status: session.status,
+      decisions: { ...decisions },
+    },
+    candidateBranch: detail.summary?.candidateBranch ?? null,
+  };
+}
+
 export function decideDesktopHunk(proposal, session, hunkId, decision) {
   return decidePatchHunk(proposal, session, {
     hunkId,

@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use optimizer_host::{
     ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, ArchivedDocument,
     CancelModelRequestResponse, ChangeDocumentDepthSpec, CheckpointSummary, ConfirmedContextPacket,
-    CreateDocumentResponse, CreateDocumentSpec, CreateKnowledgeItemSpec, CreateStyleSampleSpec,
+    CreateDocumentResponse, CreateDocumentSpec, CreateKnowledgeItemSpec,
+    CreateReviewCandidateBranchResponse, CreateReviewCandidateBranchSpec, CreateStyleSampleSpec,
     DocumentDepthDirection, DocumentMoveDirection, DocumentMutationResponse,
     ExportMarkdownResponse, KnowledgeContextCandidate, KnowledgeContextSpec, KnowledgeItem,
     ModelAuthorizationScope, ModelExecutionHost, ModelExecutionRequest, ModelExecutionSummary,
@@ -13,11 +14,11 @@ use optimizer_host::{
     OperationContextCandidate, OperationContextSpec, PersistOperationResponse,
     PersistReviewResponse, ProjectInfo, ProjectPackageError, ProjectWorkspace, RecentProject,
     RecentProjectError, RecentProjectRegistry, RefreshSummariesSpec, RenameDocumentSpec,
-    ReorderDocumentSpec, RestoreCheckpointResponse, RestoreCheckpointSpec, SaveBlockResponse,
-    SaveBlockSpec, SecretReference, SecretStore, SecretStoreError, SecretValue,
-    SetDocumentArchivedSpec, SetKnowledgeItemStatusSpec, SetStyleSampleStatusSpec, StyleSample,
-    SummaryContextCandidate, SummaryContextSpec, SummaryInvalidation, SummaryRefreshReport,
-    VersionHistory, WorkspaceCommandError,
+    ReorderDocumentSpec, RestoreCheckpointResponse, RestoreCheckpointSpec, ReviewCandidateDetail,
+    ReviewCandidateSummary, SaveBlockResponse, SaveBlockSpec, SecretReference, SecretStore,
+    SecretStoreError, SecretValue, SetDocumentArchivedSpec, SetKnowledgeItemStatusSpec,
+    SetStyleSampleStatusSpec, StyleSample, SummaryContextCandidate, SummaryContextSpec,
+    SummaryInvalidation, SummaryRefreshReport, VersionHistory, WorkspaceCommandError,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Runtime, State, ipc::Channel};
@@ -420,6 +421,37 @@ impl DesktopState {
             .apply_reviewed_proposal(&ApplyReviewedProposalSpec {
                 proposal_id: input.proposal_id,
                 expected_review_revision: input.expected_review_revision,
+            })
+            .map_err(CommandError::from)
+    }
+
+    pub fn list_review_candidates(&self) -> CommandResult<Vec<ReviewCandidateSummary>> {
+        self.current_project()?
+            .review_candidates()
+            .map_err(CommandError::from)
+    }
+
+    pub fn load_review_candidate(
+        &self,
+        input: ReviewCandidateRequest,
+    ) -> CommandResult<ReviewCandidateDetail> {
+        input.validate()?;
+        self.current_project()?
+            .review_candidate(&input.proposal_id)
+            .map_err(CommandError::from)
+    }
+
+    pub fn create_review_candidate_branch(
+        &self,
+        input: CreateReviewCandidateBranchRequest,
+    ) -> CommandResult<CreateReviewCandidateBranchResponse> {
+        input.validate()?;
+        let mut project = self.current_project()?;
+        project
+            .create_review_candidate_branch(&CreateReviewCandidateBranchSpec {
+                proposal_id: input.proposal_id,
+                expected_review_revision: input.expected_review_revision,
+                branch_name: input.branch_name,
             })
             .map_err(CommandError::from)
     }
@@ -1231,6 +1263,53 @@ impl ApplyReviewedProposalRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReviewCandidateRequest {
+    pub schema_version: u32,
+    pub proposal_id: String,
+}
+
+impl ReviewCandidateRequest {
+    fn validate(&self) -> CommandResult<()> {
+        validate_request_schema(self.schema_version)?;
+        if !is_safe_binding_id(&self.proposal_id) {
+            return Err(CommandError::basic(
+                "REVIEW_CANDIDATE_INVALID",
+                "Review candidate proposal id is invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateReviewCandidateBranchRequest {
+    pub schema_version: u32,
+    pub proposal_id: String,
+    pub expected_review_revision: i64,
+    pub branch_name: String,
+}
+
+impl CreateReviewCandidateBranchRequest {
+    fn validate(&self) -> CommandResult<()> {
+        validate_request_schema(self.schema_version)?;
+        if !is_safe_binding_id(&self.proposal_id)
+            || self.expected_review_revision < 0
+            || self.branch_name.trim().is_empty()
+            || self.branch_name.trim() != self.branch_name
+            || self.branch_name.chars().count() > 120
+        {
+            return Err(CommandError::basic(
+                "REVIEW_CANDIDATE_BRANCH_INVALID",
+                "Review candidate branch binding or name is invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RestoreCheckpointRequest {
     pub schema_version: u32,
     pub checkpoint_id: String,
@@ -1508,6 +1587,9 @@ pub fn attach<R: Runtime>(builder: tauri::Builder<R>, state: DesktopState) -> ta
             get_operation_context,
             save_block,
             apply_reviewed_proposal,
+            list_review_candidates,
+            load_review_candidate,
+            create_review_candidate_branch,
             get_version_history,
             create_checkpoint,
             restore_checkpoint,
@@ -1725,6 +1807,32 @@ async fn apply_reviewed_proposal(
     state: State<'_, DesktopState>,
 ) -> CommandResult<ApplyReviewedProposalResponse> {
     spawn_host_task(state, move |state| state.apply_reviewed_proposal(input)).await
+}
+
+#[tauri::command]
+async fn list_review_candidates(
+    state: State<'_, DesktopState>,
+) -> CommandResult<Vec<ReviewCandidateSummary>> {
+    spawn_host_task(state, DesktopState::list_review_candidates).await
+}
+
+#[tauri::command]
+async fn load_review_candidate(
+    input: ReviewCandidateRequest,
+    state: State<'_, DesktopState>,
+) -> CommandResult<ReviewCandidateDetail> {
+    spawn_host_task(state, move |state| state.load_review_candidate(input)).await
+}
+
+#[tauri::command]
+async fn create_review_candidate_branch(
+    input: CreateReviewCandidateBranchRequest,
+    state: State<'_, DesktopState>,
+) -> CommandResult<CreateReviewCandidateBranchResponse> {
+    spawn_host_task(state, move |state| {
+        state.create_review_candidate_branch(input)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -3093,6 +3201,8 @@ mod tests {
                 "allow-version-write",
                 "allow-operation-write",
                 "allow-operation-audit-read",
+                "allow-review-candidate-read",
+                "allow-review-candidate-branch",
                 "allow-provider-secret-manage",
                 "allow-model-execution"
             ])
