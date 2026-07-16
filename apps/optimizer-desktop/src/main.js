@@ -23,6 +23,7 @@ import {
 
 const app = document.querySelector("#app");
 const PROVIDER_SETTINGS_KEY = "optimizer.provider-settings.v1";
+const SUMMARY_REFRESH_DEBOUNCE_MS = 800;
 const state = {
   session: null,
   workspace: null,
@@ -33,6 +34,9 @@ const state = {
   styleSamples: [],
   archivedDocuments: [],
   summaryInvalidations: [],
+  summaryRefreshTimer: null,
+  summaryRefreshBusy: false,
+  summaryRefreshFailures: 0,
   recentProjects: [],
   recentProjectBusy: null,
   selectedProviderId: "deepseek",
@@ -368,6 +372,7 @@ async function loadWorkspace() {
   state.selectedDocumentId = selectInitialDocument(state.workspace, preferred);
   await refreshProviderSecretStatus();
   renderWorkspace();
+  scheduleSummaryRefresh();
 }
 
 function renderWorkspace() {
@@ -385,8 +390,9 @@ function renderWorkspace() {
       element("span", { className: "save-status", text: state.saveStatus, attrs: { id: "save-status" } }),
       element("span", {
         className: "summary-status",
-        text: `摘要待更新 ${state.summaryInvalidations.length}`,
+        text: summaryStatusLabel(),
         title: "正文或结构变化后合并产生的分层摘要失效项",
+        attrs: { id: "summary-status" },
       }),
       button("导入 MD", "ghost-button", importMarkdown),
       button("导出 MD", "ghost-button", exportMarkdown),
@@ -573,6 +579,7 @@ async function commitDocumentMutation(command, input, preferredDocumentId, succe
     state.aiReview = null;
     setNotice("success", successMessage);
     renderWorkspace();
+    scheduleSummaryRefresh();
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
     await loadWorkspace().catch(() => renderWorkspace());
@@ -642,6 +649,7 @@ async function createDocument(parentDocumentId = null) {
     });
     state.summaryInvalidations = await invokeHost("list_summary_invalidations");
     applyCreatedDocument(created, `已创建章节“${created.document.title}”并记录版本。`);
+    scheduleSummaryRefresh();
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
     await loadWorkspace().catch(() => renderWorkspace());
@@ -690,6 +698,7 @@ function importMarkdown() {
       });
       state.summaryInvalidations = await invokeHost("list_summary_invalidations");
       applyCreatedDocument(created, `已导入 ${file.name}；原始 Markdown 已作为版本化正文保存。`);
+      scheduleSummaryRefresh();
     } catch (error) {
       setNotice("error", normalizeHostError(error).message);
       renderWorkspace();
@@ -897,6 +906,7 @@ async function runAiOperation(operationType) {
       to,
       operationType,
       styleSamples: state.styleSamples,
+      loadSummaryContext: (input) => invokeHost("get_summary_context", { input }),
       signal: controller.signal,
       onProgress: updateAiProgress,
       confirmContext: confirmCompiledContext,
@@ -1199,6 +1209,7 @@ async function applyCurrentReview() {
     state.aiReview = null;
     state.versionHistory = null;
     setNotice("success", `已应用 ${response.acceptedHunks} 个修改项，并创建可审计的 ai_accept Commit。`);
+    scheduleSummaryRefresh();
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
     if (state.aiReview) state.aiReview.busy = false;
@@ -1210,6 +1221,59 @@ function updateSaveStatus(status) {
   state.saveStatus = status;
   const badge = document.querySelector("#save-status");
   if (badge) badge.textContent = status;
+}
+
+function summaryStatusLabel() {
+  if (state.summaryRefreshBusy) return `摘要更新中 · ${state.summaryInvalidations.length}`;
+  return state.summaryInvalidations.length
+    ? `摘要待更新 ${state.summaryInvalidations.length}`
+    : "摘要已就绪";
+}
+
+function updateSummaryStatus() {
+  const badge = document.querySelector("#summary-status");
+  if (badge) badge.textContent = summaryStatusLabel();
+}
+
+function scheduleSummaryRefresh(delay = SUMMARY_REFRESH_DEBOUNCE_MS) {
+  clearTimeout(state.summaryRefreshTimer);
+  state.summaryRefreshTimer = null;
+  if (!state.session?.isOpen || !state.workspace || !state.summaryInvalidations.length || state.summaryRefreshBusy) {
+    updateSummaryStatus();
+    return;
+  }
+  state.summaryRefreshTimer = setTimeout(runSummaryRefresh, delay);
+}
+
+async function runSummaryRefresh() {
+  state.summaryRefreshTimer = null;
+  if (!state.session?.isOpen || !state.workspace || state.summaryRefreshBusy) return;
+  state.summaryRefreshBusy = true;
+  updateSummaryStatus();
+  let failed = false;
+  try {
+    const report = await invokeHost("refresh_summaries", {
+      input: { schemaVersion: 1, maxItems: 12 },
+    });
+    state.summaryInvalidations = await invokeHost("list_summary_invalidations");
+    if (report.remaining !== state.summaryInvalidations.length) {
+      throw new Error("Host summary refresh report does not match the invalidation queue");
+    }
+    state.summaryRefreshFailures = 0;
+  } catch (error) {
+    failed = true;
+    state.summaryRefreshFailures += 1;
+    console.warn("Background summary refresh failed", normalizeHostError(error));
+  } finally {
+    state.summaryRefreshBusy = false;
+    updateSummaryStatus();
+    if (state.summaryInvalidations.length) {
+      const retryDelay = failed
+        ? Math.min(30_000, 1_000 * (2 ** Math.min(state.summaryRefreshFailures, 5)))
+        : 250;
+      scheduleSummaryRefresh(retryDelay);
+    }
+  }
 }
 
 function queueSave(blockId, plainText, immediate = false) {
@@ -1247,6 +1311,7 @@ function flushBlock(blockId) {
         project: { ...state.session.project, headCommitId: response.headCommitId, revision: response.projectRevision },
       };
       updateSaveStatus("已保存");
+      scheduleSummaryRefresh();
     })
     .catch(async (error) => {
       const normalized = normalizeHostError(error);
@@ -1711,6 +1776,7 @@ async function restoreCheckpoint(checkpointId) {
     state.versionHistory = null;
     state.conflictDraft = null;
     setNotice("success", `已恢复 ${response.changedBlocks} 个 Block，并创建新的恢复提交。`);
+    scheduleSummaryRefresh();
     await loadVersionHistory();
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
@@ -1720,6 +1786,8 @@ async function restoreCheckpoint(checkpointId) {
 
 async function closeProject() {
   try {
+    clearTimeout(state.summaryRefreshTimer);
+    state.summaryRefreshTimer = null;
     state.aiRunning?.controller.abort();
     await flushAll({ allowConflict: true });
     if (state.conflictDraft && !window.confirm("仍有冲突草稿未处理，确定关闭项目吗？")) return;
@@ -1733,6 +1801,10 @@ async function closeProject() {
     state.styleSamples = [];
     state.archivedDocuments = [];
     state.summaryInvalidations = [];
+    clearTimeout(state.summaryRefreshTimer);
+    state.summaryRefreshTimer = null;
+    state.summaryRefreshBusy = false;
+    state.summaryRefreshFailures = 0;
     state.recentProjectBusy = null;
     state.conflictDraft = null;
     state.aiRunning = null;

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -25,6 +26,74 @@ test("builds fixed host configurations for cloud and local providers", () => {
   assert.equal(providerRequiresCredential("deepseek"), true);
   assert.equal(providerRequiresCredential("ollama"), false);
   assert.equal(settings.ollama.defaultModel, "qwen3:8b");
+});
+
+test("rejects tampered host summary context before authorization", async () => {
+  const providerSettings = defaultProviderSettings().deepseek;
+  providerSettings.enabled = true;
+  providerSettings.credentialExists = true;
+  const block = {
+    id: "block-tampered",
+    documentId: "document-tampered",
+    kind: "paragraph",
+    orderKey: "a0",
+    content: { type: "paragraph", content: [] },
+    plainText: "目标正文",
+    contentHash: `sha256:${"0".repeat(64)}`,
+    revision: 0,
+    locked: false,
+  };
+  const workspace = {
+    schemaVersion: 1,
+    projectId: "project-tampered",
+    mainBranchId: "branch-tampered",
+    headCommitId: "commit-tampered",
+    revision: 0,
+    documents: [{
+      id: block.documentId,
+      parentId: null,
+      kind: "chapter",
+      title: "正文",
+      orderKey: "a0",
+      revision: 0,
+    }],
+    blocks: [block],
+  };
+  const hostCalls = [];
+  await assert.rejects(
+    runDesktopOperation({
+      invokeHost: async (command) => {
+        hostCalls.push(command);
+        if (command === "persist_operation_bundle") {
+          return { schemaVersion: 1, state: "failed" };
+        }
+        throw new Error(`Unexpected host command: ${command}`);
+      },
+      createChannel: () => ({ onmessage: null }),
+      providerSettings,
+      workspace,
+      projectTitle: "测试项目",
+      block,
+      from: 0,
+      to: block.plainText.length,
+      operationType: "polish",
+      loadSummaryContext: async () => [{
+        id: "summary-tampered",
+        sourceRef: "summary:project:project-tampered@commit-tampered",
+        sourceHash: `sha256:${"f".repeat(64)}`,
+        tier: "L3_KNOWLEDGE",
+        status: "canonical",
+        authority: "source_derived",
+        sensitivity: "local_sensitive",
+        renderMode: "summary",
+        reasonCodes: ["PROJECT_SUMMARY"],
+        content: "已被篡改的摘要",
+      }],
+    }),
+  );
+  assert.deepEqual(hostCalls, ["persist_operation_bundle"]);
+  assert.equal(hostCalls.includes("authorize_model_request"), false);
+  assert.equal(hostCalls.includes("execute_authorized_model_stream"), false);
 });
 
 test("runs Context Compiler to host stream to persisted patch proposal without plaintext secrets", async () => {
@@ -149,6 +218,27 @@ test("runs Context Compiler to host stream to persisted patch proposal without p
         sensitivity: "never_send",
       },
     ],
+    loadSummaryContext: async (binding) => {
+      hostCalls.push("get_summary_context");
+      assert.equal(binding.baseCommitId, workspace.headCommitId);
+      assert.equal(binding.targetBlockId, block.id);
+      const content = "项目摘要：这是宿主生成并绑定到当前 Commit 的摘要。";
+      return [{
+        id: "summary-project-1",
+        sourceRef: "summary:project:project-1@commit-1",
+        sourceHash: `sha256:${createHash("sha256").update(content).digest("hex")}`,
+        sourceCommitId: "commit-1",
+        tier: "L3_KNOWLEDGE",
+        status: "canonical",
+        authority: "source_derived",
+        sensitivity: "local_sensitive",
+        renderMode: "summary",
+        reasonCodes: ["PROJECT_SUMMARY"],
+        content,
+        revision: 0,
+        generatedAt: "2026-07-15T00:00:00Z",
+      }];
+    },
     confirmContext: async (packet) => {
       confirmedContext = packet;
     },
@@ -157,6 +247,7 @@ test("runs Context Compiler to host stream to persisted patch proposal without p
   assert.equal(confirmedContext.operationIntentId, execution.intent.id);
   assert.ok(confirmedContext.items.length >= 1);
   assert.ok(confirmedContext.items.some((item) => item.sourceRef === "style:style-canonical"));
+  assert.ok(confirmedContext.items.some((item) => item.sourceRef === "summary:project:project-1@commit-1"));
   assert.deepEqual(
     Object.fromEntries(confirmedContext.exclusions
       .filter((item) => item.sourceRef.startsWith("style:"))
@@ -169,7 +260,8 @@ test("runs Context Compiler to host stream to persisted patch proposal without p
   assert.equal(execution.result.kind, "patch_proposal");
   assert.equal(execution.result.proposal.hunks.length, 1);
   assert.equal(execution.result.proposal.hunks[0].replacement, "你好，世界");
-  assert.deepEqual(hostCalls.slice(0, 2), [
+  assert.deepEqual(hostCalls.slice(0, 3), [
+    "get_summary_context",
     "authorize_model_request",
     "execute_authorized_model_stream",
   ]);

@@ -18,6 +18,7 @@ Rust 宿主安全边界与跨语言命令适配层。
 - `ModelExecutionHost` 通过固定官方 HTTPS 端点支持 DeepSeek、Qwen、Kimi、MiniMax，统一流事件、用量、取消、超时和安全错误；
 - Windows 原生传输使用 WinHTTP，活动 request handle 可由取消/超时关闭，Authorization 临时缓冲发送后清零；
 - `apply_reviewed_proposal` 重验 Proposal hash、UTF-16 anchor、目标基线、hunk 与审查决策，并原子写入正文和 Operation/Review 终态。
+- `summary_worker` 按 Block、Document、Project 顺序消费当前项目队列，使用确定性本地提取生成器并记录 source hash/Commit/provider/model；目标绑定的 Context 读取只返回无失效项的当前章节、祖先和项目摘要。
 
 ## `.optimizer` 项目包
 
@@ -32,6 +33,8 @@ Rust 宿主安全边界与跨语言命令适配层。
 ## 工作区命令
 
 `OpenedProject` 现在提供树形结构化工作区读取、顶层/子章节创建、同级移动、缩进/移出、子树归档、单 Block 乐观保存、检查点创建、版本历史和检查点恢复。Host 生成持久化 ID/时间戳与内容/根哈希；Store 同时校验 Block revision/hash、Document revision 和项目 revision/HEAD，并在一个事务中更新正文、结构、编辑日志、Commit DAG 与分支/项目 HEAD。恢复始终形成新 Commit。
+
+`OpenedProject::refresh_summaries` 是派生缓存 worker 的唯一写入口，批量上限为 64 且不调用网络；`OpenedProject::summary_context` 重新校验项目 HEAD、目标 Block revision/hash 和活动父链后，只读取 ready summary。当前 `optimizer-local/extractive-summary-v1` 作为零费用基线；未来模型生成器必须复用相同的乐观写回协议，并增加独立的费用与隐私授权，不能把通用 Provider 请求直接藏在后台任务中。
 
 Tauri Adapter 已在 `apps/optimizer-desktop` 注册最小权限 commands/capabilities。Windows Provider 网络执行已经完全位于宿主；macOS Keychain/Linux Secret Service 与对应原生 HTTP 后端、宿主 Operation capability 和 WASM 插件资源限制仍属于后续能力。
 

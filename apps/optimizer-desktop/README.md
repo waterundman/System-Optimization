@@ -40,6 +40,8 @@ Ollama 是无凭据的显式本地 Provider：宿主只连接 `127.0.0.1:11434/v
 
 - `get_project_workspace` 返回文档树、结构化 Block、稳定 hash/revision 和当前 HEAD；
 - `list_summary_invalidations` 只返回项目/章节/Block 摘要失效元数据；页面显示待更新数量，不接触摘要生成凭据、正文或 SQLite；
+- `refresh_summaries` 只触发 Host 内置的本地提取式 worker，最多处理 64 项且不发起网络请求；页面默认按 12 项后台批处理，失败指数退避；
+- `get_summary_context` 必须绑定当前 HEAD、目标 Block revision 和 content hash，只返回没有失效项的当前章节/祖先/项目摘要候选；
 - `save_block` 使用 Block 与项目 HEAD 双层乐观并发，成功时原子生成 EditJournal 与 autosave Commit；
 - `create_checkpoint` 为当前 HEAD 建立带 checksum 的物化快照；
 - `get_version_history` 只返回 Commit/检查点元数据；
@@ -51,7 +53,7 @@ Ollama 是无凭据的显式本地 Provider：宿主只连接 `127.0.0.1:11434/v
 
 文档侧栏按 `parentId + orderKey` 渲染真正的父子树，可创建顶层或子章节、在同一父节点内移动、缩进到上一兄弟节点、移出到上一层，并重命名。所有命令绑定 Document revision 与项目 HEAD；归档父节点会原子归档整个活动子树，恢复子节点前必须先恢复父节点。原生文件选择器可把最大 2 MiB 的 Markdown/Text 文件导入为顶层章节；宿主不接受任意读取路径。导出由独立 `allow-project-export` permission 写入项目包 `exports/`，采用临时文件加原子 rename。检查点恢复可恢复父子关系、同级顺序与归档状态。
 
-摘要状态读取使用独立的 `allow-summary-status-read` permission。正文自动保存、AI 接受、章节生命周期与检查点恢复会在对应 Store 事务中合并更新作用域失效项；页面只在权威写入完成后刷新计数。后台摘要生成与队列消费保留在 Rust 信任边界，不开放给 WebView。
+摘要状态读取使用独立的 `allow-summary-status-read` permission。正文自动保存、AI 接受、章节生命周期与检查点恢复会在对应 Store 事务中合并更新作用域失效项；页面只在权威写入完成后刷新计数。`allow-summary-worker` 仅允许页面触发 Host 内置的零外发 worker，以及按当前目标领取已就绪摘要；正文读取、作用域构造、source hash、写回和队列消费仍保留在 Rust 信任边界。返回的摘要内容在加入 Context Compiler 前由页面复算 SHA-256，并完整展示在发送确认弹窗中。
 
 ## 前端与运行
 

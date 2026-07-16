@@ -10,6 +10,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
+use crate::summary_worker::{refresh_summaries, summary_context};
 use crate::workspace_commands::{
     apply_reviewed_proposal, block_content_hash, change_document_depth, create_checkpoint,
     create_document, create_style_sample, list_archived_documents, list_style_samples,
@@ -21,9 +22,10 @@ use crate::{
     ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, ArchivedDocument,
     ChangeDocumentDepthSpec, CheckpointSummary, CreateDocumentResponse, CreateDocumentSpec,
     CreateStyleSampleSpec, DocumentMutationResponse, HostError, OperationCommandHost, ProjectRoot,
-    ProjectWorkspace, RenameDocumentSpec, ReorderDocumentSpec, RestoreCheckpointResponse,
-    RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec, SetDocumentArchivedSpec,
-    SetStyleSampleStatusSpec, StyleSample, SummaryInvalidation, VersionHistory,
+    ProjectWorkspace, RefreshSummariesSpec, RenameDocumentSpec, ReorderDocumentSpec,
+    RestoreCheckpointResponse, RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec,
+    SetDocumentArchivedSpec, SetStyleSampleStatusSpec, StyleSample, SummaryContextCandidate,
+    SummaryContextSpec, SummaryInvalidation, SummaryRefreshReport, VersionHistory,
     WorkspaceCommandError,
 };
 
@@ -297,6 +299,20 @@ impl OpenedProject {
 
     pub fn summary_invalidations(&self) -> Result<Vec<SummaryInvalidation>, WorkspaceCommandError> {
         list_summary_invalidations(self.operations.store(), &self.project_id)
+    }
+
+    pub fn refresh_summaries(
+        &mut self,
+        spec: &RefreshSummariesSpec,
+    ) -> Result<SummaryRefreshReport, WorkspaceCommandError> {
+        refresh_summaries(self.operations.store_mut(), &self.project_id, spec)
+    }
+
+    pub fn summary_context(
+        &self,
+        spec: &SummaryContextSpec,
+    ) -> Result<Vec<SummaryContextCandidate>, WorkspaceCommandError> {
+        summary_context(self.operations.store(), &self.project_id, spec)
     }
 
     pub fn rename_document(
@@ -800,6 +816,106 @@ mod tests {
             }),
             Err(WorkspaceCommandError::Store(StoreError::Conflict { .. }))
         ));
+    }
+
+    #[test]
+    fn refreshes_summary_queue_and_serves_only_current_context() {
+        let parent = TempParent::new();
+        let mut project = OpenedProject::create(&parent.0, &spec()).unwrap();
+        let initial = project.workspace().unwrap();
+        let initial_block = initial.blocks[0].clone();
+        assert_eq!(project.summary_invalidations().unwrap().len(), 3);
+
+        let first_batch = project
+            .refresh_summaries(&RefreshSummariesSpec { max_items: 2 })
+            .unwrap();
+        assert_eq!(first_batch.processed, 2);
+        assert_eq!(first_batch.remaining, 1);
+        assert_eq!(first_batch.provider_id, "optimizer-local");
+        assert_eq!(first_batch.model, "extractive-summary-v1");
+        let document_only = project
+            .summary_context(&SummaryContextSpec {
+                base_commit_id: initial.head_commit_id.clone(),
+                target_block_id: initial_block.id.clone(),
+                target_block_revision: initial_block.revision,
+                target_block_hash: initial_block.content_hash.clone(),
+            })
+            .unwrap();
+        assert_eq!(document_only.len(), 1);
+        assert_eq!(document_only[0].reason_codes, ["CURRENT_DOCUMENT_SUMMARY"]);
+
+        let final_batch = project
+            .refresh_summaries(&RefreshSummariesSpec { max_items: 8 })
+            .unwrap();
+        assert_eq!(final_batch.processed, 1);
+        assert_eq!(final_batch.remaining, 0);
+        let complete = project
+            .summary_context(&SummaryContextSpec {
+                base_commit_id: initial.head_commit_id.clone(),
+                target_block_id: initial_block.id.clone(),
+                target_block_revision: initial_block.revision,
+                target_block_hash: initial_block.content_hash.clone(),
+            })
+            .unwrap();
+        assert_eq!(complete.len(), 2);
+        assert!(
+            complete
+                .iter()
+                .all(|item| item.source_hash.starts_with("sha256:"))
+        );
+        assert!(
+            complete
+                .iter()
+                .any(|item| item.reason_codes == ["PROJECT_SUMMARY"])
+        );
+
+        let saved = project
+            .save_block(&SaveBlockSpec {
+                block_id: initial_block.id.clone(),
+                expected_revision: initial_block.revision,
+                expected_hash: initial_block.content_hash.clone(),
+                content: serde_json::json!({
+                    "type": "paragraph",
+                    "content": [{ "type": "text", "text": "更新后的正文" }]
+                }),
+                plain_text: "更新后的正文".into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            project.summary_context(&SummaryContextSpec {
+                base_commit_id: initial.head_commit_id,
+                target_block_id: initial_block.id,
+                target_block_revision: initial_block.revision,
+                target_block_hash: initial_block.content_hash,
+            }),
+            Err(WorkspaceCommandError::Validation(_))
+        ));
+        let stale_summaries = project
+            .summary_context(&SummaryContextSpec {
+                base_commit_id: saved.head_commit_id.clone(),
+                target_block_id: saved.block.id.clone(),
+                target_block_revision: saved.block.revision,
+                target_block_hash: saved.block.content_hash.clone(),
+            })
+            .unwrap();
+        assert!(stale_summaries.is_empty());
+        project
+            .refresh_summaries(&RefreshSummariesSpec { max_items: 8 })
+            .unwrap();
+        let refreshed = project
+            .summary_context(&SummaryContextSpec {
+                base_commit_id: saved.head_commit_id,
+                target_block_id: saved.block.id,
+                target_block_revision: saved.block.revision,
+                target_block_hash: saved.block.content_hash,
+            })
+            .unwrap();
+        assert_eq!(refreshed.len(), 2);
+        assert!(
+            refreshed
+                .iter()
+                .all(|item| item.content.contains("更新后的正文"))
+        );
     }
 
     #[test]

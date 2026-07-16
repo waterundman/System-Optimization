@@ -8,6 +8,7 @@ mod operation_commands;
 mod project_package;
 mod recent_projects;
 mod secrets;
+mod summary_worker;
 mod workspace_commands;
 
 pub use model_gateway::{
@@ -29,6 +30,9 @@ pub use recent_projects::{RecentProject, RecentProjectError, RecentProjectRegist
 #[cfg(windows)]
 pub use secrets::WindowsCredentialStore;
 pub use secrets::{MemorySecretStore, SecretReference, SecretStore, SecretStoreError, SecretValue};
+pub use summary_worker::{
+    RefreshSummariesSpec, SummaryContextCandidate, SummaryContextSpec, SummaryRefreshReport,
+};
 pub use workspace_commands::{
     ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, ArchivedDocument,
     ChangeDocumentDepthSpec, CheckpointSummary, CreateDocumentResponse, CreateDocumentSpec,

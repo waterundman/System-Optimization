@@ -10,10 +10,11 @@ use optimizer_host::{
     ModelRequestAuthorization, ModelStreamEvent, NewProjectSpec, OllamaModelList, OpenedProject,
     OperationAuditResponse, OperationCommandError, PersistOperationResponse, PersistReviewResponse,
     ProjectInfo, ProjectPackageError, ProjectWorkspace, RecentProject, RecentProjectError,
-    RecentProjectRegistry, RenameDocumentSpec, ReorderDocumentSpec, RestoreCheckpointResponse,
-    RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec, SecretReference, SecretStore,
-    SecretStoreError, SecretValue, SetDocumentArchivedSpec, SetStyleSampleStatusSpec, StyleSample,
-    SummaryInvalidation, VersionHistory, WorkspaceCommandError,
+    RecentProjectRegistry, RefreshSummariesSpec, RenameDocumentSpec, ReorderDocumentSpec,
+    RestoreCheckpointResponse, RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec,
+    SecretReference, SecretStore, SecretStoreError, SecretValue, SetDocumentArchivedSpec,
+    SetStyleSampleStatusSpec, StyleSample, SummaryContextCandidate, SummaryContextSpec,
+    SummaryInvalidation, SummaryRefreshReport, VersionHistory, WorkspaceCommandError,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Runtime, State, ipc::Channel};
@@ -184,6 +185,33 @@ impl DesktopState {
     pub fn list_summary_invalidations(&self) -> CommandResult<Vec<SummaryInvalidation>> {
         self.current_project()?
             .summary_invalidations()
+            .map_err(CommandError::from)
+    }
+
+    pub fn refresh_summaries(
+        &self,
+        input: RefreshSummariesRequest,
+    ) -> CommandResult<SummaryRefreshReport> {
+        input.validate()?;
+        self.current_project()?
+            .refresh_summaries(&RefreshSummariesSpec {
+                max_items: input.max_items,
+            })
+            .map_err(CommandError::from)
+    }
+
+    pub fn get_summary_context(
+        &self,
+        input: GetSummaryContextRequest,
+    ) -> CommandResult<Vec<SummaryContextCandidate>> {
+        input.validate()?;
+        self.current_project()?
+            .summary_context(&SummaryContextSpec {
+                base_commit_id: input.base_commit_id,
+                target_block_id: input.target_block_id,
+                target_block_revision: input.target_block_revision,
+                target_block_hash: input.target_block_hash,
+            })
             .map_err(CommandError::from)
     }
 
@@ -737,6 +765,53 @@ impl CreateDocumentRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RefreshSummariesRequest {
+    pub schema_version: u32,
+    pub max_items: usize,
+}
+
+impl RefreshSummariesRequest {
+    fn validate(&self) -> CommandResult<()> {
+        validate_request_schema(self.schema_version)?;
+        if !(1..=64).contains(&self.max_items) {
+            return Err(CommandError::basic(
+                "SUMMARY_BATCH_INVALID",
+                "Summary refresh batch must contain 1 to 64 items",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GetSummaryContextRequest {
+    pub schema_version: u32,
+    pub base_commit_id: String,
+    pub target_block_id: String,
+    pub target_block_revision: i64,
+    pub target_block_hash: String,
+}
+
+impl GetSummaryContextRequest {
+    fn validate(&self) -> CommandResult<()> {
+        validate_request_schema(self.schema_version)?;
+        if !is_safe_binding_id(&self.base_commit_id)
+            || !is_safe_binding_id(&self.target_block_id)
+            || self.target_block_revision < 0
+            || !is_sha256(&self.target_block_hash)
+        {
+            return Err(CommandError::basic(
+                "SUMMARY_CONTEXT_BINDING_INVALID",
+                "Summary context binding is invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenameDocumentRequest {
     pub schema_version: u32,
     pub document_id: String,
@@ -1110,6 +1185,8 @@ pub fn attach<R: Runtime>(builder: tauri::Builder<R>, state: DesktopState) -> ta
             create_document,
             list_archived_documents,
             list_summary_invalidations,
+            refresh_summaries,
+            get_summary_context,
             rename_document,
             reorder_document,
             change_document_depth,
@@ -1210,6 +1287,22 @@ async fn list_summary_invalidations(
     state: State<'_, DesktopState>,
 ) -> CommandResult<Vec<SummaryInvalidation>> {
     spawn_host_task(state, DesktopState::list_summary_invalidations).await
+}
+
+#[tauri::command]
+async fn refresh_summaries(
+    input: RefreshSummariesRequest,
+    state: State<'_, DesktopState>,
+) -> CommandResult<SummaryRefreshReport> {
+    spawn_host_task(state, move |state| state.refresh_summaries(input)).await
+}
+
+#[tauri::command]
+async fn get_summary_context(
+    input: GetSummaryContextRequest,
+    state: State<'_, DesktopState>,
+) -> CommandResult<Vec<SummaryContextCandidate>> {
+    spawn_host_task(state, move |state| state.get_summary_context(input)).await
 }
 
 #[tauri::command]
@@ -1592,6 +1685,40 @@ mod tests {
         assert_eq!(saved.project_revision, 1);
         assert_eq!(saved.block.revision, 1);
         assert_eq!(saved.block.plain_text, "桌面自动保存");
+        let refreshed = state
+            .refresh_summaries(RefreshSummariesRequest {
+                schema_version: 1,
+                max_items: 12,
+            })
+            .unwrap();
+        assert_eq!(refreshed.processed, 3);
+        assert_eq!(refreshed.remaining, 0);
+        let summary_context = state
+            .get_summary_context(GetSummaryContextRequest {
+                schema_version: 1,
+                base_commit_id: saved.head_commit_id.clone(),
+                target_block_id: saved.block.id.clone(),
+                target_block_revision: saved.block.revision,
+                target_block_hash: saved.block.content_hash.clone(),
+            })
+            .unwrap();
+        assert_eq!(summary_context.len(), 2);
+        assert!(
+            summary_context
+                .iter()
+                .all(|item| item.content.contains("桌面自动保存"))
+        );
+        assert!(
+            state
+                .get_summary_context(GetSummaryContextRequest {
+                    schema_version: 1,
+                    base_commit_id: saved.head_commit_id.clone(),
+                    target_block_id: saved.block.id.clone(),
+                    target_block_revision: saved.block.revision + 1,
+                    target_block_hash: saved.block.content_hash.clone(),
+                })
+                .is_err()
+        );
         assert_eq!(state.save_block(request).unwrap_err().code, "CONFLICT");
         assert_eq!(
             state
@@ -2110,6 +2237,7 @@ mod tests {
                 "allow-workspace-write",
                 "allow-document-lifecycle",
                 "allow-summary-status-read",
+                "allow-summary-worker",
                 "allow-project-export",
                 "allow-version-read",
                 "allow-version-write",

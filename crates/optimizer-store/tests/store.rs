@@ -793,6 +793,14 @@ fn coalesces_summary_invalidations_and_rejects_stale_summary_completion() {
     assert_eq!(initial_summary.revision, 0);
     assert_eq!(
         store
+            .get_ready_summary_record("project-1", "block", "block-1")
+            .unwrap()
+            .unwrap()
+            .summary,
+        "A station platform."
+    );
+    assert_eq!(
+        store
             .list_summary_invalidations("project-1", 100)
             .unwrap()
             .len(),
@@ -824,6 +832,12 @@ fn coalesces_summary_invalidations_and_rejects_stale_summary_completion() {
             .unwrap()
             .invalidation_count,
         1
+    );
+    assert!(
+        store
+            .get_ready_summary_record("project-1", "block", "block-1")
+            .unwrap()
+            .is_none()
     );
 
     let stale = store
@@ -857,6 +871,14 @@ fn coalesces_summary_invalidations_and_rejects_stale_summary_completion() {
         .unwrap();
     assert_eq!(refreshed.revision, 1);
     assert_eq!(refreshed.source_commit_id, "commit-summary-edit");
+    assert_eq!(
+        store
+            .get_ready_summary_record("project-1", "block", "block-1")
+            .unwrap()
+            .unwrap()
+            .source_commit_id,
+        "commit-summary-edit"
+    );
     assert_eq!(
         store
             .list_summary_invalidations("project-1", 100)

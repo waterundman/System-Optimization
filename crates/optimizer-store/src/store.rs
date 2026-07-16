@@ -370,7 +370,13 @@ impl OptimizerStore {
                     invalidation_count, created_at
              FROM summary_invalidation
              WHERE project_id = ?1
-             ORDER BY created_at, scope_type, scope_id
+             ORDER BY CASE scope_type
+                        WHEN 'block' THEN 0
+                        WHEN 'document' THEN 1
+                        WHEN 'project' THEN 2
+                        ELSE 3
+                      END,
+                      created_at, scope_id
              LIMIT ?2",
         )?;
         statement
@@ -386,6 +392,33 @@ impl OptimizerStore {
                 })
             })?
             .collect::<Result<_, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn get_ready_summary_record(
+        &self,
+        project_id: &str,
+        scope_type: &str,
+        scope_id: &str,
+    ) -> StoreResult<Option<SummaryRecord>> {
+        validate_summary_scope_reference(project_id, scope_type, scope_id)?;
+        self.connection
+            .query_row(
+                "SELECT sr.project_id, sr.scope_type, sr.scope_id, sr.source_commit_id,
+                        sr.source_hash, sr.summary_text, sr.summary_hash, sr.provider_id,
+                        sr.model, sr.revision, sr.generated_at, sr.updated_at
+                 FROM summary_record AS sr
+                 WHERE sr.project_id = ?1 AND sr.scope_type = ?2 AND sr.scope_id = ?3
+                   AND NOT EXISTS(
+                     SELECT 1 FROM summary_invalidation AS si
+                     WHERE si.project_id = sr.project_id
+                       AND si.scope_type = sr.scope_type
+                       AND si.scope_id = sr.scope_id
+                   )",
+                params![project_id, scope_type, scope_id],
+                map_summary_record,
+            )
+            .optional()
             .map_err(StoreError::from)
     }
 
@@ -2596,6 +2629,29 @@ fn validate_put_summary_record(command: &PutSummaryRecord) -> StoreResult<()> {
     Ok(())
 }
 
+fn validate_summary_scope_reference(
+    project_id: &str,
+    scope_type: &str,
+    scope_id: &str,
+) -> StoreResult<()> {
+    if project_id.trim().is_empty() || scope_id.trim().is_empty() {
+        return Err(StoreError::Validation(
+            "project id and summary scope id are required".into(),
+        ));
+    }
+    if !matches!(scope_type, "block" | "document" | "project") {
+        return Err(StoreError::Validation(
+            "summary scope type is unsupported".into(),
+        ));
+    }
+    if scope_type == "project" && project_id != scope_id {
+        return Err(StoreError::Validation(
+            "project summary scope must use the project id".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_active_summary_scope(
     transaction: &Transaction<'_>,
     project_id: &str,
@@ -2693,28 +2749,30 @@ fn read_summary_record(
              FROM summary_record
              WHERE project_id = ?1 AND scope_type = ?2 AND scope_id = ?3",
             params![project_id, scope_type, scope_id],
-            |row| {
-                Ok(SummaryRecord {
-                    project_id: row.get(0)?,
-                    scope_type: row.get(1)?,
-                    scope_id: row.get(2)?,
-                    source_commit_id: row.get(3)?,
-                    source_hash: row.get(4)?,
-                    summary: row.get(5)?,
-                    summary_hash: row.get(6)?,
-                    provider_id: row.get(7)?,
-                    model: row.get(8)?,
-                    revision: row.get(9)?,
-                    generated_at: row.get(10)?,
-                    updated_at: row.get(11)?,
-                })
-            },
+            map_summary_record,
         )
         .optional()?
         .ok_or_else(|| StoreError::NotFound {
             entity: "summary_record",
             id: format!("{scope_type}:{scope_id}"),
         })
+}
+
+fn map_summary_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<SummaryRecord> {
+    Ok(SummaryRecord {
+        project_id: row.get(0)?,
+        scope_type: row.get(1)?,
+        scope_id: row.get(2)?,
+        source_commit_id: row.get(3)?,
+        source_hash: row.get(4)?,
+        summary: row.get(5)?,
+        summary_hash: row.get(6)?,
+        provider_id: row.get(7)?,
+        model: row.get(8)?,
+        revision: row.get(9)?,
+        generated_at: row.get(10)?,
+        updated_at: row.get(11)?,
+    })
 }
 
 fn validate_set_style_sample_status(command: &SetStyleSampleStatus) -> StoreResult<()> {

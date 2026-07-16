@@ -100,12 +100,16 @@ await page.getByText(/已导入 导入章\.md/).waitFor();
 await page.getByRole("button", { name: "导出 MD" }).click();
 await page.getByText(/optimizer-export-visual\.md/).waitFor();
 await page.getByRole("button", { name: "章 雾港来信", exact: true }).click();
+await page.getByText("摘要已就绪", { exact: true }).waitFor({ timeout: 10_000 });
 
 await page.locator('[data-block-id="block-visual-1"]').click();
 await page.getByRole("button", { name: "续写" }).click();
 await page.getByRole("heading", { name: "确认即将发送的上下文" }).waitFor();
 assert.ok(await page.locator(".context-item").count() >= 1);
 assert.equal(await page.getByText("L4_STYLE_GLOBAL", { exact: true }).count(), 1);
+assert.ok(await page.getByText("L2_STRUCTURAL", { exact: true }).count() >= 1);
+assert.equal(await page.getByText("L3_KNOWLEDGE", { exact: true }).count(), 1);
+await page.getByText(/summary:project:project-visual-1@/).waitFor();
 await page.screenshot({ path: resolve(screenshotDirectory, "context-preview.png"), fullPage: true });
 await page.getByRole("button", { name: "确认并发送" }).click();
 await page.getByRole("heading", { name: "逐项审查 AI 修改" }).waitFor();

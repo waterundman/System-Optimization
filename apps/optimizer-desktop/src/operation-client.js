@@ -477,6 +477,36 @@ function contextSource(input, hasher) {
         content: `项目：${input.projectTitle}\n文档：${document?.title ?? "未命名"}\n文档类型：${document?.kind ?? "document"}`,
         signals: { relevance: 0.8, structuralProximity: 1, freshness: 1 },
       }));
+      const summaryContext = await input.loadSummaryContext?.({
+        schemaVersion: 1,
+        baseCommitId: input.workspace.headCommitId,
+        targetBlockId: input.block.id,
+        targetBlockRevision: input.block.revision,
+        targetBlockHash: input.block.contentHash,
+      }) ?? [];
+      for (const summary of summaryContext) {
+        validateHostSummaryContext(summary);
+        const normalized = await candidate(hasher, {
+          id: summary.id,
+          sourceRef: summary.sourceRef,
+          tier: summary.tier,
+          authority: summary.authority,
+          renderMode: summary.renderMode,
+          reasonCodes: summary.reasonCodes,
+          content: summary.content,
+          status: summary.status,
+          sensitivity: summary.sensitivity,
+          signals: {
+            relevance: summary.tier === "L2_STRUCTURAL" ? 0.9 : 0.65,
+            structuralProximity: summary.tier === "L2_STRUCTURAL" ? 0.9 : 0.35,
+            freshness: 1,
+          },
+        });
+        if (normalized.sourceHash !== summary.sourceHash) {
+          throw new Error("Host summary content hash does not match its payload");
+        }
+        candidates.push(normalized);
+      }
       for (const sample of input.styleSamples ?? []) {
         candidates.push(await candidate(hasher, {
           id: `style-${sample.id}`,
@@ -495,6 +525,28 @@ function contextSource(input, hasher) {
       return candidates;
     },
   };
+}
+
+function validateHostSummaryContext(summary) {
+  const allowed = (value, values) => typeof value === "string" && values.includes(value);
+  if (!summary
+    || typeof summary.id !== "string"
+    || !summary.id
+    || typeof summary.sourceRef !== "string"
+    || !summary.sourceRef
+    || !/^sha256:[0-9a-f]{64}$/.test(summary.sourceHash)
+    || !allowed(summary.tier, ["L2_STRUCTURAL", "L3_KNOWLEDGE"])
+    || !allowed(summary.status, ["canonical"])
+    || !allowed(summary.authority, ["source_derived", "model_inferred"])
+    || !allowed(summary.sensitivity, ["public", "local", "local_sensitive", "never_send"])
+    || summary.renderMode !== "summary"
+    || !Array.isArray(summary.reasonCodes)
+    || !summary.reasonCodes.length
+    || !summary.reasonCodes.every((item) => typeof item === "string" && item.length > 0)
+    || typeof summary.content !== "string"
+    || !summary.content) {
+    throw new TypeError("Host summary context is malformed");
+  }
 }
 
 async function candidate(hasher, input) {

@@ -34,6 +34,11 @@ description = "Allows the bundled editor to inspect coalesced summary invalidati
 commands.allow = ["list_summary_invalidations"]
 
 [[permission]]
+identifier = "allow-summary-worker"
+description = "Allows the bundled editor to run the host-owned local summary worker and collect current, target-bound summary context."
+commands.allow = ["refresh_summaries", "get_summary_context"]
+
+[[permission]]
 identifier = "allow-project-export"
 description = "Allows the bundled editor to atomically export the current project as Markdown inside its project package."
 commands.allow = ["export_markdown"]

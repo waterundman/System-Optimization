@@ -10,6 +10,8 @@ pub const REGISTERED_COMMANDS: &[&str] = &[
     "create_document",
     "list_archived_documents",
     "list_summary_invalidations",
+    "refresh_summaries",
+    "get_summary_context",
     "rename_document",
     "reorder_document",
     "change_document_depth",

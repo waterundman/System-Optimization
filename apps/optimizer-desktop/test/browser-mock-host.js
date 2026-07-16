@@ -66,7 +66,13 @@
     onmessage = null;
   }
   let authorizedModelRequest = null;
+  let summariesReady = false;
+  async function contentHash(value) {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+    return `sha256:${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  }
   function documentMutationResponse(reason) {
+    summariesReady = false;
     const previousHeadCommitId = workspace.headCommitId;
     workspace.revision += 1;
     workspace.headCommitId = `commit-visual-${reason}-${workspace.revision}`;
@@ -109,6 +115,7 @@
     if (command === "get_project_workspace") return structuredClone(workspace);
     if (command === "list_archived_documents") return structuredClone(archivedDocuments);
     if (command === "list_summary_invalidations") {
+      if (summariesReady) return [];
       return [
         { scopeType: "project", scopeId: workspace.projectId },
         ...workspace.documents.map((item) => ({ scopeType: "document", scopeId: item.id })),
@@ -121,6 +128,54 @@
         invalidationCount: 1,
         createdAt: "2026-07-16T00:00:00Z",
       }));
+    }
+    if (command === "refresh_summaries") {
+      const processed = summariesReady ? 0 : 1 + workspace.documents.length + workspace.blocks.length;
+      summariesReady = true;
+      return {
+        schemaVersion: 1,
+        processed,
+        remaining: 0,
+        providerId: "optimizer-local",
+        model: "extractive-summary-v1",
+      };
+    }
+    if (command === "get_summary_context") {
+      if (!summariesReady || args.input.baseCommitId !== workspace.headCommitId) return [];
+      const target = workspace.blocks.find((item) => item.id === args.input.targetBlockId);
+      if (!target || target.revision !== args.input.targetBlockRevision || target.contentHash !== args.input.targetBlockHash) {
+        throw { code: "SUMMARY_CONTEXT_BINDING_INVALID", message: "Target changed" };
+      }
+      const document = workspace.documents.find((item) => item.id === target.documentId);
+      const payloads = [
+        {
+          id: `summary-document-${document.id}`,
+          sourceRef: `summary:document:${document.id}@${workspace.headCommitId}`,
+          sourceCommitId: workspace.headCommitId,
+          tier: "L2_STRUCTURAL",
+          reasonCodes: ["CURRENT_DOCUMENT_SUMMARY"],
+          content: `章节“${document.title}”摘要：${target.plainText}`,
+          revision: 0,
+        },
+        {
+          id: `summary-project-${workspace.projectId}`,
+          sourceRef: `summary:project:${workspace.projectId}@${workspace.headCommitId}`,
+          sourceCommitId: workspace.headCommitId,
+          tier: "L3_KNOWLEDGE",
+          reasonCodes: ["PROJECT_SUMMARY"],
+          content: `项目“${session.project.title}”摘要：${workspace.documents.map((item) => item.title).join("、")}`,
+          revision: 0,
+        },
+      ];
+      return Promise.all(payloads.map(async (item) => ({
+        ...item,
+        sourceHash: await contentHash(item.content),
+        status: "canonical",
+        authority: "source_derived",
+        sensitivity: "local_sensitive",
+        renderMode: "summary",
+        generatedAt: "2026-07-16T00:00:00Z",
+      })));
     }
     if (command === "create_document") {
       const index = workspace.documents.length + 1;
@@ -145,6 +200,7 @@
       };
       workspace.documents.push(document);
       workspace.blocks.push(createdBlock);
+      summariesReady = false;
       workspace.revision += 1;
       workspace.headCommitId = `commit-visual-${index}`;
       return {
@@ -319,6 +375,7 @@
       return { schemaVersion: 1, proposalId: "proposal-visual-1", revision: 1, status: "ready", runId: "run-visual-1", operationState: "review" };
     }
     if (command === "apply_reviewed_proposal") {
+      const previousHeadCommitId = workspace.headCommitId;
       const next = {
         ...block,
         content: { type: "paragraph", content: [{ type: "text", text: "雨停了。她推开车站的门。" }] },
@@ -326,6 +383,12 @@
         contentHash: `sha256:${"1".repeat(64)}`,
         revision: 1,
       };
+      Object.assign(block, next);
+      workspace.headCommitId = "commit-visual-2";
+      workspace.revision = 1;
+      session.project.headCommitId = workspace.headCommitId;
+      session.project.revision = workspace.revision;
+      summariesReady = false;
       return {
         schemaVersion: 1,
         proposalId: args.input.proposalId,
@@ -337,7 +400,7 @@
           schemaVersion: 1,
           editId: "edit-visual-1",
           commitId: "commit-visual-2",
-          previousHeadCommitId: workspace.headCommitId,
+          previousHeadCommitId,
           headCommitId: "commit-visual-2",
           projectRevision: 1,
           block: next,
