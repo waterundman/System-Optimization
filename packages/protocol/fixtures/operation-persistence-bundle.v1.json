@@ -45,6 +45,32 @@
     { "fromState": "streaming", "toState": "validating", "occurredAt": "2026-07-15T00:00:50.000Z" },
     { "fromState": "validating", "toState": "review", "occurredAt": "2026-07-15T00:01:00.000Z" }
   ],
+  "attempts": [
+    {
+      "sequence": 1,
+      "startedAt": "2026-07-15T00:00:30.000Z",
+      "finishedAt": "2026-07-15T00:00:31.000Z",
+      "outcome": "failed",
+      "responseStarted": false,
+      "failure": {
+        "code": "rate_limit",
+        "kind": "rate_limit",
+        "status": 429,
+        "requestId": "request-fixture-rate-limit",
+        "retryAfterMs": 800,
+        "retriable": true
+      },
+      "retryDelayMs": 800
+    },
+    {
+      "sequence": 2,
+      "startedAt": "2026-07-15T00:00:32.000Z",
+      "finishedAt": "2026-07-15T00:00:50.000Z",
+      "outcome": "succeeded",
+      "responseStarted": true,
+      "responseId": "response-fixture-1"
+    }
+  ],
   "artifact": {
     "id": "proposal-fixture-1",
     "kind": "patch_proposal",

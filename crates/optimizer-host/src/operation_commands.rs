@@ -2,11 +2,11 @@ use std::fmt;
 
 use optimizer_store::{
     AppendReviewEvent, ContextPacketRecord, ModelUsageRecord, NewContextPacket,
-    NewOperationArtifact, NewOperationLifecycleEvent, NewOperationRun, OperationArtifactKind,
-    OperationArtifactRecord, OperationFailureRecord, OperationLifecycleEventRecord,
-    OperationRunRecord, OperationState, OptimizerStore, PersistOperationBundle, ProjectRecord,
-    ReviewDecision, ReviewEventKind, ReviewEventRecord, ReviewSessionRecord, ReviewSessionStatus,
-    StoreError,
+    NewOperationArtifact, NewOperationAttempt, NewOperationLifecycleEvent, NewOperationRun,
+    OperationArtifactKind, OperationArtifactRecord, OperationAttemptRecord, OperationFailureRecord,
+    OperationLifecycleEventRecord, OperationRunRecord, OperationState, OptimizerStore,
+    PersistOperationBundle, ProjectRecord, ReviewDecision, ReviewEventKind, ReviewEventRecord,
+    ReviewSessionRecord, ReviewSessionStatus, StoreError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -166,6 +166,12 @@ impl OperationCommandHost {
             .into_iter()
             .map(LifecycleEventAudit::from)
             .collect();
+        let attempts = self
+            .store
+            .list_operation_attempts(run_id)?
+            .into_iter()
+            .map(OperationAttemptAudit::from)
+            .collect();
         let artifact = match self.store.get_operation_artifact(run_id) {
             Ok(record) => Some(ArtifactAudit::try_from(record)?),
             Err(StoreError::NotFound { .. }) => None,
@@ -187,6 +193,7 @@ impl OperationCommandHost {
             run: RunAudit::from(run),
             context_packet,
             lifecycle_events,
+            attempts,
             artifact,
             review,
         })
@@ -232,8 +239,47 @@ pub struct OperationAuditResponse {
     pub run: RunAudit,
     pub context_packet: Option<ContextPacketAudit>,
     pub lifecycle_events: Vec<LifecycleEventAudit>,
+    pub attempts: Vec<OperationAttemptAudit>,
     pub artifact: Option<ArtifactAudit>,
     pub review: Option<ReviewAudit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationAttemptAudit {
+    pub sequence: i64,
+    pub started_at: String,
+    pub finished_at: String,
+    pub outcome: String,
+    pub response_started: bool,
+    pub response_id: Option<String>,
+    pub failure_code: Option<String>,
+    pub failure_kind: Option<String>,
+    pub http_status: Option<i64>,
+    pub remote_request_id: Option<String>,
+    pub retry_after_ms: Option<i64>,
+    pub retriable: Option<bool>,
+    pub retry_delay_ms: Option<i64>,
+}
+
+impl From<OperationAttemptRecord> for OperationAttemptAudit {
+    fn from(value: OperationAttemptRecord) -> Self {
+        Self {
+            sequence: value.sequence,
+            started_at: value.started_at,
+            finished_at: value.finished_at,
+            outcome: value.outcome,
+            response_started: value.response_started,
+            response_id: value.response_id,
+            failure_code: value.failure_code,
+            failure_kind: value.failure_kind,
+            http_status: value.http_status,
+            remote_request_id: value.remote_request_id,
+            retry_after_ms: value.retry_after_ms,
+            retriable: value.retriable,
+            retry_delay_ms: value.retry_delay_ms,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -464,6 +510,8 @@ struct PersistOperationBundleDto {
     run: RunDto,
     context_packet: Option<ContextPacketDto>,
     lifecycle_events: Vec<LifecycleEventDto>,
+    #[serde(default)]
+    attempts: Vec<OperationAttemptDto>,
     artifact: Option<ArtifactDto>,
 }
 
@@ -490,9 +538,59 @@ impl PersistOperationBundleDto {
                 .into_iter()
                 .map(LifecycleEventDto::into_store)
                 .collect(),
+            attempts: self
+                .attempts
+                .into_iter()
+                .map(OperationAttemptDto::into_store)
+                .collect(),
             artifact: self.artifact.map(ArtifactDto::try_into_store).transpose()?,
         })
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OperationAttemptDto {
+    sequence: i64,
+    started_at: String,
+    finished_at: String,
+    outcome: String,
+    response_started: bool,
+    response_id: Option<String>,
+    failure: Option<OperationAttemptFailureDto>,
+    retry_delay_ms: Option<i64>,
+}
+
+impl OperationAttemptDto {
+    fn into_store(self) -> NewOperationAttempt {
+        let failure = self.failure;
+        NewOperationAttempt {
+            sequence: self.sequence,
+            started_at: self.started_at,
+            finished_at: self.finished_at,
+            outcome: self.outcome,
+            response_started: self.response_started,
+            response_id: self.response_id,
+            failure_code: failure.as_ref().map(|value| value.code.clone()),
+            failure_kind: failure.as_ref().and_then(|value| value.kind.clone()),
+            http_status: failure.as_ref().and_then(|value| value.status),
+            remote_request_id: failure.as_ref().and_then(|value| value.request_id.clone()),
+            retry_after_ms: failure.as_ref().and_then(|value| value.retry_after_ms),
+            retriable: failure.as_ref().map(|value| value.retriable),
+            retry_delay_ms: self.retry_delay_ms,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OperationAttemptFailureDto {
+    code: String,
+    kind: Option<String>,
+    status: Option<i64>,
+    request_id: Option<String>,
+    retry_after_ms: Option<i64>,
+    retriable: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -896,6 +994,13 @@ mod tests {
         assert_eq!(audit.run.provider_id, "deepseek");
         assert_eq!(audit.run.usage.unwrap().cached_input_tokens, Some(12));
         assert_eq!(audit.lifecycle_events.len(), 6);
+        assert_eq!(audit.attempts.len(), 2);
+        assert_eq!(
+            audit.attempts[0].failure_kind.as_deref(),
+            Some("rate_limit")
+        );
+        assert_eq!(audit.attempts[0].retry_delay_ms, Some(800));
+        assert_eq!(audit.attempts[1].outcome, "succeeded");
         assert_eq!(audit.context_packet.unwrap().payload["schemaVersion"], 1);
         assert_eq!(audit.artifact.unwrap().kind, "patch_proposal");
         let review = audit.review.unwrap();

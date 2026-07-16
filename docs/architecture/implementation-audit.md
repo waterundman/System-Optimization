@@ -14,7 +14,7 @@
 | FR-03 五种内置操作 | 完成 | 桌面续写/润色/压缩/扩写/批评，Operation Profile、严格产物解析 | 多 Provider contract 与浏览器完整流程已覆盖 |
 | FR-04 选区菜单、右键、快捷键、命令面板 | 完成 | 统一命令注册表驱动工具栏、Block 右键菜单、`Alt+1…5` 与 `Ctrl/⌘+Shift+P` 可搜索命令面板；所有入口复用选区/光标目标与并发禁用规则 | 自动触发属于 FR-12 MAY，默认未启用，不阻塞本项 |
 | FR-05 Context 编译、预算、来源展示、敏感预检 | 完成 | Kernel Context Compiler 与发送确认；Host 在授权前重取当前 HEAD 的 L0—L4 候选，复算 Packet stable hash、token、评分、预算、排除策略和受控 Prompt，并把完整不可变 Packet 纳入一次性 capability | Packet/Prompt/绑定篡改、远程 `never_send`、旧 HEAD/Block 和 capability 重放均有失败关闭测试 |
-| FR-06 流式、取消、超时、有限重试、结构化校验 | 部分 | Rust 固定端点流式传输、取消/超时、严格 JSON 输出 | 缺显式有限重试策略、幂等重试 UI 与重试审计 |
+| FR-06 流式、取消、超时、有限重试、结构化校验 | 完成 | Rust 固定端点流式传输、取消/超时、严格 JSON 输出；Runner 仅在响应开始前执行最多 3 次有界尝试，桌面默认 2 次且每次重新取得 Host capability；schema v8 原子保存不可变 attempt 审计，失败后可用精确 revision/hash/选区创建全新 Operation 重试 | 响应开始后禁止自动重试，显式重试不复用部分输出；Provider fallback 与费用策略单独设计 |
 | FR-07 差异、逐项/整段接受拒绝、保留候选、冲突 | 完成 | 中文分层 diff、逐 hunk 与全部接受/拒绝、atomic group 事件重放、逐 revision 审计、原子应用和冲突拒绝；候选中心从不可变 artifact/event 恢复跨会话审查；schema v7 以独立 Commit 与物化快照保存候选分支且不移动主 HEAD | 当前分支入口采用 exact-base 保护；冲突候选保持可审计但不自动 rebase，后续增强不能以静默覆盖替代 |
 | FR-08 事实、约束、风格、摘要及 canonical 状态 | 完成 | schema v6 事实/约束库、authority/sensitivity/severity、canonical/archived/rejected、目标绑定 L3 Context；风格样本与分层摘要 | 自动事实抽取属于后续增强，不是 MVP 必需项 |
 | FR-09 OpenAI-compatible 与 Ollama | 部分 | DeepSeek、Qwen、Kimi、MiniMax 固定官方端点；Ollama 固定回环与模型发现 | 缺通用 OpenAI-compatible 手工配置/能力探测；当前安全模型故意不接受任意 URL |
@@ -39,8 +39,8 @@
 
 ## 当前执行顺序
 
-1. `P0 / FR-06`：有限重试、幂等审计和重试 UI。
-2. `P0 / FR-09`：在固定端点安全原则下设计通用 OpenAI-compatible 配置与白名单策略。
+1. `P0 / FR-09`：在固定端点安全原则下设计通用 OpenAI-compatible 配置、白名单与能力探测策略。
+2. `P1 / FR-10`：费用换算、接受率/二次编辑率聚合、反馈与安全诊断导出。
 3. `P1`：JSON 导出、项目备份/恢复向导、性能基准、可访问性和国际化。
 4. `M5`：插件/Obsidian contract、安装签名、SBOM、依赖审计与更新。
 

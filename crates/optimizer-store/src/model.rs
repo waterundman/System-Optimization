@@ -527,6 +527,41 @@ pub struct OperationLifecycleEventRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewOperationAttempt {
+    pub sequence: i64,
+    pub started_at: String,
+    pub finished_at: String,
+    pub outcome: String,
+    pub response_started: bool,
+    pub response_id: Option<String>,
+    pub failure_code: Option<String>,
+    pub failure_kind: Option<String>,
+    pub http_status: Option<i64>,
+    pub remote_request_id: Option<String>,
+    pub retry_after_ms: Option<i64>,
+    pub retriable: Option<bool>,
+    pub retry_delay_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationAttemptRecord {
+    pub run_id: String,
+    pub sequence: i64,
+    pub started_at: String,
+    pub finished_at: String,
+    pub outcome: String,
+    pub response_started: bool,
+    pub response_id: Option<String>,
+    pub failure_code: Option<String>,
+    pub failure_kind: Option<String>,
+    pub http_status: Option<i64>,
+    pub remote_request_id: Option<String>,
+    pub retry_after_ms: Option<i64>,
+    pub retriable: Option<bool>,
+    pub retry_delay_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewOperationArtifact {
     pub id: String,
     pub kind: OperationArtifactKind,
@@ -550,6 +585,7 @@ pub struct PersistOperationBundle {
     pub run: NewOperationRun,
     pub context_packet: Option<NewContextPacket>,
     pub lifecycle_events: Vec<NewOperationLifecycleEvent>,
+    pub attempts: Vec<NewOperationAttempt>,
     pub artifact: Option<NewOperationArtifact>,
 }
 

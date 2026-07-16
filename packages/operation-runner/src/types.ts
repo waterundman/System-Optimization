@@ -16,6 +16,7 @@ import type {
 import type {
   FinishReason,
   ModelProvider,
+  ProviderErrorKind,
   ModelUsage,
   ReasoningOptions,
 } from "../../model-gateway/src/index.ts";
@@ -39,6 +40,33 @@ export interface OperationRunnerPorts {
   readonly hasher: ContentHasher;
   readonly clock: Clock;
   readonly ids: OperationRunnerIds;
+  readonly sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+}
+
+export interface OperationRetryPolicy {
+  readonly maxAttempts: number;
+  readonly baseDelayMs: number;
+  readonly maxDelayMs: number;
+}
+
+export interface OperationAttemptFailure {
+  readonly code: string;
+  readonly kind?: ProviderErrorKind;
+  readonly status?: number;
+  readonly requestId?: string;
+  readonly retryAfterMs?: number;
+  readonly retriable: boolean;
+}
+
+export interface OperationAttempt {
+  readonly sequence: number;
+  readonly startedAt: string;
+  readonly finishedAt: string;
+  readonly outcome: "succeeded" | "failed";
+  readonly responseStarted: boolean;
+  readonly responseId?: string;
+  readonly failure?: OperationAttemptFailure;
+  readonly retryDelayMs?: number;
 }
 
 export type FindingSeverity = "info" | "warning" | "error";
@@ -71,6 +99,14 @@ export type OperationProgressEvent =
       readonly type: "model_usage";
       readonly runId: OperationRunId;
       readonly usage: ModelUsage;
+    }
+  | {
+      readonly type: "model_retry";
+      readonly runId: OperationRunId;
+      readonly failedAttempt: number;
+      readonly nextAttempt: number;
+      readonly delayMs: number;
+      readonly failureCode: string;
     };
 
 export interface ExecuteOperationRequest {
@@ -86,6 +122,7 @@ export interface ExecuteOperationRequest {
   readonly topP?: number;
   readonly reasoning?: ReasoningOptions;
   readonly atomicPatch?: boolean;
+  readonly retryPolicy?: OperationRetryPolicy;
   readonly signal?: AbortSignal;
   readonly onProgress?: (event: OperationProgressEvent) => void;
 }
@@ -98,6 +135,7 @@ interface OperationExecutionBase {
   readonly contextPacket: ContextPacket;
   readonly usage?: ModelUsage;
   readonly finishReason: FinishReason;
+  readonly attempts: readonly OperationAttempt[];
   readonly history: readonly OperationTransition[];
 }
 

@@ -34,6 +34,8 @@ test("shares the versioned persistence fixture with the Rust host", async () => 
   assert.equal(fixture.run.id, "run-fixture-1");
   assert.equal(fixture.artifact?.kind, "patch_proposal");
   assert.equal(fixture.lifecycleEvents.at(-1)?.toState, fixture.run.state);
+  assert.equal(fixture.attempts?.length, 2);
+  assert.equal(fixture.attempts?.[0]?.retryDelayMs, 800);
 });
 
 function contextPacket(): ContextPacket {
@@ -109,6 +111,14 @@ test("maps a successful patch result into a deterministic persistence bundle", a
     proposal,
     usage: { inputTokens: 80, outputTokens: 20, totalTokens: 100 },
     finishReason: "stop",
+    attempts: [{
+      sequence: 1,
+      startedAt: at,
+      finishedAt: at,
+      outcome: "succeeded",
+      responseStarted: true,
+      responseId: "response-1",
+    }],
     history: history("review"),
   };
   const bundle = await buildSuccessfulPersistenceBundle({ intent, result, startedAt: at }, new Sha256Hasher());
@@ -116,6 +126,7 @@ test("maps a successful patch result into a deterministic persistence bundle", a
   assert.equal(bundle.artifact?.kind, "patch_proposal");
   assert.equal(bundle.artifact?.bindingHash, proposal.proposalHash);
   assert.equal(bundle.contextPacket?.payload.packetHash, "sha256:context");
+  assert.equal(bundle.attempts?.[0]?.outcome, "succeeded");
   assert.equal(serializeOperationPersistenceBundle(bundle), serializeOperationPersistenceBundle(bundle));
   assert.equal(serializeOperationPersistenceBundle(bundle).includes("apiKey"), false);
 });
@@ -137,6 +148,14 @@ test("maps failed execution metadata and retry safety without fabricating an art
     providerId: "qwen",
     model: "qwen-plus",
     contextPacket: contextPacket(),
+    attempts: [{
+      sequence: 1,
+      startedAt: at,
+      finishedAt: at,
+      outcome: "failed",
+      responseStarted: false,
+      failure: { code: "PROVIDER_SERVER", kind: "server", retriable: true },
+    }],
     rootCause: providerFailure,
   });
   const bundle = buildFailedPersistenceBundle({ intent, error, startedAt: at });
@@ -145,6 +164,7 @@ test("maps failed execution metadata and retry safety without fabricating an art
   assert.equal(bundle.run.failure?.code, "PROVIDER_FAILED");
   assert.equal(bundle.artifact, undefined);
   assert.equal(bundle.contextPacket?.id, "context-persist-1");
+  assert.equal(bundle.attempts?.[0]?.failure?.kind, "server");
 
   const unresolved = buildFailedPersistenceBundle({
     intent,
@@ -174,6 +194,14 @@ test("requires an explicit ID before persisting findings", async () => {
     contextPacket: contextPacket(),
     findings: [{ severity: "warning", message: "节奏过快" }],
     finishReason: "stop",
+    attempts: [{
+      sequence: 1,
+      startedAt: at,
+      finishedAt: at,
+      outcome: "succeeded",
+      responseStarted: true,
+      responseId: "response-findings",
+    }],
     history: history("review"),
   };
   await assert.rejects(

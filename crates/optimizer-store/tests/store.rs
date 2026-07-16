@@ -6,8 +6,8 @@ use optimizer_store::{
     AppendReviewEvent, ApplyBlockEdit, ApplyDocumentBatch, CURRENT_SCHEMA_VERSION,
     CreateDocumentWithBlock, CreateKnowledgeItem, CreateReviewCandidateBranch, CreateSnapshot,
     CreateStyleSample, DocumentMutation, MINIMUM_SQLITE_VERSION, ModelUsageRecord,
-    NewContextPacket, NewOperationArtifact, NewOperationLifecycleEvent, NewOperationRun,
-    OperationArtifactKind, OperationFailureRecord, OperationState, OptimizerStore,
+    NewContextPacket, NewOperationArtifact, NewOperationAttempt, NewOperationLifecycleEvent,
+    NewOperationRun, OperationArtifactKind, OperationFailureRecord, OperationState, OptimizerStore,
     PersistOperationBundle, ProjectSeed, PutSummaryRecord, RestoreSnapshot, ReviewDecision,
     ReviewEventKind, ReviewSessionStatus, SeedBlock, SeedDocument, SetKnowledgeItemStatus,
     SetStyleSampleStatus, StoreError, encode_snapshot,
@@ -142,6 +142,38 @@ fn operation_bundle(run_id: &str, packet_id: &str, proposal_id: &str) -> Persist
             transition(OperationState::Queued, OperationState::Streaming),
             transition(OperationState::Streaming, OperationState::Validating),
             transition(OperationState::Validating, OperationState::Review),
+        ],
+        attempts: vec![
+            NewOperationAttempt {
+                sequence: 1,
+                started_at: "2026-07-15T00:00:20.000Z".into(),
+                finished_at: "2026-07-15T00:00:21.000Z".into(),
+                outcome: "failed".into(),
+                response_started: false,
+                response_id: None,
+                failure_code: Some("rate_limit".into()),
+                failure_kind: Some("rate_limit".into()),
+                http_status: Some(429),
+                remote_request_id: Some("remote-rate-limit".into()),
+                retry_after_ms: Some(800),
+                retriable: Some(true),
+                retry_delay_ms: Some(800),
+            },
+            NewOperationAttempt {
+                sequence: 2,
+                started_at: "2026-07-15T00:00:22.000Z".into(),
+                finished_at: "2026-07-15T00:00:50.000Z".into(),
+                outcome: "succeeded".into(),
+                response_started: true,
+                response_id: Some(format!("response-{run_id}")),
+                failure_code: None,
+                failure_kind: None,
+                http_status: None,
+                remote_request_id: None,
+                retry_after_ms: None,
+                retriable: None,
+                retry_delay_ms: None,
+            },
         ],
         artifact: Some(NewOperationArtifact {
             id: proposal_id.into(),
@@ -1165,6 +1197,11 @@ fn persists_operation_context_usage_events_and_patch_artifact_atomically() {
     assert_eq!(events.len(), 6);
     assert_eq!(events[0].sequence, 1);
     assert_eq!(events.last().unwrap().to_state, OperationState::Review);
+    let attempts = store.list_operation_attempts("run-1").unwrap();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0].failure_kind.as_deref(), Some("rate_limit"));
+    assert_eq!(attempts[0].retry_delay_ms, Some(800));
+    assert_eq!(attempts[1].outcome, "succeeded");
     let review = store.get_review_session("proposal-1").unwrap();
     assert_eq!(review.revision, 0);
     assert_eq!(review.status, ReviewSessionStatus::Review);
@@ -1373,6 +1410,7 @@ fn persists_failed_runs_without_fabricating_context_or_artifacts() {
                 reason: Some("DomainError".into()),
             },
         ],
+        attempts: Vec::new(),
         artifact: None,
     };
     let stored = store.persist_operation_bundle(&bundle).unwrap();
@@ -1586,4 +1624,20 @@ fn immutable_operation_artifacts_reject_out_of_band_tampering() {
         [],
     );
     assert!(context.is_err());
+    let attempt = connection.execute(
+        "UPDATE operation_attempt SET retry_delay_ms = 1 WHERE run_id = 'run-tamper' AND sequence = 1",
+        [],
+    );
+    assert!(attempt.is_err());
+    let impossible_attempt = connection.execute(
+        "INSERT INTO operation_attempt(
+           run_id, sequence, started_at, finished_at, outcome, response_started,
+           response_id, failure_code, retriable
+         ) VALUES (
+           'run-tamper', 3, '2026-07-15T00:00:51Z', '2026-07-15T00:00:52Z',
+           'failed', 0, 'response-without-start', 'PROVIDER_FAILED', 0
+         )",
+        [],
+    );
+    assert!(impossible_attempt.is_err());
 }

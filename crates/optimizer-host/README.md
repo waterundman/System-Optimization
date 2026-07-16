@@ -9,13 +9,13 @@ Rust 宿主安全边界与跨语言命令适配层。
 - `RecentProjectRegistry` 在宿主用户配置区严格解析、去重并崩溃安全地替换最近项目元数据；
 - `OperationCommandHost::persist_operation_bundle_json` 严格接收 v1 Operation bundle，并在一个 Store 事务中持久化；
 - `OperationCommandHost::append_review_event_json` 使用 expected revision/status 写入审查事件；
-- `OperationCommandHost::get_operation_audit` 聚合运行、ContextPacket、生命周期、Artifact 与 Patch review 历史；
+- `OperationCommandHost::get_operation_audit` 聚合运行、ContextPacket、生命周期、逐次模型尝试、Artifact 与 Patch review 历史；
 - 所有输入 DTO 使用 `deny_unknown_fields`，协议版本不匹配或嵌套未知字段会在写库前失败；
 - 开放 JSON payload 会递归拒绝 credential、API key、Authorization 和原始 Header 字段；
 - TypeScript 与 Rust 读取同一份 Operation 持久化夹具，避免边界字段漂移；
 - `SecretStore` 只接受 `secret://` 引用；`SecretValue` Debug 固定脱敏并在释放时清零；
 - Windows 使用 Credential Manager Generic Credential，Secret 不写入 SQLite、配置文件或日志。
-- `ModelExecutionHost` 通过固定官方 HTTPS 端点支持 DeepSeek、Qwen、Kimi、MiniMax，统一流事件、用量、取消、超时和安全错误；
+- `ModelExecutionHost` 通过固定官方 HTTPS 端点支持 DeepSeek、Qwen、Kimi、MiniMax，统一流事件、用量、取消、超时和安全错误；公开错误消息、远端 code 与 request ID 都会限长并对当前凭据精确脱敏；
 - Windows 原生传输使用 WinHTTP，活动 request handle 可由取消/超时关闭，Authorization 临时缓冲发送后清零；
 - `apply_reviewed_proposal` 重验 Proposal hash、UTF-16 anchor、目标基线、hunk 与审查决策，并原子写入正文和 Operation/Review 终态。
 - `summary_worker` 按 Block、Document、Project 顺序消费当前项目队列，使用确定性本地提取生成器并记录 source hash/Commit/provider/model；目标绑定的 Context 读取只返回无失效项的当前章节、祖先和项目摘要。
@@ -36,6 +36,6 @@ Rust 宿主安全边界与跨语言命令适配层。
 
 `OpenedProject::refresh_summaries` 是派生缓存 worker 的唯一写入口，批量上限为 64 且不调用网络；`OpenedProject::summary_context` 重新校验项目 HEAD、目标 Block revision/hash 和活动父链后，只读取 ready summary。当前 `optimizer-local/extractive-summary-v1` 作为零费用基线；未来模型生成器必须复用相同的乐观写回协议，并增加独立的费用与隐私授权，不能把通用 Provider 请求直接藏在后台任务中。
 
-Tauri Adapter 已在 `apps/optimizer-desktop` 注册最小权限 commands/capabilities。Windows Provider 网络执行已经完全位于宿主；macOS Keychain/Linux Secret Service 与对应原生 HTTP 后端、宿主 Operation capability 和 WASM 插件资源限制仍属于后续能力。
+Tauri Adapter 已在 `apps/optimizer-desktop` 注册最小权限 commands/capabilities。Windows Provider 网络执行与绑定当前 HEAD/Context/目标的单次 Operation capability 已经完全位于宿主；macOS Keychain/Linux Secret Service 与对应原生 HTTP 后端、WASM 插件资源限制仍属于后续能力。
 
 任何文件命令都必须先经过 `ProjectRoot`，不得接受未经校验的绝对路径或 `..`。宿主命令不得接收 API Key 或原始 HTTP Header，只接收协议允许的审计数据。

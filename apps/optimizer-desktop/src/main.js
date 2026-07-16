@@ -16,10 +16,12 @@ import {
   decideDesktopHunk,
   defaultProviderSettings,
   hydrateDesktopReviewCandidate,
+  matchesDesktopRetryTarget,
   persistDesktopReviewDecision,
   planDesktopReviewDecisions,
   providerRequiresCredential,
   rejectDesktopReview,
+  retryableOperationFailure,
   runDesktopOperation,
 } from "./operation-client.js";
 
@@ -67,6 +69,7 @@ const state = {
   aiRunning: null,
   aiContextPreview: null,
   aiReview: null,
+  aiRetry: null,
   aiContextMenu: null,
   commandPaletteOpen: false,
 };
@@ -102,17 +105,23 @@ async function invokeHost(command, args = {}) {
   return invoke(command, args);
 }
 
-function setNotice(kind, message) {
-  state.notice = message ? { kind, message } : null;
+function setNotice(kind, message, actionLabel, action) {
+  state.notice = message ? { kind, message, actionLabel, action } : null;
 }
 
 function noticeView() {
   if (!state.notice) return null;
   return element("div", {
     className: `notice notice-${state.notice.kind}`,
-    text: state.notice.message,
     attrs: { role: "status" },
-  });
+  }, [
+    element("span", { text: state.notice.message }),
+    state.notice.actionLabel && typeof state.notice.action === "function"
+      ? button(state.notice.actionLabel, "small-button notice-action", state.notice.action, {
+          disabled: Boolean(state.aiRunning || state.aiReview),
+        })
+      : null,
+  ]);
 }
 
 function loadProviderSettings() {
@@ -615,6 +624,7 @@ async function commitDocumentMutation(command, input, preferredDocumentId, succe
     state.activeBlockId = null;
     state.aiSelection = null;
     state.aiReview = null;
+    state.aiRetry = null;
     setNotice("success", successMessage);
     renderWorkspace();
     scheduleSummaryRefresh();
@@ -1048,7 +1058,7 @@ function closeCommandSurfaces() {
   document.querySelector(".command-palette-backdrop")?.remove();
 }
 
-async function runAiOperation(operationType) {
+async function runAiOperation(operationType, retryTarget = null) {
   if (state.aiRunning || state.aiReview?.kind === "patch_proposal") return;
   const providerSettings = state.providerSettings[state.selectedProviderId];
   const credentialRequired = providerRequiresCredential(state.selectedProviderId);
@@ -1066,25 +1076,46 @@ async function runAiOperation(operationType) {
     renderWorkspace();
     return;
   }
+  let attemptedTarget = retryTarget;
+  state.aiRetry = null;
   try {
     await flushAll();
     const documentBlocks = blocksForDocument(state.workspace, state.selectedDocumentId);
-    const block = state.workspace.blocks.find((candidate) => candidate.id === state.activeBlockId)
-      ?? documentBlocks.find(isEditableBlock);
+    const block = retryTarget
+      ? state.workspace.blocks.find((candidate) => candidate.id === retryTarget.blockId)
+      : state.workspace.blocks.find((candidate) => candidate.id === state.activeBlockId)
+        ?? documentBlocks.find(isEditableBlock);
     if (!block || !isEditableBlock(block)) {
       throw { code: "TARGET_INVALID", message: "请先把光标放到一个可编辑文本 Block 中。" };
     }
-    const selection = state.aiSelection?.blockId === block.id ? state.aiSelection : null;
-    let from = Math.min(selection?.from ?? 0, block.plainText.length);
-    let to = Math.min(selection?.to ?? block.plainText.length, block.plainText.length);
-    if (operationType === "continue_scene") {
-      const caret = selection ? selection.to : block.plainText.length;
-      from = caret;
-      to = caret;
-    } else if (from === to) {
-      from = 0;
-      to = block.plainText.length;
+    let from;
+    let to;
+    if (retryTarget) {
+      if (!matchesDesktopRetryTarget(block, retryTarget)) {
+        throw { code: "TARGET_STALE", message: "原重试目标已经变化，请重新选择正文后发起操作。" };
+      }
+      from = retryTarget.from;
+      to = retryTarget.to;
+    } else {
+      const selection = state.aiSelection?.blockId === block.id ? state.aiSelection : null;
+      from = Math.min(selection?.from ?? 0, block.plainText.length);
+      to = Math.min(selection?.to ?? block.plainText.length, block.plainText.length);
+      if (operationType === "continue_scene") {
+        const caret = selection ? selection.to : block.plainText.length;
+        from = caret;
+        to = caret;
+      } else if (from === to) {
+        from = 0;
+        to = block.plainText.length;
+      }
     }
+    attemptedTarget = {
+      blockId: block.id,
+      baseRevision: block.revision,
+      baseHash: block.contentHash,
+      from,
+      to,
+    };
     const Channel = window.__TAURI__?.core?.Channel;
     if (typeof Channel !== "function") {
       throw { code: "HOST_UNAVAILABLE", message: "当前桌面运行时不支持流式模型通道。" };
@@ -1122,6 +1153,7 @@ async function runAiOperation(operationType) {
         busy: false,
       };
       await refreshReviewCandidates();
+      state.aiRetry = null;
       setNotice("success", `AI 已生成 ${execution.result.proposal.hunks.length} 个可审查修改，正文尚未改变。`);
     } else {
       state.aiReview = {
@@ -1129,16 +1161,39 @@ async function runAiOperation(operationType) {
         intent: execution.intent,
         result: execution.result,
       };
+      state.aiRetry = null;
       setNotice("success", `批评完成，共 ${execution.result.findings.length} 条发现。`);
     }
   } catch (error) {
     const normalized = normalizeHostError(error);
-    setNotice(normalized.code === "OPERATION_CANCELLED" ? "warning" : "error", normalized.message);
+    const retry = attemptedTarget ? retryableOperationFailure(error) : null;
+    if (retry && attemptedTarget) {
+      state.aiRetry = { operationType, target: attemptedTarget };
+      const attempted = Math.max(1, retry.attempts);
+      setNotice(
+        "warning",
+        `模型请求在 ${attempted} 次安全尝试后仍失败：${normalized.message}`,
+        "重新尝试",
+        retryLastAiOperation,
+      );
+    } else {
+      state.aiRetry = null;
+      setNotice(normalized.code === "OPERATION_CANCELLED" ? "warning" : "error", normalized.message);
+    }
   } finally {
     state.aiContextPreview = null;
     state.aiRunning = null;
     renderWorkspace();
   }
+}
+
+function retryLastAiOperation() {
+  const retry = state.aiRetry;
+  if (!retry || state.aiRunning || state.aiReview) return;
+  state.aiRetry = null;
+  setNotice(null, null);
+  renderWorkspace();
+  void runAiOperation(retry.operationType, retry.target);
 }
 
 function confirmCompiledContext(packet) {
@@ -1233,6 +1288,9 @@ function updateAiProgress(event) {
     state.aiRunning.label = `模型正在生成… ${state.aiRunning.received.toLocaleString("zh-CN")} 字符`;
   } else if (event.type === "model_reasoning_delta") {
     state.aiRunning.label = "模型正在推理…";
+  } else if (event.type === "model_retry") {
+    state.aiRunning.received = 0;
+    state.aiRunning.label = `请求暂时失败，${event.delayMs.toLocaleString("zh-CN")}ms 后进行第 ${event.nextAttempt} 次安全尝试…`;
   }
   updateAiStatus(state.aiRunning.label);
 }
@@ -2410,6 +2468,7 @@ async function closeProject() {
     state.aiRunning = null;
     state.aiContextPreview = null;
     state.aiReview = null;
+    state.aiRetry = null;
     state.aiContextMenu = null;
     state.commandPaletteOpen = false;
     state.activeBlockId = null;

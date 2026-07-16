@@ -60,6 +60,9 @@ export async function buildSuccessfulPersistenceBundle(
     },
     contextPacket: contextRecord(input.result.contextPacket),
     lifecycleEvents: lifecycleRecords(input.result.history),
+    ...(input.result.attempts?.length
+      ? { attempts: attemptRecords(input.result.attempts) }
+      : {}),
     artifact,
   };
 }
@@ -100,6 +103,9 @@ export function buildFailedPersistenceBundle(
       ? { contextPacket: contextRecord(input.error.contextPacket) }
       : {}),
     lifecycleEvents: lifecycleRecords(input.error.history),
+    ...(input.error.attempts.length
+      ? { attempts: attemptRecords(input.error.attempts) }
+      : {}),
   };
 }
 
@@ -159,6 +165,21 @@ function lifecycleRecords(
     toState: transition.to,
     occurredAt: transition.occurredAt,
     ...(transition.reason !== undefined ? { reason: transition.reason } : {}),
+  }));
+}
+
+function attemptRecords(
+  attempts: OperationExecutionResult["attempts"] | undefined,
+): NonNullable<OperationPersistenceBundleV1["attempts"]> {
+  return (attempts ?? []).map((attempt) => ({
+    sequence: attempt.sequence,
+    startedAt: attempt.startedAt,
+    finishedAt: attempt.finishedAt,
+    outcome: attempt.outcome,
+    responseStarted: attempt.responseStarted,
+    ...(attempt.responseId !== undefined ? { responseId: attempt.responseId } : {}),
+    ...(attempt.failure !== undefined ? { failure: { ...attempt.failure } } : {}),
+    ...(attempt.retryDelayMs !== undefined ? { retryDelayMs: attempt.retryDelayMs } : {}),
   }));
 }
 

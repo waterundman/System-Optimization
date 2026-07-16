@@ -26,6 +26,8 @@ import { parseModelOutput } from "./model-output.ts";
 import { renderOperationMessages } from "./prompt.ts";
 import type {
   ExecuteOperationRequest,
+  OperationAttempt,
+  OperationAttemptFailure,
   OperationExecutionResult,
   OperationProgressEvent,
   OperationRunnerPorts,
@@ -33,6 +35,11 @@ import type {
 
 const defaultReservedOverhead = 800;
 const defaultMaxResponseBytes = 10 * 1024 * 1024;
+const defaultRetryPolicy = Object.freeze({
+  maxAttempts: 2,
+  baseDelayMs: 500,
+  maxDelayMs: 5_000,
+});
 
 export class OperationRunner {
   private readonly ports: OperationRunnerPorts;
@@ -46,6 +53,7 @@ export class OperationRunner {
     const lifecycle = new OperationLifecycle();
     let compiledPacket: ContextPacket | undefined;
     let resolvedModel: string | undefined;
+    const attempts: OperationAttempt[] = [];
     const move = (to: OperationState, reason?: string): void => {
       const transition = lifecycle.transition(to, this.ports.clock.now(), reason);
       emit(request.onProgress, { type: "lifecycle", runId, transition });
@@ -74,11 +82,14 @@ export class OperationRunner {
       move("queued");
       throwIfCancelled(request.signal);
       move("streaming");
-      const collected = await collectModelStream({
+      const collected = await collectModelStreamWithRetry({
         provider,
         request,
         packet,
         runId,
+        attempts,
+        clock: this.ports.clock,
+        sleep: this.ports.sleep ?? abortableSleep,
       });
 
       throwIfCancelled(request.signal);
@@ -99,6 +110,7 @@ export class OperationRunner {
           ...(output.summary !== undefined ? { summary: output.summary } : {}),
           ...(collected.usage !== undefined ? { usage: collected.usage } : {}),
           finishReason: collected.finishReason,
+          attempts: [...attempts],
           history: lifecycle.history,
         };
       }
@@ -125,6 +137,7 @@ export class OperationRunner {
         proposal,
         ...(collected.usage !== undefined ? { usage: collected.usage } : {}),
         finishReason: collected.finishReason,
+        attempts: [...attempts],
         history: lifecycle.history,
       };
     } catch (error) {
@@ -143,6 +156,7 @@ export class OperationRunner {
         providerId: request.providerId,
         model: resolvedModel,
         contextPacket: compiledPacket,
+        attempts,
         rootCause: error,
       });
     }
@@ -155,6 +169,80 @@ interface CollectedStream {
   readonly text: string;
   readonly usage?: ModelUsage;
   readonly finishReason: FinishReason;
+}
+
+class ModelAttemptError extends Error {
+  readonly rootCause: unknown;
+  readonly responseStarted: boolean;
+  readonly responseId?: string;
+
+  constructor(rootCause: unknown, responseId?: string) {
+    super("Model attempt failed");
+    this.name = "ModelAttemptError";
+    this.rootCause = rootCause;
+    this.responseStarted = responseId !== undefined;
+    this.responseId = responseId;
+  }
+}
+
+async function collectModelStreamWithRetry(input: {
+  readonly provider: ReturnType<OperationRunnerPorts["providers"]["provider"]>;
+  readonly request: ExecuteOperationRequest;
+  readonly packet: ContextPacket;
+  readonly runId: OperationRunId;
+  readonly attempts: OperationAttempt[];
+  readonly clock: OperationRunnerPorts["clock"];
+  readonly sleep: NonNullable<OperationRunnerPorts["sleep"]>;
+}): Promise<CollectedStream> {
+  const policy = normalizeRetryPolicy(input.request.retryPolicy);
+  for (let sequence = 1; sequence <= policy.maxAttempts; sequence += 1) {
+    throwIfCancelled(input.request.signal);
+    const startedAt = input.clock.now();
+    try {
+      const collected = await collectModelStream(input);
+      input.attempts.push({
+        sequence,
+        startedAt,
+        finishedAt: input.clock.now(),
+        outcome: "succeeded",
+        responseStarted: true,
+        responseId: collected.responseId,
+      });
+      return collected;
+    } catch (caught) {
+      const attemptError = caught instanceof ModelAttemptError
+        ? caught
+        : new ModelAttemptError(caught);
+      const failure = operationAttemptFailure(attemptError.rootCause);
+      const retryDelayMs = retryDelayFor({
+        error: attemptError.rootCause,
+        responseStarted: attemptError.responseStarted,
+        sequence,
+        policy,
+      });
+      input.attempts.push({
+        sequence,
+        startedAt,
+        finishedAt: input.clock.now(),
+        outcome: "failed",
+        responseStarted: attemptError.responseStarted,
+        ...(attemptError.responseId !== undefined ? { responseId: attemptError.responseId } : {}),
+        failure,
+        ...(retryDelayMs !== undefined ? { retryDelayMs } : {}),
+      });
+      if (retryDelayMs === undefined) throw attemptError.rootCause;
+      emit(input.request.onProgress, {
+        type: "model_retry",
+        runId: input.runId,
+        failedAttempt: sequence,
+        nextAttempt: sequence + 1,
+        delayMs: retryDelayMs,
+        failureCode: failure.code,
+      });
+      await input.sleep(retryDelayMs, input.request.signal);
+    }
+  }
+  throw new OperationStageError("INTERNAL_FAILURE", "Retry loop ended without a result");
 }
 
 async function collectModelStream(input: {
@@ -179,77 +267,170 @@ async function collectModelStream(input: {
   let byteLength = 0;
   let usage: ModelUsage | undefined;
   let finishReason: FinishReason | undefined;
-  for await (const event of input.provider.stream(modelRequest, {
-    signal: input.request.signal,
-    timeoutMs: input.request.timeoutMs,
-  })) {
-    throwIfCancelled(input.request.signal);
-    if (event.type === "start") {
-      if (responseId !== undefined || event.providerId !== input.request.providerId) {
-        throw new OperationStageError("PROVIDER_FAILED", "Provider emitted an invalid or duplicate start event");
+  try {
+    for await (const event of input.provider.stream(modelRequest, {
+      signal: input.request.signal,
+      timeoutMs: input.request.timeoutMs,
+    })) {
+      throwIfCancelled(input.request.signal);
+      if (event.type === "start") {
+        if (responseId !== undefined || event.providerId !== input.request.providerId) {
+          throw new OperationStageError("PROVIDER_FAILED", "Provider emitted an invalid or duplicate start event");
+        }
+        responseId = event.id;
+        model = event.model;
+        emit(input.request.onProgress, {
+          type: "model_start",
+          runId: input.runId,
+          responseId,
+          providerId: event.providerId,
+          model,
+        });
+        continue;
       }
-      responseId = event.id;
-      model = event.model;
-      emit(input.request.onProgress, {
-        type: "model_start",
-        runId: input.runId,
-        responseId,
-        providerId: event.providerId,
-        model,
-      });
-      continue;
-    }
-    if (event.type === "usage") {
-      usage = event.usage;
-      emit(input.request.onProgress, { type: "model_usage", runId: input.runId, usage });
-      continue;
-    }
-    requireStreamIdentity(responseId, model);
-    if (event.type === "tool_call_delta") {
-      throw new OperationStageError("UNEXPECTED_TOOL_CALL", "Operation models must not invoke tools");
-    }
-    if (event.type === "reasoning_delta") {
-      emit(input.request.onProgress, {
-        type: "model_reasoning_delta",
-        runId: input.runId,
-        text: event.text,
-      });
-      continue;
-    }
-    if (event.type === "text_delta") {
-      byteLength += new TextEncoder().encode(event.text).byteLength;
-      if (byteLength > maxResponseBytes) {
-        throw new OperationStageError(
-          "MODEL_OUTPUT_TOO_LARGE",
-          `Model output exceeds the configured ${maxResponseBytes}-byte limit`,
-        );
+      if (event.type === "usage") {
+        usage = event.usage;
+        emit(input.request.onProgress, { type: "model_usage", runId: input.runId, usage });
+        continue;
       }
-      text += event.text;
-      emit(input.request.onProgress, {
-        type: "model_text_delta",
-        runId: input.runId,
-        text: event.text,
-      });
-      continue;
-    }
-    if (event.type === "finish") {
-      if (finishReason !== undefined) {
-        throw new OperationStageError("PROVIDER_FAILED", "Provider emitted duplicate finish events");
+      requireStreamIdentity(responseId, model);
+      if (event.type === "tool_call_delta") {
+        throw new OperationStageError("UNEXPECTED_TOOL_CALL", "Operation models must not invoke tools");
       }
-      finishReason = event.reason;
+      if (event.type === "reasoning_delta") {
+        emit(input.request.onProgress, {
+          type: "model_reasoning_delta",
+          runId: input.runId,
+          text: event.text,
+        });
+        continue;
+      }
+      if (event.type === "text_delta") {
+        byteLength += new TextEncoder().encode(event.text).byteLength;
+        if (byteLength > maxResponseBytes) {
+          throw new OperationStageError(
+            "MODEL_OUTPUT_TOO_LARGE",
+            `Model output exceeds the configured ${maxResponseBytes}-byte limit`,
+          );
+        }
+        text += event.text;
+        emit(input.request.onProgress, {
+          type: "model_text_delta",
+          runId: input.runId,
+          text: event.text,
+        });
+        continue;
+      }
+      if (event.type === "finish") {
+        if (finishReason !== undefined) {
+          throw new OperationStageError("PROVIDER_FAILED", "Provider emitted duplicate finish events");
+        }
+        finishReason = event.reason;
+      }
     }
+  } catch (error) {
+    throw new ModelAttemptError(error, responseId);
   }
-  const identity = requireStreamIdentity(responseId, model);
-  if (finishReason === undefined) {
-    throw new OperationStageError("PROVIDER_FAILED", "Provider stream ended without a finish event");
+  try {
+    const identity = requireStreamIdentity(responseId, model);
+    if (finishReason === undefined) {
+      throw new OperationStageError("PROVIDER_FAILED", "Provider stream ended without a finish event");
+    }
+    return {
+      responseId: identity.responseId,
+      model: identity.model,
+      text,
+      ...(usage !== undefined ? { usage } : {}),
+      finishReason,
+    };
+  } catch (error) {
+    throw new ModelAttemptError(error, responseId);
+  }
+}
+
+function normalizeRetryPolicy(
+  policy: ExecuteOperationRequest["retryPolicy"],
+): Readonly<{ maxAttempts: number; baseDelayMs: number; maxDelayMs: number }> {
+  const value = policy ?? defaultRetryPolicy;
+  if (
+    !Number.isInteger(value.maxAttempts)
+    || value.maxAttempts < 1
+    || value.maxAttempts > 3
+    || !Number.isInteger(value.baseDelayMs)
+    || value.baseDelayMs < 0
+    || value.baseDelayMs > 5_000
+    || !Number.isInteger(value.maxDelayMs)
+    || value.maxDelayMs < value.baseDelayMs
+    || value.maxDelayMs > 10_000
+  ) {
+    throw new OperationStageError(
+      "PROVIDER_FAILED",
+      "Retry policy must use 1..=3 attempts and bounded non-negative delays",
+    );
+  }
+  return value;
+}
+
+function retryDelayFor(input: {
+  readonly error: unknown;
+  readonly responseStarted: boolean;
+  readonly sequence: number;
+  readonly policy: Readonly<{ maxAttempts: number; baseDelayMs: number; maxDelayMs: number }>;
+}): number | undefined {
+  if (
+    !(input.error instanceof ProviderError)
+    || !input.error.retriable
+    || input.responseStarted
+    || input.sequence >= input.policy.maxAttempts
+    || input.error.kind === "cancelled"
+    || (input.error.retryAfterMs ?? 0) > input.policy.maxDelayMs
+  ) return undefined;
+  const exponential = input.policy.baseDelayMs * (2 ** (input.sequence - 1));
+  return Math.min(
+    input.policy.maxDelayMs,
+    Math.max(exponential, input.error.retryAfterMs ?? 0),
+  );
+}
+
+function operationAttemptFailure(error: unknown): OperationAttemptFailure {
+  if (error instanceof ProviderError) {
+    const requestId = boundedAuditValue(error.requestId, 512);
+    return {
+      code: boundedAuditValue(error.code, 200)
+        ?? `PROVIDER_${error.kind.toUpperCase()}`,
+      kind: error.kind,
+      ...(error.status !== undefined ? { status: error.status } : {}),
+      ...(requestId !== undefined ? { requestId } : {}),
+      ...(error.retryAfterMs !== undefined ? { retryAfterMs: error.retryAfterMs } : {}),
+      retriable: error.retriable,
+    };
   }
   return {
-    responseId: identity.responseId,
-    model: identity.model,
-    text,
-    ...(usage !== undefined ? { usage } : {}),
-    finishReason,
+    code: error instanceof OperationStageError ? error.code : "PROVIDER_FAILED",
+    retriable: false,
   };
+}
+
+function boundedAuditValue(value: string | undefined, maxLength: number): string | undefined {
+  const normalized = value?.trim();
+  return normalized ? Array.from(normalized).slice(0, maxLength).join("") : undefined;
+}
+
+function abortableSleep(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(new OperationStageError("OPERATION_CANCELLED", "Operation was cancelled"));
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new OperationStageError("OPERATION_CANCELLED", "Operation was cancelled"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function assertFreshTarget(request: ExecuteOperationRequest): void {

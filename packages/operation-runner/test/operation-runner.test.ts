@@ -12,6 +12,7 @@ import type { EditorBlockSnapshot } from "../../editor-bridge/src/index.ts";
 import { ContextCompiler } from "../../kernel/src/index.ts";
 import {
   deepSeekProfile,
+  ProviderError,
   type ModelGatewayOptions,
   type ModelProvider,
   type ModelRequest,
@@ -50,14 +51,20 @@ class FakeProvider implements ModelProvider {
   readonly requests: ModelRequest[] = [];
   readonly profile: ProviderProfile;
   private readonly events: readonly ModelStreamEvent[];
+  private readonly failures: ProviderError[];
+  private readonly failureAfterStart?: ProviderError;
   streamCalls = 0;
 
   constructor(
     profile: ProviderProfile,
     events: readonly ModelStreamEvent[],
+    failures: readonly ProviderError[] = [],
+    failureAfterStart?: ProviderError,
   ) {
     this.profile = profile;
     this.events = events;
+    this.failures = [...failures];
+    this.failureAfterStart = failureAfterStart;
   }
 
   async complete(): Promise<never> {
@@ -70,7 +77,12 @@ class FakeProvider implements ModelProvider {
   ): AsyncGenerator<ModelStreamEvent> {
     this.streamCalls += 1;
     this.requests.push(request);
-    for (const event of this.events) yield event;
+    const failure = this.failures.shift();
+    if (failure) throw failure;
+    for (const event of this.events) {
+      yield event;
+      if (event.type === "start" && this.failureAfterStart) throw this.failureAfterStart;
+    }
   }
 }
 
@@ -80,6 +92,9 @@ function fixture(options: {
   readonly profile?: ProviderProfile;
   readonly extraCandidates?: readonly ReturnType<typeof candidate>[];
   readonly mutatePacket?: (packet: ContextPacket) => ContextPacket;
+  readonly failures?: readonly ProviderError[];
+  readonly sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+  readonly failureAfterStart?: ProviderError;
 } = {}) {
   const text = "夜雨敲打窗棂。";
   const blockId = "block-1" as BlockId;
@@ -130,7 +145,12 @@ function fixture(options: {
     { type: "usage", usage: { inputTokens: 80, outputTokens: 20, totalTokens: 100 } },
     { type: "finish", reason: "stop" },
   ];
-  const provider = new FakeProvider(options.profile ?? deepSeekProfile, events);
+  const provider = new FakeProvider(
+    options.profile ?? deepSeekProfile,
+    events,
+    options.failures,
+    options.failureAfterStart,
+  );
   const compilationPort = options.mutatePacket
     ? {
         async compile(request: Parameters<ContextCompiler["compile"]>[0]) {
@@ -150,6 +170,7 @@ function fixture(options: {
     hasher: new Sha256Hasher(),
     clock: new FixedClock(at),
     ids: new RunnerIds(),
+    ...(options.sleep !== undefined ? { sleep: options.sleep } : {}),
   });
   return { runner, provider, block, intent, text };
 }
@@ -195,6 +216,167 @@ test("executes ContextPacket to provider stream to PatchProposal end to end", as
   assert.equal(provider.requests[0]?.responseFormat, "json_object");
   assert.equal(provider.requests[0]?.maxOutputTokens, intent.output.maxTokens);
   assert.equal(progress.some((event) => event.type === "model_text_delta"), true);
+  assert.deepEqual(result.attempts, [{
+    sequence: 1,
+    startedAt: at,
+    finishedAt: at,
+    outcome: "succeeded",
+    responseStarted: true,
+    responseId: "response-1",
+  }]);
+});
+
+test("retries one pre-response retriable failure and audits both attempts", async () => {
+  const retryable = new ProviderError({
+    kind: "rate_limit",
+    providerId: "deepseek",
+    message: "Temporarily rate limited",
+    status: 429,
+    code: "rate_limit",
+    requestId: "request-rate-limit",
+    retryAfterMs: 800,
+    retriable: true,
+  });
+  const delays: number[] = [];
+  const progress: OperationProgressEvent[] = [];
+  const { runner, provider, block, intent } = fixture({
+    failures: [retryable],
+    sleep: async (milliseconds) => { delays.push(milliseconds); },
+  });
+  const result = await runner.execute({
+    intent,
+    providerId: "deepseek",
+    block,
+    modelLimit: 8_000,
+    retryPolicy: { maxAttempts: 2, baseDelayMs: 500, maxDelayMs: 5_000 },
+    onProgress: (event) => progress.push(event),
+  });
+
+  assert.equal(provider.streamCalls, 2);
+  assert.deepEqual(delays, [800]);
+  assert.equal(result.attempts.length, 2);
+  assert.deepEqual(result.attempts[0], {
+    sequence: 1,
+    startedAt: at,
+    finishedAt: at,
+    outcome: "failed",
+    responseStarted: false,
+    failure: {
+      code: "rate_limit",
+      kind: "rate_limit",
+      status: 429,
+      requestId: "request-rate-limit",
+      retryAfterMs: 800,
+      retriable: true,
+    },
+    retryDelayMs: 800,
+  });
+  assert.equal(result.attempts[1]?.outcome, "succeeded");
+  assert.deepEqual(
+    progress.filter((event) => event.type === "model_retry"),
+    [{
+      type: "model_retry",
+      runId: result.runId,
+      failedAttempt: 1,
+      nextAttempt: 2,
+      delayMs: 800,
+      failureCode: "rate_limit",
+    }],
+  );
+});
+
+test("does not retry after a provider response has started", async () => {
+  const failure = new ProviderError({
+    kind: "network",
+    providerId: "deepseek",
+    message: "Connection reset after response headers",
+    code: "PROVIDER_NETWORK",
+    retriable: true,
+  });
+  const base = fixture({ failureAfterStart: failure });
+  await assert.rejects(
+    base.runner.execute({
+      intent: base.intent,
+      providerId: "deepseek",
+      block: base.block,
+      modelLimit: 8_000,
+      retryPolicy: { maxAttempts: 3, baseDelayMs: 0, maxDelayMs: 1_000 },
+    }),
+    (error: unknown) => {
+      assert.equal(error instanceof OperationExecutionError, true);
+      if (!(error instanceof OperationExecutionError)) return false;
+      assert.equal(error.attempts.length, 1);
+      assert.equal(error.attempts[0]?.responseStarted, true);
+      assert.equal(error.attempts[0]?.retryDelayMs, undefined);
+      return true;
+    },
+  );
+  assert.equal(base.provider.streamCalls, 1);
+});
+
+test("does not retry beyond the configured delay cap and bounds audit metadata", async () => {
+  const failure = new ProviderError({
+    kind: "rate_limit",
+    providerId: "deepseek",
+    message: "Retry later",
+    code: `rate-limit-${"x".repeat(300)}`,
+    requestId: `request-${"y".repeat(600)}`,
+    retryAfterMs: 2_000,
+    retriable: true,
+  });
+  const base = fixture({ failures: [failure] });
+  await assert.rejects(
+    base.runner.execute({
+      intent: base.intent,
+      providerId: "deepseek",
+      block: base.block,
+      modelLimit: 8_000,
+      retryPolicy: { maxAttempts: 3, baseDelayMs: 500, maxDelayMs: 1_000 },
+    }),
+    (error: unknown) => {
+      assert.equal(error instanceof OperationExecutionError, true);
+      if (!(error instanceof OperationExecutionError)) return false;
+      assert.equal(error.attempts.length, 1);
+      assert.equal(error.attempts[0]?.failure?.code.length, 200);
+      assert.equal(error.attempts[0]?.failure?.requestId?.length, 512);
+      assert.equal(error.attempts[0]?.retryDelayMs, undefined);
+      return true;
+    },
+  );
+  assert.equal(base.provider.streamCalls, 1);
+});
+
+test("cancels during retry backoff before issuing another provider request", async () => {
+  const controller = new AbortController();
+  const failure = new ProviderError({
+    kind: "network",
+    providerId: "deepseek",
+    message: "Temporary network failure",
+    retriable: true,
+  });
+  const base = fixture({ failures: [failure] });
+  await assert.rejects(
+    base.runner.execute({
+      intent: base.intent,
+      providerId: "deepseek",
+      block: base.block,
+      modelLimit: 8_000,
+      retryPolicy: { maxAttempts: 2, baseDelayMs: 500, maxDelayMs: 1_000 },
+      signal: controller.signal,
+      onProgress: (event) => {
+        if (event.type === "model_retry") controller.abort();
+      },
+    }),
+    (error: unknown) => {
+      assert.equal(error instanceof OperationExecutionError, true);
+      if (!(error instanceof OperationExecutionError)) return false;
+      assert.equal(error.code, "OPERATION_CANCELLED");
+      assert.equal(error.state, "cancelled");
+      assert.equal(error.attempts.length, 1);
+      return true;
+    },
+  );
+  assert.equal(base.provider.streamCalls, 1);
 });
 
 test("derives remote locality from the provider and never renders never-send context", async () => {

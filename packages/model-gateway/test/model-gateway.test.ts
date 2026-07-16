@@ -228,11 +228,11 @@ test("parses MiniMax reasoning_details from a non-stream response", async () => 
 test("normalizes rate limits, retry metadata and secret redaction", async () => {
   const gateway = new OpenAICompatibleModelGateway({
     profile: kimiProfile,
-    apiKey: "sensitive-token",
+    apiKey: "credential-token",
     fetch: async () => jsonResponse(
-      { error: { code: "rate_limit", message: "token sensitive-token exceeded" } },
+      { error: { code: "rate_limit-credential-token", message: "token credential-token exceeded" } },
       429,
-      { "retry-after": "2", "x-request-id": "request-429" },
+      { "retry-after": "2", "x-request-id": "request-credential-token" },
     ),
   });
   await assert.rejects(
@@ -242,9 +242,44 @@ test("normalizes rate limits, retry metadata and secret redaction", async () => 
       if (!(error instanceof ProviderError)) return false;
       assert.equal(error.kind, "rate_limit");
       assert.equal(error.retryAfterMs, 2000);
-      assert.equal(error.requestId, "request-429");
+      assert.equal(error.code, "rate_limit-[REDACTED]");
+      assert.equal(error.requestId, "request-[REDACTED]");
       assert.equal(error.retriable, true);
-      assert.equal(error.message.includes("sensitive-token"), false);
+      assert.equal(error.code?.includes("credential-token"), false);
+      assert.equal(error.requestId?.includes("credential-token"), false);
+      assert.equal(error.message.includes("credential-token"), false);
+      return true;
+    },
+  );
+});
+
+test("redacts secrets before truncating provider error metadata", async () => {
+  const secret = "credential-token";
+  const gateway = new OpenAICompatibleModelGateway({
+    profile: kimiProfile,
+    apiKey: secret,
+    fetch: async () => jsonResponse(
+      {
+        error: {
+          code: `${"c".repeat(195)}${secret}`,
+          message: `${"m".repeat(995)}${secret}`,
+        },
+      },
+      429,
+      { "x-request-id": `${"r".repeat(507)}${secret}` },
+    ),
+  });
+  await assert.rejects(
+    gateway.complete(basicRequest),
+    (error: unknown) => {
+      assert.equal(error instanceof ProviderError, true);
+      if (!(error instanceof ProviderError)) return false;
+      assert.equal(error.code?.length, 200);
+      assert.equal(error.requestId?.length, 512);
+      assert.equal(error.message.length, 1000);
+      assert.equal(error.code?.includes("crede"), false);
+      assert.equal(error.requestId?.includes("crede"), false);
+      assert.equal(error.message.includes("crede"), false);
       return true;
     },
   );

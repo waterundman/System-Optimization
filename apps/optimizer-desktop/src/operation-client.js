@@ -165,6 +165,7 @@ export async function runDesktopOperation(input) {
     },
     hasher,
     clock: { now: () => new Date().toISOString() },
+    ...(typeof input.sleep === "function" ? { sleep: input.sleep } : {}),
     ids: {
       nextRunId: () => ids.next("run"),
       nextProposalId: () => ids.next("proposal"),
@@ -183,6 +184,7 @@ export async function runDesktopOperation(input) {
       temperature: input.operationType === "critique" ? 0.2 : 0.6,
       reasoning: { mode: "adaptive" },
       atomicPatch: false,
+      retryPolicy: { maxAttempts: 2, baseDelayMs: 500, maxDelayMs: 5_000 },
       signal: input.signal,
       onProgress: input.onProgress,
     });
@@ -214,6 +216,32 @@ export async function runDesktopOperation(input) {
     }
     throw error;
   }
+}
+
+export function retryableOperationFailure(error) {
+  if (!(error instanceof OperationExecutionError) || error.state !== "failed") return null;
+  const cause = error.rootCause;
+  if (!(cause instanceof ProviderError) || !cause.retriable || cause.kind === "cancelled") return null;
+  return {
+    attempts: error.attempts.length,
+    code: cause.code || error.code,
+    retryAfterMs: cause.retryAfterMs,
+  };
+}
+
+export function matchesDesktopRetryTarget(block, target) {
+  return Boolean(
+    block
+    && target
+    && block.id === target.blockId
+    && block.revision === target.baseRevision
+    && block.contentHash === target.baseHash
+    && Number.isInteger(target.from)
+    && Number.isInteger(target.to)
+    && target.from >= 0
+    && target.to >= target.from
+    && target.to <= block.plainText.length
+  );
 }
 
 export async function createDesktopReview(proposal) {

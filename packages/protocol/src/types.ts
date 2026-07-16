@@ -209,6 +209,26 @@ export interface PersistedOperationFailure {
   readonly retriable: boolean;
 }
 
+export interface PersistedOperationAttempt {
+  readonly sequence: number;
+  readonly startedAt: string;
+  readonly finishedAt: string;
+  readonly outcome: "succeeded" | "failed";
+  readonly responseStarted: boolean;
+  readonly responseId?: string;
+  readonly failure?: {
+    readonly code: string;
+    readonly kind?: "authentication" | "permission" | "rate_limit" | "quota"
+      | "invalid_request" | "content_filter" | "server" | "network" | "timeout"
+      | "cancelled" | "protocol" | "configuration";
+    readonly status?: number;
+    readonly requestId?: string;
+    readonly retryAfterMs?: number;
+    readonly retriable: boolean;
+  };
+  readonly retryDelayMs?: number;
+}
+
 export interface OperationPersistenceBundleV1 {
   readonly schemaVersion: 1;
   readonly run: {
@@ -241,6 +261,7 @@ export interface OperationPersistenceBundleV1 {
     readonly occurredAt: string;
     readonly reason?: string;
   }[];
+  readonly attempts?: readonly PersistedOperationAttempt[];
   readonly artifact?: {
     readonly id: string;
     readonly kind: "patch_proposal" | "findings";

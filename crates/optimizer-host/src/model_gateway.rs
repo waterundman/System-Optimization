@@ -2205,7 +2205,7 @@ fn provider_http_error(
     let remote_message = nested
         .and_then(|error| error.get("message"))
         .and_then(Value::as_str)
-        .map(|message| message.chars().take(1_000).collect::<String>());
+        .map(str::to_string);
     let remote_code = nested.and_then(|error| {
         error
             .get("code")
@@ -2213,6 +2213,9 @@ fn provider_http_error(
             .and_then(Value::as_str)
             .map(str::to_string)
     });
+    let remote_code = remote_code
+        .as_deref()
+        .map(|value| bounded_redacted(value, secret, 200));
     let normalized_code = remote_code
         .as_deref()
         .unwrap_or_default()
@@ -2237,14 +2240,16 @@ fn provider_http_error(
         provider_id.label(),
         head.status
     );
-    let mut message = remote_message.unwrap_or(default_message);
-    if let Some(secret) = secret.filter(|value| !value.is_empty()) {
-        message = message.replace(secret, "[REDACTED]");
-    }
+    let message = bounded_redacted(
+        remote_message.as_deref().unwrap_or(&default_message),
+        secret,
+        1_000,
+    );
     let retry_after_ms = head.header("retry-after").and_then(parse_retry_after);
     let remote_request_id = ["x-request-id", "request-id", "x-dashscope-request-id"]
         .iter()
-        .find_map(|name| head.header(name).map(str::to_string));
+        .find_map(|name| head.header(name))
+        .map(|value| bounded_redacted(value, secret, 512));
     ModelGatewayError {
         code,
         message,
@@ -2255,6 +2260,14 @@ fn provider_http_error(
         retry_after_ms,
         retriable: head.status == 408 || head.status == 429 || head.status >= 500,
     }
+}
+
+fn bounded_redacted(value: &str, secret: Option<&str>, max_chars: usize) -> String {
+    let redacted = secret.filter(|secret| !secret.is_empty()).map_or_else(
+        || value.to_owned(),
+        |secret| value.replace(secret, "[REDACTED]"),
+    );
+    redacted.chars().take(max_chars).collect()
 }
 
 fn parse_retry_after(value: &str) -> Option<u64> {
@@ -2912,11 +2925,11 @@ mod tests {
                 headers: BTreeMap::from([
                     ("content-type".into(), "application/json".into()),
                     ("retry-after".into(), "2".into()),
-                    ("x-request-id".into(), "remote-429".into()),
+                    ("x-request-id".into(), "remote-host-only-key".into()),
                 ]),
             },
             chunks: vec![
-                br#"{"error":{"code":"rate_limit","message":"token host-only-key exceeded"}}"#
+                br#"{"error":{"code":"rate_limit-host-only-key","message":"token host-only-key exceeded"}}"#
                     .to_vec(),
             ],
             calls: AtomicUsize::new(0),
@@ -2929,12 +2942,28 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code(), "PROVIDER_RATE_LIMIT");
         assert_eq!(error.status(), Some(429));
-        assert_eq!(error.remote_code(), Some("rate_limit"));
-        assert_eq!(error.remote_request_id(), Some("remote-429"));
+        assert_eq!(error.remote_code(), Some("rate_limit-[REDACTED]"));
+        assert_eq!(error.remote_request_id(), Some("remote-[REDACTED]"));
         assert_eq!(error.retry_after_ms(), Some(2_000));
         assert!(error.retriable());
+        assert!(!error.remote_code().unwrap().contains("host-only-key"));
+        assert!(!error.remote_request_id().unwrap().contains("host-only-key"));
         assert!(!error.public_message().contains("host-only-key"));
         assert!(error.public_message().contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redacts_secrets_before_truncating_provider_metadata() {
+        let secret = "host-only-key";
+        for (prefix, limit) in [
+            ("m".repeat(995), 1_000),
+            ("c".repeat(195), 200),
+            ("r".repeat(507), 512),
+        ] {
+            let safe = bounded_redacted(&format!("{prefix}{secret}"), Some(secret), limit);
+            assert_eq!(safe.chars().count(), limit);
+            assert!(!safe.contains("host-"));
+        }
     }
 
     #[test]

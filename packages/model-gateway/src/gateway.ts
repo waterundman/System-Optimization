@@ -222,22 +222,29 @@ export class OpenAICompatibleModelGateway {
       payload = undefined;
     }
     const extracted = extractRemoteError(payload);
-    const kind = errorKindForStatus(response.status, extracted.code);
+    const safeCode = extracted.code
+      ? boundedRedacted(extracted.code, this.#apiKey, 200)
+      : undefined;
+    const kind = errorKindForStatus(response.status, safeCode);
     const requestId = firstHeader(response, [
       "x-request-id",
       "request-id",
       "x-dashscope-request-id",
     ]);
+    const safeRequestId = requestId
+      ? boundedRedacted(requestId, this.#apiKey, 512)
+      : undefined;
     return new ProviderError({
       kind,
       providerId: this.profile.id,
-      message: redactSecret(
+      message: boundedRedacted(
         extracted.message || `${this.profile.label} request failed with HTTP ${response.status}`,
         this.#apiKey,
+        1_000,
       ),
       status: response.status,
-      code: extracted.code,
-      requestId,
+      code: safeCode,
+      requestId: safeRequestId,
       retryAfterMs: parseRetryAfter(response.headers.get("retry-after")),
       retriable: response.status === 408 || response.status === 429 || response.status >= 500,
     });
@@ -372,7 +379,7 @@ function extractRemoteError(input: unknown): {
     ? root.error as Record<string, unknown>
     : root;
   return {
-    message: typeof nested.message === "string" ? nested.message.slice(0, 1000) : undefined,
+    message: typeof nested.message === "string" ? nested.message : undefined,
     code: typeof nested.code === "string"
       ? nested.code
       : typeof nested.type === "string"
@@ -397,8 +404,14 @@ function parseRetryAfter(value: string | null): number | undefined {
   return Number.isFinite(date) ? Math.max(0, date - Date.now()) : undefined;
 }
 
-function redactSecret(message: string, secret: string): string {
-  return message.includes(secret) ? message.split(secret).join("[REDACTED]") : message;
+function redactSecret(message: string, secret?: string): string {
+  return secret && message.includes(secret)
+    ? message.split(secret).join("[REDACTED]")
+    : message;
+}
+
+function boundedRedacted(message: string, secret: string | undefined, maxLength: number): string {
+  return Array.from(redactSecret(message, secret)).slice(0, maxLength).join("");
 }
 
 function isAbortError(error: unknown): boolean {

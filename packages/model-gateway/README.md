@@ -8,7 +8,7 @@
 - SSE 流式文本、reasoning、tool-call delta 与 usage；
 - 外部取消、超时和流消费者提前退出；
 - 鉴权、配额、限流、无效请求、服务端、网络和协议错误归一化；
-- API Key 精确脱敏和请求体字节上限；
+- API Key 在公开消息、远端错误码和 request ID 中精确脱敏，并限制请求体与错误审计字段大小；
 - DeepSeek/Kimi/Qwen/MiniMax/Ollama thinking 参数映射；
 - Qwen 中国、新加坡、美国、德国、日本地域端点；
 - Provider Router 动态切换。
@@ -57,7 +57,7 @@ const profile = createQwenProfile({
 
 ## 重试策略
 
-网关不会自动重试 Chat Completions POST。失败会返回 `retriable` 和 `retryAfterMs`，由 Operation 调度层在考虑费用、用户取消和是否已产生输出后决定是否重试。
+网关不会自动重试 Chat Completions POST。失败会返回 `retriable`、`retryAfterMs` 和经过限长/脱敏的错误元数据，由 Operation Runner 在考虑费用、用户取消和响应是否已经开始后决定是否重试。当前 Runner 仅允许响应开始前的有界重试；每次尝试仍是一次独立 Provider 调用。
 
 MiniMax 的 `json_object` 能力尚未在当前官方 OpenAI SDK 页面确认，因此 profile 默认拒绝该参数。可继续用明确的文本输出协议，待官方能力确认后再开放。
 

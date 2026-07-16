@@ -6,11 +6,81 @@ import {
   credentialReference,
   defaultProviderSettings,
   hydrateDesktopReviewCandidate,
+  matchesDesktopRetryTarget,
   providerConfiguration,
   providerRequiresCredential,
   planDesktopReviewDecisions,
+  retryableOperationFailure,
   runDesktopOperation,
 } from "../dist/operation-client.js";
+import { ProviderError } from "../dist/runtime/packages/model-gateway/src/index.js";
+import { OperationExecutionError } from "../dist/runtime/packages/operation-runner/src/index.js";
+
+test("exposes only retriable failed operations for an explicit new run", () => {
+  const providerFailure = new ProviderError({
+    kind: "server",
+    providerId: "deepseek",
+    message: "Provider temporarily unavailable",
+    code: "PROVIDER_SERVER",
+    retriable: true,
+  });
+  const error = new OperationExecutionError({
+    code: "PROVIDER_FAILED",
+    message: providerFailure.message,
+    runId: "run-retry-ui",
+    state: "failed",
+    history: [{ from: "draft", to: "failed", occurredAt: "2026-07-16T00:00:00Z" }],
+    providerId: "deepseek",
+    model: "deepseek-v4-flash",
+    attempts: [
+      {
+        sequence: 1,
+        startedAt: "2026-07-16T00:00:00Z",
+        finishedAt: "2026-07-16T00:00:01Z",
+        outcome: "failed",
+        responseStarted: false,
+        failure: { code: "PROVIDER_SERVER", kind: "server", retriable: true },
+        retryDelayMs: 500,
+      },
+      {
+        sequence: 2,
+        startedAt: "2026-07-16T00:00:02Z",
+        finishedAt: "2026-07-16T00:00:03Z",
+        outcome: "failed",
+        responseStarted: false,
+        failure: { code: "PROVIDER_SERVER", kind: "server", retriable: true },
+      },
+    ],
+    rootCause: providerFailure,
+  });
+  assert.deepEqual(retryableOperationFailure(error), {
+    attempts: 2,
+    code: "PROVIDER_SERVER",
+    retryAfterMs: undefined,
+  });
+  assert.equal(retryableOperationFailure(new Error("not an operation failure")), null);
+});
+
+test("binds an explicit retry to the exact original block revision, hash and range", () => {
+  const block = {
+    id: "block-retry",
+    revision: 4,
+    contentHash: "sha256:retry-base",
+    plainText: "需要重试的正文",
+  };
+  const target = {
+    blockId: block.id,
+    baseRevision: block.revision,
+    baseHash: block.contentHash,
+    from: 2,
+    to: 6,
+  };
+  assert.equal(matchesDesktopRetryTarget(block, target), true);
+  assert.equal(matchesDesktopRetryTarget({ ...block, revision: 5 }, target), false);
+  assert.equal(matchesDesktopRetryTarget(block, { ...target, baseHash: "sha256:changed" }), false);
+  assert.equal(matchesDesktopRetryTarget(block, { ...target, from: 2.5 }), false);
+  assert.equal(matchesDesktopRetryTarget(block, { ...target, to: block.plainText.length + 1 }), false);
+});
 
 test("plans auditable batch review decisions without duplicating atomic groups", () => {
   const proposal = {
@@ -174,6 +244,8 @@ test("runs Context Compiler to host stream to persisted patch proposal without p
     blocks: [block],
   };
   let authorizedRequest = null;
+  const authorizedRequestIds = [];
+  let modelExecutions = 0;
   const hostCalls = [];
   const invokeHost = async (command, args) => {
     hostCalls.push(command);
@@ -192,9 +264,10 @@ test("runs Context Compiler to host stream to persisted patch proposal without p
       assert.equal(args.input.binding.targetTo, 0);
       assert.deepEqual(args.input.contextPacket, confirmedContext);
       authorizedRequest = args.input.request;
+      authorizedRequestIds.push(authorizedRequest.requestId);
       return {
         schemaVersion: 1,
-        authorizationId: "model-auth-test",
+        authorizationId: `model-auth-test-${authorizedRequest.requestId}`,
         requestId: authorizedRequest.requestId,
         providerId: "deepseek",
         expiresAt: "2026-07-15T00:02:00Z",
@@ -202,7 +275,21 @@ test("runs Context Compiler to host stream to persisted patch proposal without p
     }
     if (command === "execute_authorized_model_stream") {
       assert.ok(authorizedRequest, "a host authorization must precede execution");
-      assert.equal(args.authorizationId, "model-auth-test");
+      assert.equal(args.authorizationId, `model-auth-test-${authorizedRequest.requestId}`);
+      modelExecutions += 1;
+      if (modelExecutions === 1) {
+        throw {
+          code: "PROVIDER_RATE_LIMIT",
+          message: "Provider temporarily rate limited the request",
+          details: {
+            status: 429,
+            remoteCode: "rate_limit",
+            remoteRequestId: "request-rate-limit-1",
+            retryAfterMs: 800,
+            retriable: true,
+          },
+        };
+      }
       const output = JSON.stringify({
         schemaVersion: 1,
         kind: "replacement",
@@ -241,6 +328,7 @@ test("runs Context Compiler to host stream to persisted patch proposal without p
     from: 0,
     to: 0,
     operationType: "continue_scene",
+    sleep: async (milliseconds) => { assert.equal(milliseconds, 800); },
     loadOperationContext: async (binding) => {
       hostCalls.push("get_operation_context");
       assert.equal(binding.baseCommitId, workspace.headCommitId);
@@ -389,8 +477,10 @@ test("runs Context Compiler to host stream to persisted patch proposal without p
     }),
     TypeError,
   );
-  assert.deepEqual(hostCalls.slice(0, 3), [
+  assert.deepEqual(hostCalls.slice(0, 5), [
     "get_operation_context",
+    "authorize_model_request",
+    "execute_authorized_model_stream",
     "authorize_model_request",
     "execute_authorized_model_stream",
   ]);
@@ -398,6 +488,13 @@ test("runs Context Compiler to host stream to persisted patch proposal without p
   const bundle = JSON.parse(persisted[0]);
   assert.equal(bundle.run.state, "review");
   assert.equal(bundle.artifact.kind, "patch_proposal");
+  assert.equal(bundle.attempts.length, 2);
+  assert.equal(bundle.attempts[0].outcome, "failed");
+  assert.equal(bundle.attempts[0].failure.kind, "rate_limit");
+  assert.equal(bundle.attempts[0].retryDelayMs, 800);
+  assert.equal(bundle.attempts[1].outcome, "succeeded");
+  assert.equal(authorizedRequestIds.length, 2);
+  assert.equal(new Set(authorizedRequestIds).size, 2);
   assert.equal(persisted[0].includes("apiKey"), false);
   assert.equal(persisted[0].includes("secret-never"), false);
 });

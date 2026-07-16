@@ -12,6 +12,7 @@ WebView 只允许：
 - 写入、检查和删除 provider secret。
 - 通过一次性、短期、绑定当前项目 HEAD/完整 Context Packet/受控 Prompt/目标 Block 的 Rust capability，执行 DeepSeek、Qwen、Kimi、MiniMax 固定 HTTPS 端点，以及 Ollama 固定回环端点的流式请求与取消。
 - 复用 Kernel/Operation Runner/Patch Engine 完成 AI 操作、Findings、逐 hunk 与全部接受/拒绝审查；批量 decision 仍逐 revision 写入 Host 审计。
+- 对响应开始前的临时 Provider 错误执行最多两次有界尝试，每次生成新 request ID 并重新申请一次性 Host capability；耗尽后可把原 Block revision/hash/UTF-16 选区绑定到全新的 Operation 显式重试。
 - 列出并按需重新加载持久审查候选；候选详情由 Host 校验不可变 Proposal、hash 和全部 review event 后返回，页面不能提交自造 decision。
 - 将 ready 候选保存为独立分支 Commit 与物化快照，不移动当前主分支 HEAD，也不改变当前正文或审查状态。
 - 原子应用已审查 Proposal，同时写入 `ai_accept` Commit 与完整 Operation/Review 审计。
@@ -23,6 +24,8 @@ WebView 不存在“读取 secret 明文”命令。云端模型请求由 Rust �
 WebView 也不存在原始 `execute_model_stream` 命令。用户确认 Context 后，`authorize_model_request` 会重新读取当前 HEAD 的全部候选，复算 Packet stable hash、token、评分、预算和 `never_send` 等策略，并验证实际 system/user Prompt 逐项等于确认 Packet；通过后才返回最多 120 秒有效且只可消费一次的 capability。该 capability 在 Host 内持有完整不可变 Packet，但调试输出只暴露 ID/hash/字节数；`execute_authorized_model_stream` 只接收 capability ID。项目变化、取消或关闭会使授权失效。
 
 五种内置 AI 操作由同一注册表驱动工具栏、Block 右键、`Alt+1…5` 快捷键和 `Ctrl/⌘+Shift+P` 命令面板。普通右键打开 AI 菜单，`Shift + 右键` 保留系统菜单；所有入口共享当前 UTF-16 选区与并发禁用规则，快捷键不能绕过正在执行或审查中的状态。
+
+自动重试只发生在 Host 尚未发出响应开始事件时，默认总尝试数为 2，退避不超过 5 秒并可取消。响应开始后的错误不会自动重试或拼接部分输出。显式“重新尝试”创建新的 Run，并在任何云端调用前重新验证原目标；正文、revision、hash 或范围变化都会以 `TARGET_STALE` 关闭。
 
 候选中心显示进行中与历史审查。未完成候选从 Host 的 artifact/event 真相重新构造，可继续逐项或批量决策；ready 候选可保存一次独立分支。分支入口要求当前 HEAD 与 operation base、目标 Block revision/hash 完全一致，发生冲突时保持只读审计，不做隐式 rebase。候选分支快照不出现在用户检查点列表。
 

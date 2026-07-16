@@ -5,6 +5,7 @@ import type {
   OperationState,
 } from "../../protocol/src/index.ts";
 import type { OperationTransition } from "../../kernel/src/index.ts";
+import type { OperationAttempt } from "./types.ts";
 
 export type OperationExecutionErrorCode =
   | "OPERATION_CANCELLED"
@@ -38,6 +39,7 @@ export class OperationExecutionError extends Error {
   readonly providerId: ModelProviderId;
   readonly model?: string;
   readonly contextPacket?: ContextPacket;
+  readonly attempts: readonly OperationAttempt[];
   readonly rootCause: unknown;
 
   constructor(input: {
@@ -49,6 +51,7 @@ export class OperationExecutionError extends Error {
     readonly providerId: ModelProviderId;
     readonly model?: string;
     readonly contextPacket?: ContextPacket;
+    readonly attempts?: readonly OperationAttempt[];
     readonly rootCause: unknown;
   }) {
     super(input.message);
@@ -60,6 +63,7 @@ export class OperationExecutionError extends Error {
     this.providerId = input.providerId;
     this.model = input.model;
     this.contextPacket = input.contextPacket;
+    this.attempts = [...(input.attempts ?? [])];
     this.rootCause = input.rootCause;
   }
 }

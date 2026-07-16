@@ -3,7 +3,7 @@ use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use crate::error::{StoreError, StoreResult};
 use crate::model::{
     AppendReviewEvent, ContextPacketRecord, ModelUsageRecord, NewOperationLifecycleEvent,
-    OperationArtifactKind, OperationArtifactRecord, OperationFailureRecord,
+    OperationArtifactKind, OperationArtifactRecord, OperationAttemptRecord, OperationFailureRecord,
     OperationLifecycleEventRecord, OperationRunRecord, OperationState, PersistOperationBundle,
     ReviewCandidateBranchRecord, ReviewCandidateSummaryRecord, ReviewDecision, ReviewEventKind,
     ReviewEventRecord, ReviewSessionRecord, ReviewSessionStatus,
@@ -98,6 +98,34 @@ impl OptimizerStore {
                     event.to_state.as_str(),
                     event.occurred_at,
                     event.reason,
+                ],
+            )?;
+        }
+
+        for attempt in &bundle.attempts {
+            transaction.execute(
+                "INSERT INTO operation_attempt(
+                   run_id, sequence, started_at, finished_at, outcome, response_started,
+                   response_id, failure_code, failure_kind, http_status, remote_request_id,
+                   retry_after_ms, retriable, retry_delay_ms
+                 ) VALUES (
+                   ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
+                 )",
+                params![
+                    bundle.run.id,
+                    attempt.sequence,
+                    attempt.started_at,
+                    attempt.finished_at,
+                    attempt.outcome,
+                    i64::from(attempt.response_started),
+                    attempt.response_id,
+                    attempt.failure_code,
+                    attempt.failure_kind,
+                    attempt.http_status,
+                    attempt.remote_request_id,
+                    attempt.retry_after_ms,
+                    attempt.retriable.map(i64::from),
+                    attempt.retry_delay_ms,
                 ],
             )?;
         }
@@ -284,6 +312,39 @@ impl OptimizerStore {
             .collect()
     }
 
+    pub fn list_operation_attempts(
+        &self,
+        run_id: &str,
+    ) -> StoreResult<Vec<OperationAttemptRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT run_id, sequence, started_at, finished_at, outcome, response_started,
+                    response_id, failure_code, failure_kind, http_status, remote_request_id,
+                    retry_after_ms, retriable, retry_delay_ms
+             FROM operation_attempt WHERE run_id = ?1 ORDER BY sequence",
+        )?;
+        statement
+            .query_map([run_id], |row| {
+                Ok(OperationAttemptRecord {
+                    run_id: row.get(0)?,
+                    sequence: row.get(1)?,
+                    started_at: row.get(2)?,
+                    finished_at: row.get(3)?,
+                    outcome: row.get(4)?,
+                    response_started: row.get::<_, i64>(5)? != 0,
+                    response_id: row.get(6)?,
+                    failure_code: row.get(7)?,
+                    failure_kind: row.get(8)?,
+                    http_status: row.get(9)?,
+                    remote_request_id: row.get(10)?,
+                    retry_after_ms: row.get(11)?,
+                    retriable: row.get::<_, Option<i64>>(12)?.map(|value| value != 0),
+                    retry_delay_ms: row.get(13)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn get_review_session(&self, proposal_id: &str) -> StoreResult<ReviewSessionRecord> {
         let raw = self
             .connection
@@ -458,6 +519,21 @@ impl OptimizerStore {
                 "SELECT COUNT(*) FROM (
                    SELECT run_id FROM operation_lifecycle_event
                    GROUP BY run_id HAVING COUNT(*) <> MAX(sequence)
+                 )",
+            ),
+            (
+                "operation attempt sequences have gaps",
+                "SELECT COUNT(*) FROM (
+                   SELECT run_id FROM operation_attempt
+                   GROUP BY run_id HAVING COUNT(*) <> MAX(sequence)
+                 )",
+            ),
+            (
+                "successful operation attempt is not final",
+                "SELECT COUNT(*) FROM operation_attempt AS a
+                 WHERE a.outcome = 'succeeded' AND EXISTS(
+                   SELECT 1 FROM operation_attempt AS later
+                   WHERE later.run_id = a.run_id AND later.sequence > a.sequence
                  )",
             ),
             (
@@ -848,7 +924,7 @@ fn validate_bundle(bundle: &PersistOperationBundle) -> StoreResult<()> {
     }
     if !matches!(
         run.provider_id.as_str(),
-        "deepseek" | "qwen" | "kimi" | "minimax"
+        "deepseek" | "qwen" | "kimi" | "minimax" | "ollama"
     ) {
         return validation("run.provider_id is unsupported");
     }
@@ -930,6 +1006,97 @@ fn validate_bundle(bundle: &PersistOperationBundle) -> StoreResult<()> {
         )?;
     }
     validate_lifecycle(&bundle.lifecycle_events, run.state)?;
+    validate_attempts(&bundle.attempts)?;
+    Ok(())
+}
+
+fn validate_attempts(attempts: &[crate::model::NewOperationAttempt]) -> StoreResult<()> {
+    if attempts.len() > 3 {
+        return validation("operation attempts cannot exceed 3");
+    }
+    for (index, attempt) in attempts.iter().enumerate() {
+        if attempt.sequence != index as i64 + 1 {
+            return validation("operation attempt sequences must be contiguous from 1");
+        }
+        non_empty("attempt.started_at", &attempt.started_at)?;
+        non_empty("attempt.finished_at", &attempt.finished_at)?;
+        if attempt
+            .response_id
+            .as_ref()
+            .is_some_and(|value| value.chars().count() > 512)
+            || attempt
+                .remote_request_id
+                .as_ref()
+                .is_some_and(|value| value.chars().count() > 512)
+            || attempt
+                .failure_code
+                .as_ref()
+                .is_some_and(|value| value.is_empty() || value.chars().count() > 200)
+            || attempt
+                .http_status
+                .is_some_and(|value| !(100..=599).contains(&value))
+            || attempt
+                .retry_after_ms
+                .is_some_and(|value| !(0..=86_400_000).contains(&value))
+            || attempt
+                .retry_delay_ms
+                .is_some_and(|value| !(0..=10_000).contains(&value))
+        {
+            return validation("operation attempt metadata is out of bounds");
+        }
+        if let Some(kind) = attempt.failure_kind.as_deref()
+            && !matches!(
+                kind,
+                "authentication"
+                    | "permission"
+                    | "rate_limit"
+                    | "quota"
+                    | "invalid_request"
+                    | "content_filter"
+                    | "server"
+                    | "network"
+                    | "timeout"
+                    | "cancelled"
+                    | "protocol"
+                    | "configuration"
+            )
+        {
+            return validation("operation attempt failure kind is unsupported");
+        }
+        match attempt.outcome.as_str() {
+            "succeeded" => {
+                if !attempt.response_started
+                    || attempt.response_id.as_deref().is_none_or(str::is_empty)
+                    || attempt.failure_code.is_some()
+                    || attempt.failure_kind.is_some()
+                    || attempt.http_status.is_some()
+                    || attempt.remote_request_id.is_some()
+                    || attempt.retry_after_ms.is_some()
+                    || attempt.retriable.is_some()
+                    || attempt.retry_delay_ms.is_some()
+                {
+                    return validation("successful operation attempt metadata is inconsistent");
+                }
+                if index + 1 != attempts.len() {
+                    return validation("successful operation attempt must be final");
+                }
+            }
+            "failed" => {
+                if attempt.failure_code.as_deref().is_none_or(str::is_empty)
+                    || attempt.retriable.is_none()
+                    || (!attempt.response_started && attempt.response_id.is_some())
+                    || (attempt.response_started
+                        && attempt.response_id.as_deref().is_none_or(str::is_empty))
+                    || attempt.retry_delay_ms.is_some()
+                        && (attempt.retriable != Some(true) || attempt.response_started)
+                    || index + 1 < attempts.len() && attempt.retry_delay_ms.is_none()
+                {
+                    return validation("failed operation attempt metadata is inconsistent");
+                }
+            }
+            _ => return validation("operation attempt outcome is unsupported"),
+        }
+    }
     Ok(())
 }
 

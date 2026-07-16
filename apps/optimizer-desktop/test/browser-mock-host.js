@@ -70,7 +70,7 @@
       title: "雾港来信",
       language: "zh-CN",
       directory: "W:\\写作\\雾港来信.optimizer",
-      databaseSchemaVersion: 7,
+        databaseSchemaVersion: 8,
       headCommitId: workspace.headCommitId,
       revision: 0,
       createdAt: "2026-07-15T00:00:00Z",

@@ -22,8 +22,8 @@ pub use model_gateway::{
 };
 pub use operation_commands::{
     ArtifactAudit, ContextPacketAudit, FailureAudit, LifecycleEventAudit, ModelUsageAudit,
-    OperationAuditResponse, OperationCommandError, OperationCommandHost, PersistOperationResponse,
-    PersistReviewResponse, ReviewAudit, ReviewEventAudit, RunAudit,
+    OperationAttemptAudit, OperationAuditResponse, OperationCommandError, OperationCommandHost,
+    PersistOperationResponse, PersistReviewResponse, ReviewAudit, ReviewEventAudit, RunAudit,
 };
 pub use operation_context::{
     OperationContextCandidate, OperationContextSignals, OperationContextSpec,

@@ -2,7 +2,7 @@ use rusqlite::{Connection, TransactionBehavior};
 
 use crate::error::{StoreError, StoreResult};
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 7;
+pub const CURRENT_SCHEMA_VERSION: i64 = 8;
 
 pub(crate) const MIGRATION_1: &str = r#"
 CREATE TABLE schema_migration (
@@ -582,6 +582,65 @@ END;
 UPDATE project SET schema_version = 7 WHERE schema_version < 7;
 "#;
 
+const MIGRATION_8: &str = r#"
+CREATE TABLE operation_attempt (
+  run_id TEXT NOT NULL REFERENCES operation_run(id),
+  sequence INTEGER NOT NULL CHECK(sequence BETWEEN 1 AND 3),
+  started_at TEXT NOT NULL,
+  finished_at TEXT NOT NULL,
+  outcome TEXT NOT NULL CHECK(outcome IN ('succeeded', 'failed')),
+  response_started INTEGER NOT NULL CHECK(response_started IN (0, 1)),
+  response_id TEXT CHECK(response_id IS NULL OR length(response_id) BETWEEN 1 AND 512),
+  failure_code TEXT CHECK(failure_code IS NULL OR length(failure_code) BETWEEN 1 AND 200),
+  failure_kind TEXT CHECK(failure_kind IS NULL OR failure_kind IN (
+    'authentication', 'permission', 'rate_limit', 'quota', 'invalid_request',
+    'content_filter', 'server', 'network', 'timeout', 'cancelled', 'protocol',
+    'configuration'
+  )),
+  http_status INTEGER CHECK(http_status IS NULL OR http_status BETWEEN 100 AND 599),
+  remote_request_id TEXT CHECK(remote_request_id IS NULL OR length(remote_request_id) BETWEEN 1 AND 512),
+  retry_after_ms INTEGER CHECK(retry_after_ms IS NULL OR retry_after_ms BETWEEN 0 AND 86400000),
+  retriable INTEGER CHECK(retriable IS NULL OR retriable IN (0, 1)),
+  retry_delay_ms INTEGER CHECK(retry_delay_ms IS NULL OR retry_delay_ms BETWEEN 0 AND 10000),
+  PRIMARY KEY(run_id, sequence),
+  CHECK(
+    (response_started = 1 AND response_id IS NOT NULL)
+    OR (response_started = 0 AND response_id IS NULL)
+  ),
+  CHECK(
+    (outcome = 'succeeded'
+      AND response_started = 1
+      AND response_id IS NOT NULL
+      AND failure_code IS NULL
+      AND failure_kind IS NULL
+      AND http_status IS NULL
+      AND remote_request_id IS NULL
+      AND retry_after_ms IS NULL
+      AND retriable IS NULL
+      AND retry_delay_ms IS NULL)
+    OR
+    (outcome = 'failed'
+      AND failure_code IS NOT NULL
+      AND retriable IS NOT NULL)
+  ),
+  CHECK(retry_delay_ms IS NULL OR (outcome = 'failed' AND retriable = 1 AND response_started = 0))
+) STRICT;
+
+CREATE INDEX operation_attempt_run_idx
+  ON operation_attempt(run_id, sequence);
+
+CREATE TRIGGER operation_attempt_immutable_update
+BEFORE UPDATE ON operation_attempt BEGIN
+  SELECT RAISE(ABORT, 'immutable:operation_attempt');
+END;
+CREATE TRIGGER operation_attempt_immutable_delete
+BEFORE DELETE ON operation_attempt BEGIN
+  SELECT RAISE(ABORT, 'immutable:operation_attempt');
+END;
+
+UPDATE project SET schema_version = 8 WHERE schema_version < 8;
+"#;
+
 pub fn migrate(connection: &mut Connection) -> StoreResult<()> {
     let current: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if current > CURRENT_SCHEMA_VERSION {
@@ -698,6 +757,24 @@ pub fn migrate(connection: &mut Connection) -> StoreResult<()> {
             )?;
             transaction.pragma_update(None, "user_version", 7)?;
         }
+        if current < 8 {
+            transaction.execute_batch(MIGRATION_8)?;
+            let violations: i64 = transaction.query_row(
+                "SELECT COUNT(*) FROM pragma_foreign_key_check",
+                [],
+                |row| row.get(0),
+            )?;
+            if violations != 0 {
+                return Err(StoreError::Validation(format!(
+                    "schema migration produced {violations} foreign-key violation(s)"
+                )));
+            }
+            transaction.execute(
+                "INSERT INTO schema_migration(version, applied_at) VALUES (8, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                [],
+            )?;
+            transaction.pragma_update(None, "user_version", 8)?;
+        }
         transaction.commit()?;
         Ok(())
     })();
@@ -774,6 +851,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(candidate_branch_table, "patch_candidate_branch");
+        let attempt_table: String = connection
+            .query_row(
+                "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'operation_attempt'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(attempt_table, "operation_attempt");
         let summary_table: String = connection
             .query_row(
                 "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'summary_invalidation'",

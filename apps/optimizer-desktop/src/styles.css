@@ -160,7 +160,9 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .secondary-button { color: var(--accent); border: 1px solid #b8cbbf; background: var(--accent-soft); }
 .primary-button:hover, .secondary-button:hover, .ghost-button:hover, .small-button:hover { transform: translateY(-1px); }
 
-.notice { margin: 0 auto 14px; padding: 11px 14px; border-radius: 10px; font-size: 13px; line-height: 1.5; }
+.notice { margin: 0 auto 14px; padding: 11px 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-radius: 10px; font-size: 13px; line-height: 1.5; }
+.notice > span { min-width: 0; }
+.notice-action { flex: 0 0 auto; }
 .notice-error { color: #7a302a; border: 1px solid #e3b8b2; background: #f9e7e3; }
 .notice-warning { color: #744713; border: 1px solid #e5c89e; background: #fff1d8; }
 .notice-success { color: #275c45; border: 1px solid #b8d3c3; background: #e3f0e7; }
