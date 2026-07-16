@@ -1,6 +1,9 @@
 pub const REGISTERED_COMMANDS: &[&str] = &[
     "create_project",
     "open_project",
+    "list_recent_projects",
+    "open_recent_project",
+    "remove_recent_project",
     "close_project",
     "get_project_session",
     "get_project_workspace",

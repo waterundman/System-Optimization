@@ -1,4 +1,5 @@
 (() => {
+  const recentWelcome = new URLSearchParams(window.location.search).has("recentWelcome");
   if (new URLSearchParams(window.location.search).has("autoDialogs")) {
     window.prompt = (message) => message.includes("新的章节") ? "第二章：雨夜" : "第二章";
     window.confirm = () => true;
@@ -46,7 +47,7 @@
   const archivedBlocks = new Map();
   const session = {
     schemaVersion: 1,
-    isOpen: true,
+    isOpen: !recentWelcome,
     project: {
       schemaVersion: 1,
       projectId: workspace.projectId,
@@ -82,6 +83,29 @@
   }
   async function invoke(command, args = {}) {
     if (command === "get_project_session") return structuredClone(session);
+    if (command === "list_recent_projects") {
+      return [{
+        schemaVersion: 1,
+        projectId: workspace.projectId,
+        title: session.project.title,
+        language: session.project.language,
+        directory: session.project.directory,
+        lastOpenedAt: "2026-07-16T00:00:00Z",
+        available: true,
+      }];
+    }
+    if (command === "open_recent_project") {
+      if (args.input.projectId !== workspace.projectId) throw { code: "RECENT_PROJECT_NOT_FOUND", message: "Missing recent project" };
+      session.isOpen = true;
+      return structuredClone(session);
+    }
+    if (command === "remove_recent_project") {
+      return { schemaVersion: 1, projectId: args.input.projectId, changed: true };
+    }
+    if (command === "close_project") {
+      session.isOpen = false;
+      return { schemaVersion: 1, isOpen: false, project: null };
+    }
     if (command === "get_project_workspace") return structuredClone(workspace);
     if (command === "list_archived_documents") return structuredClone(archivedDocuments);
     if (command === "list_summary_invalidations") {

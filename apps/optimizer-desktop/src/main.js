@@ -33,6 +33,8 @@ const state = {
   styleSamples: [],
   archivedDocuments: [],
   summaryInvalidations: [],
+  recentProjects: [],
+  recentProjectBusy: null,
   selectedProviderId: "deepseek",
   providerSettings: loadProviderSettings(),
   ollamaDiscovery: null,
@@ -155,7 +157,10 @@ async function bootstrap() {
   try {
     state.session = await invokeHost("get_project_session");
     if (state.session.isOpen) await loadWorkspace();
-    else renderWelcome();
+    else {
+      await loadRecentProjects();
+      renderWelcome();
+    }
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
     renderWelcome();
@@ -197,8 +202,99 @@ function renderWelcome() {
   ]);
   openForm.addEventListener("submit", openProject);
 
-  const panel = element("section", { className: "welcome-panel" }, [noticeView(), createForm, openForm]);
+  const panel = element("section", { className: "welcome-panel" }, [
+    noticeView(),
+    recentProjectsView(),
+    createForm,
+    openForm,
+  ]);
   app.replaceChildren(element("div", { className: "welcome-layout" }, [brand, panel]));
+}
+
+async function loadRecentProjects() {
+  try {
+    state.recentProjects = await invokeHost("list_recent_projects");
+  } catch (error) {
+    state.recentProjects = [];
+    setNotice("warning", normalizeHostError(error).message);
+  }
+}
+
+function recentProjectsView() {
+  if (!state.recentProjects.length) return null;
+  return element("section", { className: "recent-projects", attrs: { "aria-labelledby": "recent-projects-title" } }, [
+    element("div", { className: "recent-projects-heading" }, [
+      element("h2", { text: "最近项目", attrs: { id: "recent-projects-title" } }),
+      element("span", { text: `${state.recentProjects.length} 个` }),
+    ]),
+    ...state.recentProjects.map(recentProjectRow),
+  ]);
+}
+
+function recentProjectRow(project) {
+  const busy = state.recentProjectBusy === project.projectId;
+  const open = button("", "recent-project-open", () => openRecentProject(project), {
+    disabled: busy || !project.available,
+    attrs: { "aria-label": `打开最近项目 ${project.title}` },
+  });
+  open.append(
+    element("span", { className: "recent-project-mark", text: "优" }),
+    element("span", { className: "recent-project-copy" }, [
+      element("strong", { text: project.title }),
+      element("span", { text: project.available ? project.directory : "项目路径不可用" }),
+    ]),
+    element("span", { className: "recent-project-time", text: formatRecentTime(project.lastOpenedAt) }),
+  );
+  return element("div", { className: `recent-project${project.available ? "" : " recent-project-missing"}` }, [
+    open,
+    button("移除", "recent-project-remove", () => removeRecentProject(project), {
+      disabled: busy,
+      attrs: { "aria-label": `移除最近项目 ${project.title}` },
+    }),
+  ]);
+}
+
+function formatRecentTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "最近打开";
+  return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(date);
+}
+
+async function openRecentProject(project) {
+  if (!project.available || state.recentProjectBusy) return;
+  state.recentProjectBusy = project.projectId;
+  renderWelcome();
+  try {
+    state.session = await invokeHost("open_recent_project", {
+      input: { schemaVersion: 1, projectId: project.projectId },
+    });
+    state.recentProjectBusy = null;
+    setNotice(null, null);
+    await loadWorkspace();
+  } catch (error) {
+    state.recentProjectBusy = null;
+    setNotice("error", normalizeHostError(error).message);
+    await loadRecentProjects();
+    renderWelcome();
+  }
+}
+
+async function removeRecentProject(project) {
+  if (state.recentProjectBusy) return;
+  state.recentProjectBusy = project.projectId;
+  renderWelcome();
+  try {
+    await invokeHost("remove_recent_project", {
+      input: { schemaVersion: 1, projectId: project.projectId },
+    });
+    state.recentProjects = state.recentProjects.filter((item) => item.projectId !== project.projectId);
+    setNotice("success", `已从最近项目中移除“${project.title}”，项目文件未被删除。`);
+  } catch (error) {
+    setNotice("error", normalizeHostError(error).message);
+  } finally {
+    state.recentProjectBusy = null;
+    renderWelcome();
+  }
 }
 
 function labeledInput(label, name, placeholder, required, value = "") {
@@ -1559,6 +1655,7 @@ async function closeProject() {
     state.styleSamples = [];
     state.archivedDocuments = [];
     state.summaryInvalidations = [];
+    state.recentProjectBusy = null;
     state.conflictDraft = null;
     state.aiRunning = null;
     state.aiContextPreview = null;
@@ -1566,6 +1663,7 @@ async function closeProject() {
     state.activeBlockId = null;
     state.aiSelection = null;
     setNotice(null, null);
+    await loadRecentProjects();
     renderWelcome();
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);

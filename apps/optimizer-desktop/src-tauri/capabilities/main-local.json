@@ -5,6 +5,7 @@
   "windows": ["main"],
   "permissions": [
     "allow-project-session",
+    "allow-recent-projects",
     "allow-workspace-read",
     "allow-style-library",
     "allow-workspace-write",

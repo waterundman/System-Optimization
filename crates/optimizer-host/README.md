@@ -6,6 +6,7 @@ Rust 宿主安全边界与跨语言命令适配层。
 
 - `ProjectRoot` 校验项目相对路径，拒绝绝对路径、`..` 与目录逃逸；
 - `OpenedProject::create/open` 原子创建并严格校验 `.optimizer` 项目包；
+- `RecentProjectRegistry` 在宿主用户配置区严格解析、去重并崩溃安全地替换最近项目元数据；
 - `OperationCommandHost::persist_operation_bundle_json` 严格接收 v1 Operation bundle，并在一个 Store 事务中持久化；
 - `OperationCommandHost::append_review_event_json` 使用 expected revision/status 写入审查事件；
 - `OperationCommandHost::get_operation_audit` 聚合运行、ContextPacket、生命周期、Artifact 与 Patch review 历史；
@@ -23,6 +24,10 @@ Rust 宿主安全边界与跨语言命令适配层。
 `OpenedProject::create/open` 是桌面端项目生命周期的唯一入口。项目包使用固定的 `manifest.json + project.sqlite3 + assets/backups/exports` 结构；创建时在目标父目录的隐藏 staging 目录完成初始化与校验，再原子 rename 发布。打开时严格校验 manifest 大小/schema、数据库 invariant、项目 ID 和主分支/HEAD 绑定。
 
 `ProjectInfo` 对上层暴露 `projectId`、`mainBranchId`、HEAD、revision 与数据库 schema，为下一阶段的文档加载、乐观并发自动保存和版本提交提供稳定基线。
+
+## 最近项目
+
+最近项目注册表不存入任一项目包，也不作为项目真实性来源。它采用固定 schema、256 KiB 上限、最多 12 项、同目录临时文件、旧文件备份与发布失败回滚。记录只包含项目 ID、标题、语言、绝对目录和最后打开时间；列表可标记缺失路径。快速打开从注册表解析目录后仍调用 `OpenedProject::open`，并再次比对登记项目 ID。WebView 不能修改目录映射；移除记录不删除项目文件。
 
 ## 工作区命令
 

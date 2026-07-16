@@ -6,6 +6,7 @@ mod model_gateway;
 mod model_transport;
 mod operation_commands;
 mod project_package;
+mod recent_projects;
 mod secrets;
 mod workspace_commands;
 
@@ -24,6 +25,7 @@ pub use project_package::{
     ExportMarkdownResponse, NewProjectSpec, OpenedProject, ProjectInfo, ProjectPackageError,
     ProjectPackageManifest,
 };
+pub use recent_projects::{RecentProject, RecentProjectError, RecentProjectRegistry};
 #[cfg(windows)]
 pub use secrets::WindowsCredentialStore;
 pub use secrets::{MemorySecretStore, SecretReference, SecretStore, SecretStoreError, SecretValue};

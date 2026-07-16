@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use optimizer_host::{
@@ -8,10 +9,11 @@ use optimizer_host::{
     ModelGatewayError, ModelProviderId, ModelRequestAuthorization, ModelStreamEvent,
     NewProjectSpec, OllamaModelList, OpenedProject, OperationAuditResponse, OperationCommandError,
     PersistOperationResponse, PersistReviewResponse, ProjectInfo, ProjectPackageError,
-    ProjectWorkspace, RenameDocumentSpec, ReorderDocumentSpec, RestoreCheckpointResponse,
-    RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec, SecretReference, SecretStore,
-    SecretStoreError, SecretValue, SetDocumentArchivedSpec, SetStyleSampleStatusSpec, StyleSample,
-    SummaryInvalidation, VersionHistory, WorkspaceCommandError,
+    ProjectWorkspace, RecentProject, RecentProjectError, RecentProjectRegistry, RenameDocumentSpec,
+    ReorderDocumentSpec, RestoreCheckpointResponse, RestoreCheckpointSpec, SaveBlockResponse,
+    SaveBlockSpec, SecretReference, SecretStore, SecretStoreError, SecretValue,
+    SetDocumentArchivedSpec, SetStyleSampleStatusSpec, StyleSample, SummaryInvalidation,
+    VersionHistory, WorkspaceCommandError,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Runtime, State, ipc::Channel};
@@ -23,6 +25,7 @@ pub use command_manifest::REGISTERED_COMMANDS;
 #[derive(Clone)]
 pub struct DesktopState {
     session: Arc<Mutex<Option<OpenedProject>>>,
+    recent_projects: Arc<Mutex<RecentProjectRegistry>>,
     secrets: Arc<dyn SecretStore>,
     models: ModelExecutionHost,
 }
@@ -32,9 +35,23 @@ impl DesktopState {
         let models = ModelExecutionHost::new(secrets.clone());
         Self {
             session: Arc::new(Mutex::new(None)),
+            recent_projects: Arc::new(Mutex::new(RecentProjectRegistry::memory())),
             secrets,
             models,
         }
+    }
+
+    pub fn configure_recent_projects(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<(), RecentProjectError> {
+        let registry = RecentProjectRegistry::open(path)?;
+        *self
+            .recent_projects
+            .lock()
+            .map_err(|_| RecentProjectError::InvalidRegistry("registry lock is poisoned"))? =
+            registry;
+        Ok(())
     }
 
     pub fn create_project(
@@ -56,6 +73,7 @@ impl DesktopState {
         )
         .map_err(CommandError::from)?;
         let info = project.info().map_err(CommandError::from)?;
+        self.record_recent_project(&info);
         *session = Some(project);
         Ok(ProjectSessionResponse::open(info))
     }
@@ -68,8 +86,55 @@ impl DesktopState {
         }
         let project = OpenedProject::open(&input.project_directory).map_err(CommandError::from)?;
         let info = project.info().map_err(CommandError::from)?;
+        self.record_recent_project(&info);
         *session = Some(project);
         Ok(ProjectSessionResponse::open(info))
+    }
+
+    pub fn list_recent_projects(&self) -> CommandResult<Vec<RecentProject>> {
+        Ok(self.recent_project_registry()?.list())
+    }
+
+    pub fn open_recent_project(
+        &self,
+        input: RecentProjectRequest,
+    ) -> CommandResult<ProjectSessionResponse> {
+        input.validate()?;
+        let directory = self
+            .recent_project_registry()?
+            .directory_for(&input.project_id)
+            .map_err(CommandError::from)?;
+        let mut session = self.project_session()?;
+        if session.is_some() {
+            return Err(CommandError::project_already_open());
+        }
+        let project = OpenedProject::open(directory).map_err(CommandError::from)?;
+        let info = project.info().map_err(CommandError::from)?;
+        if info.project_id != input.project_id {
+            return Err(CommandError::basic(
+                "RECENT_PROJECT_BINDING_CHANGED",
+                "The project at this recent location no longer matches the registered project",
+            ));
+        }
+        self.record_recent_project(&info);
+        *session = Some(project);
+        Ok(ProjectSessionResponse::open(info))
+    }
+
+    pub fn remove_recent_project(
+        &self,
+        input: RecentProjectRequest,
+    ) -> CommandResult<RecentProjectMutationResponse> {
+        input.validate()?;
+        let changed = self
+            .recent_project_registry()?
+            .remove(&input.project_id)
+            .map_err(CommandError::from)?;
+        Ok(RecentProjectMutationResponse {
+            schema_version: 1,
+            project_id: input.project_id,
+            changed,
+        })
     }
 
     pub fn close_project(&self) -> CommandResult<ProjectSessionResponse> {
@@ -392,6 +457,18 @@ impl DesktopState {
             .map_err(|_| CommandError::state_unavailable())
     }
 
+    fn recent_project_registry(&self) -> CommandResult<MutexGuard<'_, RecentProjectRegistry>> {
+        self.recent_projects
+            .lock()
+            .map_err(|_| CommandError::state_unavailable())
+    }
+
+    fn record_recent_project(&self, info: &ProjectInfo) {
+        if let Ok(mut registry) = self.recent_projects.lock() {
+            let _ = registry.record(info);
+        }
+    }
+
     fn current_project(&self) -> CommandResult<OpenedProjectGuard<'_>> {
         let guard = self.project_session()?;
         if guard.is_none() {
@@ -516,6 +593,12 @@ impl From<ProjectPackageError> for CommandError {
     }
 }
 
+impl From<RecentProjectError> for CommandError {
+    fn from(error: RecentProjectError) -> Self {
+        Self::basic(error.code(), error.public_message())
+    }
+}
+
 impl From<SecretStoreError> for CommandError {
     fn from(error: SecretStoreError) -> Self {
         Self::basic(error.code(), error.to_string())
@@ -578,6 +661,26 @@ impl CreateProjectRequest {
 pub struct OpenProjectRequest {
     pub schema_version: u32,
     pub project_directory: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecentProjectRequest {
+    pub schema_version: u32,
+    pub project_id: String,
+}
+
+impl RecentProjectRequest {
+    fn validate(&self) -> CommandResult<()> {
+        validate_request_schema(self.schema_version)?;
+        if !is_safe_binding_id(&self.project_id) {
+            return Err(CommandError::basic(
+                "RECENT_PROJECT_ID_INVALID",
+                "Recent project ID is invalid",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -906,6 +1009,14 @@ pub struct ProjectSessionResponse {
     pub project: Option<ProjectInfo>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentProjectMutationResponse {
+    pub schema_version: u32,
+    pub project_id: String,
+    pub changed: bool,
+}
+
 impl ProjectSessionResponse {
     fn open(project: ProjectInfo) -> Self {
         Self {
@@ -947,6 +1058,9 @@ pub fn attach<R: Runtime>(builder: tauri::Builder<R>, state: DesktopState) -> ta
         .invoke_handler(tauri::generate_handler![
             create_project,
             open_project,
+            list_recent_projects,
+            open_recent_project,
+            remove_recent_project,
             close_project,
             get_project_session,
             get_project_workspace,
@@ -992,6 +1106,27 @@ async fn open_project(
     state: State<'_, DesktopState>,
 ) -> CommandResult<ProjectSessionResponse> {
     spawn_host_task(state, move |state| state.open_project(input)).await
+}
+
+#[tauri::command]
+async fn list_recent_projects(state: State<'_, DesktopState>) -> CommandResult<Vec<RecentProject>> {
+    spawn_host_task(state, DesktopState::list_recent_projects).await
+}
+
+#[tauri::command]
+async fn open_recent_project(
+    input: RecentProjectRequest,
+    state: State<'_, DesktopState>,
+) -> CommandResult<ProjectSessionResponse> {
+    spawn_host_task(state, move |state| state.open_recent_project(input)).await
+}
+
+#[tauri::command]
+async fn remove_recent_project(
+    input: RecentProjectRequest,
+    state: State<'_, DesktopState>,
+) -> CommandResult<RecentProjectMutationResponse> {
+    spawn_host_task(state, move |state| state.remove_recent_project(input)).await
 }
 
 #[tauri::command]
@@ -1303,6 +1438,7 @@ mod tests {
         let created = state.create_project(create_request(&parent)).unwrap();
         let info = created.project.unwrap();
         assert!(Path::new(&info.directory).is_dir());
+        assert_eq!(state.list_recent_projects().unwrap().len(), 1);
         assert!(state.get_project_session().unwrap().is_open);
         assert_eq!(
             state
@@ -1313,12 +1449,52 @@ mod tests {
         );
         assert!(!state.close_project().unwrap().is_open);
         let reopened = state
-            .open_project(OpenProjectRequest {
+            .open_recent_project(RecentProjectRequest {
                 schema_version: 1,
-                project_directory: info.directory,
+                project_id: info.project_id.clone(),
             })
             .unwrap();
         assert_eq!(reopened.project.unwrap().project_id, info.project_id);
+    }
+
+    #[test]
+    fn persists_recent_projects_outside_the_project_package_and_can_forget_them() {
+        let parent = TempParent::new();
+        let registry_path = parent.0.join("app-data").join("recent-projects.json");
+        let first = DesktopState::new(Arc::new(MemorySecretStore::default()));
+        first.configure_recent_projects(&registry_path).unwrap();
+        let info = first
+            .create_project(create_request(&parent))
+            .unwrap()
+            .project
+            .unwrap();
+        first.close_project().unwrap();
+        drop(first);
+
+        let reopened_state = DesktopState::new(Arc::new(MemorySecretStore::default()));
+        reopened_state
+            .configure_recent_projects(&registry_path)
+            .unwrap();
+        let recent = reopened_state.list_recent_projects().unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].project_id, info.project_id);
+        assert!(recent[0].available);
+        reopened_state
+            .open_recent_project(RecentProjectRequest {
+                schema_version: 1,
+                project_id: info.project_id.clone(),
+            })
+            .unwrap();
+        assert!(
+            reopened_state
+                .remove_recent_project(RecentProjectRequest {
+                    schema_version: 1,
+                    project_id: info.project_id,
+                })
+                .unwrap()
+                .changed
+        );
+        assert!(reopened_state.list_recent_projects().unwrap().is_empty());
     }
 
     #[test]
@@ -1830,6 +2006,7 @@ mod tests {
             capability["permissions"],
             json!([
                 "allow-project-session",
+                "allow-recent-projects",
                 "allow-workspace-read",
                 "allow-style-library",
                 "allow-workspace-write",

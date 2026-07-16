@@ -9,8 +9,8 @@
 - `@optimizer/protocol`：OperationIntent、ContextPacket、PatchProposal、EventEnvelope、ModelProviderConfiguration 类型与 JSON Schema。
 - `@optimizer/kernel`：操作状态机、端口接口、确定性 Context Compiler、预算与隐私过滤。
 - `kernel-lab`：无需第三方依赖即可运行的上下文编译示例。
-- `optimizer-host`：Rust 宿主路径边界、原子 `.optimizer` 项目包、严格 JSON 命令适配、Operation/Review 持久化、审计读取、Secret Store、一次性模型 capability，以及四个云端 Provider 和固定回环 Ollama 的原生流式执行。
-- `optimizer-desktop`：Tauri 2 桌面入口、单项目 Session、文档树、版本化自动保存、冲突草稿、检查点/恢复、模型设置、流式 AI 操作、取消与 Patch/Findings 审查界面。
+- `optimizer-host`：Rust 宿主路径边界、原子 `.optimizer` 项目包、严格 JSON 命令适配、宿主最近项目注册表、Operation/Review 持久化、审计读取、Secret Store、一次性模型 capability，以及四个云端 Provider 和固定回环 Ollama 的原生流式执行。
+- `optimizer-desktop`：Tauri 2 桌面入口、宿主验证的最近项目、单项目 Session、文档树、版本化自动保存、冲突草稿、检查点/恢复、模型设置、流式 AI 操作、取消与 Patch/Findings 审查界面。
 - `optimizer-store`：SQLite 3.51.3、Block/Commit/快照、Operation/Artifact/Review 审计日志、FTS5、迁移前在线备份，以及 schema v5 的分层摘要记录与合并失效队列。
 - 项目风格库：独立保存、归档和恢复固定样本；canonical 样本以 L4 Context 参与操作，`never_send` 对远程模型强制排除并允许本地 Ollama 使用。
 - `@optimizer/editor-bridge`：稳定 Block ID、UTF-16 选区映射、乐观并发编辑事务与 Tiptap 快照适配。
@@ -20,6 +20,7 @@
 - 确定性 `optimizer-json+zstd` 快照编码、SHA-256 完整性校验与“恢复为新 Commit”。
 - 版本化章节生命周期与结构恢复：创建、重命名、相邻移动、软归档和恢复均形成 Commit；项目根哈希 v2 绑定章节元数据与活动 Block，检查点可恢复章节集合、标题、顺序和归档状态。
 - 结构化摘要失效队列：项目、章节与 Block 三层作用域随同正文/结构 Commit 在同一事务内失效并合并；摘要完成按作用域绑定失效源 Commit，陈旧结果不能消费新队列项；桌面顶部显示当前待更新数量。
+- 最近项目：宿主用户配置区使用有大小上限、严格 schema、备份恢复和原子替换的注册表；欢迎页按 `projectId` 快速打开并重新执行完整项目包校验，可移除记录而不删除项目文件。
 - 用户显式选文件的 Markdown 导入，以及限制在项目包 `exports/` 内的原子 Markdown 导出。
 - 架构依赖检查、Schema 解析检查、Node 测试与 Rust 测试。
 - ADR 与工程设计 DOCX。
@@ -60,11 +61,11 @@ scripts/               工程约束检查
 2. Ollama 缺失模型拉取指引、版本兼容提示与可选上下文窗口配置。
 3. 依赖源可用后将正文输入适配器替换为 Tiptap，并提供行内 decoration 审查。
 4. 显式成本策略下的重试、Provider fallback 与费用上限。
-5. 最近项目、真正的父子树形章节与后台摘要生成 worker。
+5. 真正的父子树形章节与后台摘要生成 worker。
 
 ## 最新迭代：可运行桌面工作区
 
-- 欢迎页可创建或打开经 Host 校验的 `.optimizer` 项目包，项目凭据不会进入 WebView。
+- 欢迎页可创建或打开经 Host 校验的 `.optimizer` 项目包，并列出最多 12 个宿主维护的最近项目；快速打开不信任旧路径内容，仍会重新校验 manifest、SQLite invariant 与项目绑定。
 - 工作区显示文档树、结构化 Block、保存状态、有效字符数与版本抽屉。
 - 文档树支持章节重命名、上移/下移、软归档和恢复；结构命令先刷新正文草稿并以权威工作区响应推进 HEAD。
 - 900ms 串行自动保存绑定 Block revision/hash；冲突时保留本地草稿并重新加载权威版本。

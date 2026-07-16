@@ -106,6 +106,32 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 
 .start-form h2 { margin: 0 0 24px; font: 600 23px Georgia, "Songti SC", serif; }
 
+.recent-projects {
+  max-width: 580px;
+  margin: 0 auto 24px;
+  padding: 22px;
+  border: 1px solid rgb(104 92 74 / 14%);
+  border-radius: 20px;
+  background: rgb(255 253 248 / 88%);
+  box-shadow: var(--shadow);
+}
+
+.recent-projects-heading { margin-bottom: 12px; display: flex; align-items: baseline; justify-content: space-between; }
+.recent-projects-heading h2 { margin: 0; font: 600 21px Georgia, "Songti SC", serif; }
+.recent-projects-heading > span { color: var(--muted); font-size: 11px; }
+.recent-project { margin-top: 7px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 7px; }
+.recent-project-open { min-width: 0; padding: 9px 10px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; color: var(--ink); border: 1px solid #d8d1c5; border-radius: 11px; background: #fffefa; text-align: left; }
+.recent-project-open:hover { border-color: #acc4b4; background: #f1f7f2; }
+.recent-project-mark { width: 30px; height: 30px; display: grid; place-items: center; color: #fff; border-radius: 9px; background: var(--accent); font: 16px Georgia, "Songti SC", serif; }
+.recent-project-copy { min-width: 0; display: grid; gap: 3px; }
+.recent-project-copy strong, .recent-project-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recent-project-copy strong { font-size: 13px; }
+.recent-project-copy > span { color: var(--muted); font-size: 10px; }
+.recent-project-time { color: #8d867b; font-size: 10px; white-space: nowrap; }
+.recent-project-remove { padding: 7px; color: #827b70; border: 0; border-radius: 7px; background: transparent; font-size: 10px; }
+.recent-project-remove:hover { color: #8b3d34; background: #f7e6e2; }
+.recent-project-missing .recent-project-open { border-style: dashed; }
+
 .field { display: grid; gap: 8px; margin-bottom: 17px; color: #58534a; font-size: 13px; font-weight: 650; }
 
 .field input, .field select {

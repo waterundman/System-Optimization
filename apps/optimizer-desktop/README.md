@@ -5,6 +5,7 @@ Optimizer System 的 Tauri 2 桌面应用。当前已经具备可运行的中文
 WebView 只允许：
 
 - 创建、打开、关闭和查看一个已校验的本地项目会话；
+- 列出、按稳定项目 ID 重新打开或移除宿主用户配置区中的最近项目记录；
 - 原子写入 Operation bundle；
 - 写入 Patch review 事件；
 - 读取 Operation 审计；
@@ -32,6 +33,8 @@ Ollama 是无凭据的显式本地 Provider：宿主只连接 `127.0.0.1:11434/v
 - Operation 写入和审计命令在无项目时统一返回 `NO_PROJECT_OPEN`。
 
 四个命令位于独立的 `allow-project-session` permission 中，只授权给本地 `main` window。入口表单只提交用户明确填写的绝对路径，创建与打开规则由 Host 再次校验。
+
+最近项目使用独立 `allow-recent-projects` permission。创建或成功打开项目后，Host 把安全元数据写入应用本地数据目录的严格 JSON 注册表，最多保留 12 项。欢迎页快速打开只提交 `projectId`，Host 解析已登记路径后仍执行完整项目包校验，并确认当前位置的项目 ID 未被替换。移除操作只删除最近记录，不触碰 `.optimizer` 目录。
 
 ## 工作区与版本
 

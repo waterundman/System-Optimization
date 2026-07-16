@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use optimizer_host::SecretStore;
-#[cfg(not(debug_assertions))]
 use tauri::Manager;
 
 #[cfg(not(windows))]
@@ -17,6 +16,18 @@ fn main() {
     let state = optimizer_desktop::DesktopState::new(secrets);
     optimizer_desktop::attach(tauri::Builder::default(), state)
         .setup(|app| {
+            let recent_projects_path = app
+                .path()
+                .app_local_data_dir()?
+                .join("recent-projects.json");
+            app.state::<optimizer_desktop::DesktopState>()
+                .configure_recent_projects(&recent_projects_path)
+                .map_err(|error| {
+                    io::Error::other(format!(
+                        "failed to configure recent projects at {}: {error}",
+                        recent_projects_path.display()
+                    ))
+                })?;
             let window_config = app
                 .config()
                 .app

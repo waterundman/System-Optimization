@@ -28,7 +28,11 @@ page.on("console", (message) => {
   if (message.type() === "error") errors.push(message.text());
 });
 await page.addInitScript({ path: resolve(testDirectory, "browser-mock-host.js") });
-await page.goto("http://127.0.0.1:4173/", { waitUntil: "networkidle" });
+await page.goto("http://127.0.0.1:4173/?recentWelcome=1", { waitUntil: "networkidle" });
+await page.getByRole("heading", { name: "最近项目" }).waitFor();
+await page.getByText("W:\\写作\\雾港来信.optimizer").waitFor();
+await page.getByRole("button", { name: "打开最近项目 雾港来信" }).click();
+await page.getByRole("heading", { name: "雾港来信" }).waitFor();
 
 await page.getByRole("button", { name: "模型设置" }).click();
 await page.getByText("凭据已存入系统保险库").waitFor();

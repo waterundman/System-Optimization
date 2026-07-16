@@ -4,6 +4,11 @@ description = "Allows the bundled editor to create, open, close and inspect one 
 commands.allow = ["create_project", "open_project", "close_project", "get_project_session"]
 
 [[permission]]
+identifier = "allow-recent-projects"
+description = "Allows the bundled welcome page to list, reopen and forget host-maintained recent project metadata."
+commands.allow = ["list_recent_projects", "open_recent_project", "remove_recent_project"]
+
+[[permission]]
 identifier = "allow-workspace-read"
 description = "Allows the bundled editor to read the document tree and blocks from the current project session."
 commands.allow = ["get_project_workspace"]
