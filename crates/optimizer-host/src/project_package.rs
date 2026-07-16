@@ -12,17 +12,18 @@ use uuid::Uuid;
 
 use crate::workspace_commands::{
     apply_reviewed_proposal, block_content_hash, create_checkpoint, create_document,
-    create_style_sample, list_archived_documents, list_style_samples, load_project_workspace,
-    load_version_history, project_root_hash, rename_document, reorder_document, restore_checkpoint,
-    save_block, set_document_archived, set_style_sample_status,
+    create_style_sample, list_archived_documents, list_style_samples, list_summary_invalidations,
+    load_project_workspace, load_version_history, project_root_hash, rename_document,
+    reorder_document, restore_checkpoint, save_block, set_document_archived,
+    set_style_sample_status,
 };
 use crate::{
     ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, ArchivedDocument, CheckpointSummary,
     CreateDocumentResponse, CreateDocumentSpec, CreateStyleSampleSpec, DocumentMutationResponse,
     HostError, OperationCommandHost, ProjectRoot, ProjectWorkspace, RenameDocumentSpec,
     ReorderDocumentSpec, RestoreCheckpointResponse, RestoreCheckpointSpec, SaveBlockResponse,
-    SaveBlockSpec, SetDocumentArchivedSpec, SetStyleSampleStatusSpec, StyleSample, VersionHistory,
-    WorkspaceCommandError,
+    SaveBlockSpec, SetDocumentArchivedSpec, SetStyleSampleStatusSpec, StyleSample,
+    SummaryInvalidation, VersionHistory, WorkspaceCommandError,
 };
 
 const PACKAGE_SCHEMA_VERSION: u32 = 1;
@@ -291,6 +292,10 @@ impl OpenedProject {
 
     pub fn archived_documents(&self) -> Result<Vec<ArchivedDocument>, WorkspaceCommandError> {
         list_archived_documents(self.operations.store(), &self.project_id)
+    }
+
+    pub fn summary_invalidations(&self) -> Result<Vec<SummaryInvalidation>, WorkspaceCommandError> {
+        list_summary_invalidations(self.operations.store(), &self.project_id)
     }
 
     pub fn rename_document(

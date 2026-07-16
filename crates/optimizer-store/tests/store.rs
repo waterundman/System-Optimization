@@ -7,8 +7,8 @@ use optimizer_store::{
     CreateDocumentWithBlock, CreateSnapshot, CreateStyleSample, DocumentMutation,
     MINIMUM_SQLITE_VERSION, ModelUsageRecord, NewContextPacket, NewOperationArtifact,
     NewOperationLifecycleEvent, NewOperationRun, OperationArtifactKind, OperationFailureRecord,
-    OperationState, OptimizerStore, PersistOperationBundle, ProjectSeed, RestoreSnapshot,
-    ReviewDecision, ReviewEventKind, ReviewSessionStatus, SeedBlock, SeedDocument,
+    OperationState, OptimizerStore, PersistOperationBundle, ProjectSeed, PutSummaryRecord,
+    RestoreSnapshot, ReviewDecision, ReviewEventKind, ReviewSessionStatus, SeedBlock, SeedDocument,
     SetStyleSampleStatus, StoreError, encode_snapshot,
 };
 
@@ -396,6 +396,13 @@ fn mutates_document_lifecycle_as_versioned_atomic_batches() {
         "document-2"
     );
     assert_eq!(store.list_blocks("project-1").unwrap().len(), 1);
+    let archived_invalidations = store.list_summary_invalidations("project-1", 100).unwrap();
+    assert_eq!(archived_invalidations.len(), 3);
+    assert!(
+        archived_invalidations
+            .iter()
+            .all(|item| item.scope_id != "document-2" && item.scope_id != "block-2")
+    );
 
     store
         .apply_document_batch(&ApplyDocumentBatch {
@@ -430,6 +437,13 @@ fn mutates_document_lifecycle_as_versioned_atomic_batches() {
             .is_empty()
     );
     assert_eq!(store.list_blocks("project-1").unwrap().len(), 2);
+    let restored_invalidations = store.list_summary_invalidations("project-1", 100).unwrap();
+    assert_eq!(restored_invalidations.len(), 5);
+    assert!(restored_invalidations.iter().any(|item| {
+        item.scope_type == "block"
+            && item.scope_id == "block-2"
+            && item.source_commit_id == "commit-document-restore"
+    }));
     assert_eq!(store.get_project("project-1").unwrap().revision, 5);
     assert_eq!(
         store
@@ -501,6 +515,12 @@ fn restores_across_document_creation_by_archiving_and_reviving_structure() {
     assert_eq!(back.changed_blocks, 1);
     assert_eq!(store.list_documents("project-1").unwrap().len(), 1);
     assert_eq!(store.list_blocks("project-1").unwrap().len(), 1);
+    assert!(
+        store
+            .search_blocks("project-1", "new", 10)
+            .unwrap()
+            .is_empty()
+    );
 
     let forward = store
         .restore_snapshot(&RestoreSnapshot {
@@ -516,6 +536,10 @@ fn restores_across_document_creation_by_archiving_and_reviving_structure() {
     assert_eq!(forward.changed_blocks, 1);
     assert_eq!(store.list_documents("project-1").unwrap().len(), 2);
     assert_eq!(store.list_blocks("project-1").unwrap().len(), 2);
+    assert_eq!(
+        store.search_blocks("project-1", "new", 10).unwrap().len(),
+        1
+    );
     assert_eq!(
         store.get_block("block-2").unwrap().plain_text,
         "new chapter"
@@ -719,6 +743,109 @@ fn applies_block_edit_journal_commit_and_fts_in_one_transaction() {
     assert_eq!(commits.len(), 2);
     assert_eq!(commits[1].id, "commit-1");
     assert_eq!(commits[1].parents, vec!["commit-initial"]);
+    store.verify_invariants().unwrap();
+}
+
+#[test]
+fn coalesces_summary_invalidations_and_rejects_stale_summary_completion() {
+    let temp = TempDatabase::new();
+    let mut store = open_seeded(&temp.database);
+    let initial = store.list_summary_invalidations("project-1", 100).unwrap();
+    assert_eq!(initial.len(), 3);
+    assert!(
+        initial.iter().all(|item| {
+            item.source_commit_id == "commit-initial" && item.invalidation_count == 1
+        })
+    );
+
+    let initial_summary = store
+        .put_summary_record(&PutSummaryRecord {
+            project_id: "project-1".into(),
+            scope_type: "block".into(),
+            scope_id: "block-1".into(),
+            expected_source_commit_id: "commit-initial".into(),
+            source_hash: "sha256:block-initial".into(),
+            summary: "A station platform.".into(),
+            summary_hash: "sha256:summary-initial".into(),
+            provider_id: "ollama".into(),
+            model: "qwen3:8b".into(),
+            generated_at: "2026-07-14T00:00:30.000Z".into(),
+        })
+        .unwrap();
+    assert_eq!(initial_summary.revision, 0);
+    assert_eq!(
+        store
+            .list_summary_invalidations("project-1", 100)
+            .unwrap()
+            .len(),
+        2
+    );
+
+    store
+        .apply_block_edit(&edit("commit-summary-edit", 0, "sha256:block-initial"))
+        .unwrap();
+    let invalidations = store.list_summary_invalidations("project-1", 100).unwrap();
+    assert_eq!(invalidations.len(), 3);
+    assert!(
+        invalidations
+            .iter()
+            .all(|item| item.source_commit_id == "commit-summary-edit")
+    );
+    assert_eq!(
+        invalidations
+            .iter()
+            .find(|item| item.scope_type == "project")
+            .unwrap()
+            .invalidation_count,
+        2
+    );
+    assert_eq!(
+        invalidations
+            .iter()
+            .find(|item| item.scope_type == "block")
+            .unwrap()
+            .invalidation_count,
+        1
+    );
+
+    let stale = store
+        .put_summary_record(&PutSummaryRecord {
+            project_id: "project-1".into(),
+            scope_type: "block".into(),
+            scope_id: "block-1".into(),
+            expected_source_commit_id: "commit-initial".into(),
+            source_hash: "sha256:block-initial".into(),
+            summary: "Stale summary".into(),
+            summary_hash: "sha256:summary-stale".into(),
+            provider_id: "ollama".into(),
+            model: "qwen3:8b".into(),
+            generated_at: "2026-07-14T00:01:30.000Z".into(),
+        })
+        .unwrap_err();
+    assert!(matches!(stale, StoreError::StateConflict { .. }));
+    let refreshed = store
+        .put_summary_record(&PutSummaryRecord {
+            project_id: "project-1".into(),
+            scope_type: "block".into(),
+            scope_id: "block-1".into(),
+            expected_source_commit_id: "commit-summary-edit".into(),
+            source_hash: "sha256:block-commit-summary-edit".into(),
+            summary: "A harbor signal.".into(),
+            summary_hash: "sha256:summary-refreshed".into(),
+            provider_id: "ollama".into(),
+            model: "qwen3:8b".into(),
+            generated_at: "2026-07-14T00:02:00.000Z".into(),
+        })
+        .unwrap();
+    assert_eq!(refreshed.revision, 1);
+    assert_eq!(refreshed.source_commit_id, "commit-summary-edit");
+    assert_eq!(
+        store
+            .list_summary_invalidations("project-1", 100)
+            .unwrap()
+            .len(),
+        2
+    );
     store.verify_invariants().unwrap();
 }
 

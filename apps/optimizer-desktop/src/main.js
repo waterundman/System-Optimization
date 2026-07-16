@@ -32,6 +32,7 @@ const state = {
   stylesOpen: false,
   styleSamples: [],
   archivedDocuments: [],
+  summaryInvalidations: [],
   selectedProviderId: "deepseek",
   providerSettings: loadProviderSettings(),
   ollamaDiscovery: null,
@@ -258,14 +259,16 @@ function setFormBusy(form, busy) {
 
 async function loadWorkspace() {
   const preferred = state.selectedDocumentId;
-  const [workspace, styleSamples, archivedDocuments] = await Promise.all([
+  const [workspace, styleSamples, archivedDocuments, summaryInvalidations] = await Promise.all([
     invokeHost("get_project_workspace"),
     invokeHost("list_style_samples"),
     invokeHost("list_archived_documents"),
+    invokeHost("list_summary_invalidations"),
   ]);
   state.workspace = workspace;
   state.styleSamples = styleSamples;
   state.archivedDocuments = archivedDocuments;
+  state.summaryInvalidations = summaryInvalidations;
   state.selectedDocumentId = selectInitialDocument(state.workspace, preferred);
   await refreshProviderSecretStatus();
   renderWorkspace();
@@ -284,6 +287,11 @@ function renderWorkspace() {
     ]),
     element("div", { className: "topbar-actions" }, [
       element("span", { className: "save-status", text: state.saveStatus, attrs: { id: "save-status" } }),
+      element("span", {
+        className: "summary-status",
+        text: `摘要待更新 ${state.summaryInvalidations.length}`,
+        title: "正文或结构变化后合并产生的分层摘要失效项",
+      }),
       button("导入 MD", "ghost-button", importMarkdown),
       button("导出 MD", "ghost-button", exportMarkdown),
       button("建立检查点", "ghost-button", createCheckpoint),
@@ -385,7 +393,10 @@ async function commitDocumentMutation(command, input, preferredDocumentId, succe
     await flushAll();
     const response = await invokeHost(command, { input: { schemaVersion: 1, ...input } });
     state.workspace = response.workspace;
-    state.archivedDocuments = await invokeHost("list_archived_documents");
+    [state.archivedDocuments, state.summaryInvalidations] = await Promise.all([
+      invokeHost("list_archived_documents"),
+      invokeHost("list_summary_invalidations"),
+    ]);
     state.session = {
       ...state.session,
       project: {
@@ -455,6 +466,7 @@ async function createDocument() {
     const created = await invokeHost("create_document", {
       input: { schemaVersion: 1, title, initialText: "" },
     });
+    state.summaryInvalidations = await invokeHost("list_summary_invalidations");
     applyCreatedDocument(created, `已创建章节“${created.document.title}”并记录版本。`);
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
@@ -502,6 +514,7 @@ function importMarkdown() {
       const created = await invokeHost("create_document", {
         input: { schemaVersion: 1, title, initialText: text },
       });
+      state.summaryInvalidations = await invokeHost("list_summary_invalidations");
       applyCreatedDocument(created, `已导入 ${file.name}；原始 Markdown 已作为版本化正文保存。`);
     } catch (error) {
       setNotice("error", normalizeHostError(error).message);
@@ -1000,6 +1013,7 @@ async function applyCurrentReview() {
       },
     });
     state.workspace = applySaveResponse(state.workspace, response.save);
+    state.summaryInvalidations = await invokeHost("list_summary_invalidations");
     state.session = {
       ...state.session,
       project: {
@@ -1051,8 +1065,9 @@ function flushBlock(blockId) {
   if (!block) return Promise.resolve();
   updateSaveStatus("保存中…");
   const promise = invokeHost("save_block", { input: buildSaveBlockRequest(block, plainText) })
-    .then((response) => {
+    .then(async (response) => {
       state.workspace = applySaveResponse(state.workspace, response);
+      state.summaryInvalidations = await invokeHost("list_summary_invalidations");
       state.session = {
         ...state.session,
         project: { ...state.session.project, headCommitId: response.headCommitId, revision: response.projectRevision },
@@ -1506,7 +1521,10 @@ async function restoreCheckpoint(checkpointId) {
       input: { schemaVersion: 1, checkpointId },
     });
     state.workspace = response.workspace;
-    state.archivedDocuments = await invokeHost("list_archived_documents");
+    [state.archivedDocuments, state.summaryInvalidations] = await Promise.all([
+      invokeHost("list_archived_documents"),
+      invokeHost("list_summary_invalidations"),
+    ]);
     state.session = {
       ...state.session,
       project: {
@@ -1540,6 +1558,7 @@ async function closeProject() {
     state.stylesOpen = false;
     state.styleSamples = [];
     state.archivedDocuments = [];
+    state.summaryInvalidations = [];
     state.conflictDraft = null;
     state.aiRunning = null;
     state.aiContextPreview = null;

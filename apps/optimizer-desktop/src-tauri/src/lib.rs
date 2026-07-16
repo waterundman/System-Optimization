@@ -11,7 +11,7 @@ use optimizer_host::{
     ProjectWorkspace, RenameDocumentSpec, ReorderDocumentSpec, RestoreCheckpointResponse,
     RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec, SecretReference, SecretStore,
     SecretStoreError, SecretValue, SetDocumentArchivedSpec, SetStyleSampleStatusSpec, StyleSample,
-    VersionHistory, WorkspaceCommandError,
+    SummaryInvalidation, VersionHistory, WorkspaceCommandError,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Runtime, State, ipc::Channel};
@@ -112,6 +112,12 @@ impl DesktopState {
     pub fn list_archived_documents(&self) -> CommandResult<Vec<ArchivedDocument>> {
         self.current_project()?
             .archived_documents()
+            .map_err(CommandError::from)
+    }
+
+    pub fn list_summary_invalidations(&self) -> CommandResult<Vec<SummaryInvalidation>> {
+        self.current_project()?
+            .summary_invalidations()
             .map_err(CommandError::from)
     }
 
@@ -946,6 +952,7 @@ pub fn attach<R: Runtime>(builder: tauri::Builder<R>, state: DesktopState) -> ta
             get_project_workspace,
             create_document,
             list_archived_documents,
+            list_summary_invalidations,
             rename_document,
             reorder_document,
             set_document_archived,
@@ -1017,6 +1024,13 @@ async fn list_archived_documents(
     state: State<'_, DesktopState>,
 ) -> CommandResult<Vec<ArchivedDocument>> {
     spawn_host_task(state, DesktopState::list_archived_documents).await
+}
+
+#[tauri::command]
+async fn list_summary_invalidations(
+    state: State<'_, DesktopState>,
+) -> CommandResult<Vec<SummaryInvalidation>> {
+    spawn_host_task(state, DesktopState::list_summary_invalidations).await
 }
 
 #[tauri::command]
@@ -1333,6 +1347,7 @@ mod tests {
         let workspace = state.get_project_workspace().unwrap();
         assert_eq!(workspace.documents.len(), 1);
         assert_eq!(workspace.blocks.len(), 1);
+        assert_eq!(state.list_summary_invalidations().unwrap().len(), 3);
         let block = workspace.blocks[0].clone();
         let request = SaveBlockRequest {
             schema_version: 1,
@@ -1819,6 +1834,7 @@ mod tests {
                 "allow-style-library",
                 "allow-workspace-write",
                 "allow-document-lifecycle",
+                "allow-summary-status-read",
                 "allow-project-export",
                 "allow-version-read",
                 "allow-version-write",

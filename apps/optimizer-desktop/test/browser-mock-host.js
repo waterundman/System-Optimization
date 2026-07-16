@@ -54,7 +54,7 @@
       title: "雾港来信",
       language: "zh-CN",
       directory: "W:\\写作\\雾港来信.optimizer",
-      databaseSchemaVersion: 4,
+      databaseSchemaVersion: 5,
       headCommitId: workspace.headCommitId,
       revision: 0,
       createdAt: "2026-07-15T00:00:00Z",
@@ -84,6 +84,20 @@
     if (command === "get_project_session") return structuredClone(session);
     if (command === "get_project_workspace") return structuredClone(workspace);
     if (command === "list_archived_documents") return structuredClone(archivedDocuments);
+    if (command === "list_summary_invalidations") {
+      return [
+        { scopeType: "project", scopeId: workspace.projectId },
+        ...workspace.documents.map((item) => ({ scopeType: "document", scopeId: item.id })),
+        ...workspace.blocks.map((item) => ({ scopeType: "block", scopeId: item.id })),
+      ].map((item) => ({
+        schemaVersion: 1,
+        ...item,
+        sourceCommitId: workspace.headCommitId,
+        reason: "visual_mock",
+        invalidationCount: 1,
+        createdAt: "2026-07-16T00:00:00Z",
+      }));
+    }
     if (command === "create_document") {
       const index = workspace.documents.length + 1;
       const document = {

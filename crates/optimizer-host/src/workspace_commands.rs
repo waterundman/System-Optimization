@@ -73,6 +73,18 @@ pub struct StyleSample {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SummaryInvalidation {
+    pub schema_version: u32,
+    pub scope_type: String,
+    pub scope_id: String,
+    pub source_commit_id: String,
+    pub reason: String,
+    pub invalidation_count: i64,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateStyleSampleSpec {
     pub title: String,
@@ -487,6 +499,25 @@ pub(crate) fn list_archived_documents(
             })
         })
         .collect()
+}
+
+pub(crate) fn list_summary_invalidations(
+    store: &OptimizerStore,
+    project_id: &str,
+) -> Result<Vec<SummaryInvalidation>, WorkspaceCommandError> {
+    Ok(store
+        .list_summary_invalidations(project_id, 1_000)?
+        .into_iter()
+        .map(|record| SummaryInvalidation {
+            schema_version: WORKSPACE_SCHEMA_VERSION,
+            scope_type: record.scope_type,
+            scope_id: record.scope_id,
+            source_commit_id: record.source_commit_id,
+            reason: record.reason,
+            invalidation_count: record.invalidation_count,
+            created_at: record.created_at,
+        })
+        .collect())
 }
 
 pub(crate) fn rename_document(

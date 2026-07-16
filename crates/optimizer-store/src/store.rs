@@ -10,9 +10,10 @@ use crate::migration::{CURRENT_SCHEMA_VERSION, migrate};
 use crate::model::{
     ApplyBlockEdit, ApplyDocumentBatch, BlockRecord, BlockSearchHit, BranchRecord, CommitRecord,
     CreateDocumentReceipt, CreateDocumentWithBlock, CreateSnapshot, CreateStyleSample,
-    DocumentBatchReceipt, DocumentRecord, EditReceipt, ProjectRecord, ProjectSeed, RestoreReceipt,
-    RestoreSnapshot, ReviewEventKind, ReviewSessionStatus, SetStyleSampleStatus, SnapshotRecord,
-    StyleSampleRecord,
+    DocumentBatchReceipt, DocumentRecord, EditReceipt, ProjectRecord, ProjectSeed,
+    PutSummaryRecord, RestoreReceipt, RestoreSnapshot, ReviewEventKind, ReviewSessionStatus,
+    SetStyleSampleStatus, SnapshotRecord, StyleSampleRecord, SummaryInvalidationRecord,
+    SummaryRecord,
 };
 use crate::operation::append_review_event_in_transaction;
 use crate::snapshot::{
@@ -155,6 +156,37 @@ impl OptimizerStore {
                 "INSERT INTO change_set(commit_id, position, entity_type, entity_id, operation, before_hash, after_hash, edit_journal_id)
                  VALUES (?1, ?2, 'block', ?3, 'create', NULL, ?4, NULL)",
                 params![seed.initial_commit_id, position as i64, block.id, block.content_hash],
+            )?;
+        }
+        enqueue_summary_invalidation(
+            &transaction,
+            &seed.project_id,
+            "project",
+            &seed.project_id,
+            &seed.initial_commit_id,
+            "initial",
+            &seed.created_at,
+        )?;
+        for document in &seed.documents {
+            enqueue_summary_invalidation(
+                &transaction,
+                &seed.project_id,
+                "document",
+                &document.id,
+                &seed.initial_commit_id,
+                "initial",
+                &seed.created_at,
+            )?;
+        }
+        for block in &seed.blocks {
+            enqueue_summary_invalidation(
+                &transaction,
+                &seed.project_id,
+                "block",
+                &block.id,
+                &seed.initial_commit_id,
+                "initial",
+                &seed.created_at,
             )?;
         }
         transaction.execute(
@@ -323,6 +355,127 @@ impl OptimizerStore {
         Ok(result)
     }
 
+    pub fn list_summary_invalidations(
+        &self,
+        project_id: &str,
+        limit: usize,
+    ) -> StoreResult<Vec<SummaryInvalidationRecord>> {
+        if project_id.trim().is_empty() || limit == 0 || limit > 1_000 {
+            return Err(StoreError::Validation(
+                "project id and summary invalidation limit 1..=1000 are required".into(),
+            ));
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT project_id, scope_type, scope_id, source_commit_id, reason,
+                    invalidation_count, created_at
+             FROM summary_invalidation
+             WHERE project_id = ?1
+             ORDER BY created_at, scope_type, scope_id
+             LIMIT ?2",
+        )?;
+        statement
+            .query_map(params![project_id, limit as i64], |row| {
+                Ok(SummaryInvalidationRecord {
+                    project_id: row.get(0)?,
+                    scope_type: row.get(1)?,
+                    scope_id: row.get(2)?,
+                    source_commit_id: row.get(3)?,
+                    reason: row.get(4)?,
+                    invalidation_count: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            })?
+            .collect::<Result<_, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn put_summary_record(&mut self, command: &PutSummaryRecord) -> StoreResult<SummaryRecord> {
+        validate_put_summary_record(command)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        validate_active_summary_scope(
+            &transaction,
+            &command.project_id,
+            &command.scope_type,
+            &command.scope_id,
+        )?;
+        let queued_commit: String = transaction
+            .query_row(
+                "SELECT source_commit_id FROM summary_invalidation
+                 WHERE project_id = ?1 AND scope_type = ?2 AND scope_id = ?3",
+                params![command.project_id, command.scope_type, command.scope_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NotFound {
+                entity: "summary_invalidation",
+                id: format!("{}:{}", command.scope_type, command.scope_id),
+            })?;
+        if queued_commit != command.expected_source_commit_id {
+            return Err(StoreError::StateConflict {
+                entity: "summary_invalidation",
+                id: format!("{}:{}", command.scope_type, command.scope_id),
+                expected_revision: 0,
+                actual_revision: 0,
+                expected_state: command.expected_source_commit_id.clone(),
+                actual_state: queued_commit,
+            });
+        }
+        transaction.execute(
+            "INSERT INTO summary_record(
+               project_id, scope_type, scope_id, source_commit_id, source_hash, summary_text,
+               summary_hash, provider_id, model, revision, generated_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?10)
+             ON CONFLICT(project_id, scope_type, scope_id) DO UPDATE SET
+               source_commit_id = excluded.source_commit_id,
+               source_hash = excluded.source_hash,
+               summary_text = excluded.summary_text,
+               summary_hash = excluded.summary_hash,
+               provider_id = excluded.provider_id,
+               model = excluded.model,
+               revision = summary_record.revision + 1,
+               generated_at = excluded.generated_at,
+               updated_at = excluded.updated_at",
+            params![
+                command.project_id,
+                command.scope_type,
+                command.scope_id,
+                command.expected_source_commit_id,
+                command.source_hash,
+                command.summary,
+                command.summary_hash,
+                command.provider_id,
+                command.model,
+                command.generated_at,
+            ],
+        )?;
+        let removed = transaction.execute(
+            "DELETE FROM summary_invalidation
+             WHERE project_id = ?1 AND scope_type = ?2 AND scope_id = ?3
+               AND source_commit_id = ?4",
+            params![
+                command.project_id,
+                command.scope_type,
+                command.scope_id,
+                command.expected_source_commit_id,
+            ],
+        )?;
+        if removed != 1 {
+            return Err(StoreError::InvariantViolation(
+                "summary completion did not consume exactly one invalidation".into(),
+            ));
+        }
+        let record = read_summary_record(
+            &transaction,
+            &command.project_id,
+            &command.scope_type,
+            &command.scope_id,
+        )?;
+        transaction.commit()?;
+        Ok(record)
+    }
+
     pub fn create_document_with_block(
         &mut self,
         command: &CreateDocumentWithBlock,
@@ -412,6 +565,21 @@ impl OptimizerStore {
                 command.occurred_at,
             ],
         )?;
+        for (scope_type, scope_id) in [
+            ("project", project_id.as_str()),
+            ("document", command.document_id.as_str()),
+            ("block", command.block_id.as_str()),
+        ] {
+            enqueue_summary_invalidation(
+                &transaction,
+                &project_id,
+                scope_type,
+                scope_id,
+                &command.commit_id,
+                "document_create",
+                &command.occurred_at,
+            )?;
+        }
         transaction.execute(
             "INSERT INTO commit_parent(commit_id, parent_id, position) VALUES (?1, ?2, 0)",
             params![command.commit_id, previous_head],
@@ -633,6 +801,67 @@ impl OptimizerStore {
                 command.occurred_at,
             ],
         )?;
+        enqueue_summary_invalidation(
+            &transaction,
+            &project_id,
+            "project",
+            &project_id,
+            &command.commit_id,
+            &command.reason,
+            &command.occurred_at,
+        )?;
+        for mutation in &command.mutations {
+            if mutation.active {
+                enqueue_summary_invalidation(
+                    &transaction,
+                    &project_id,
+                    "document",
+                    &mutation.document_id,
+                    &command.commit_id,
+                    &command.reason,
+                    &command.occurred_at,
+                )?;
+                if mutation.operation == "restore" {
+                    let block_ids = {
+                        let mut statement = transaction.prepare(
+                            "SELECT b.id
+                             FROM block AS b
+                             JOIN document AS d ON d.id = b.document_id
+                             WHERE d.project_id = ?1 AND d.id = ?2
+                               AND d.deleted_at IS NULL AND b.deleted_at IS NULL
+                             ORDER BY b.order_key, b.id",
+                        )?;
+                        statement
+                            .query_map(params![project_id, mutation.document_id], |row| {
+                                row.get::<_, String>(0)
+                            })?
+                            .collect::<Result<Vec<_>, _>>()?
+                    };
+                    for block_id in block_ids {
+                        enqueue_summary_invalidation(
+                            &transaction,
+                            &project_id,
+                            "block",
+                            &block_id,
+                            &command.commit_id,
+                            &command.reason,
+                            &command.occurred_at,
+                        )?;
+                    }
+                }
+            } else {
+                transaction.execute(
+                    "DELETE FROM summary_invalidation
+                     WHERE project_id = ?1 AND (
+                       (scope_type = 'document' AND scope_id = ?2)
+                       OR (scope_type = 'block' AND scope_id IN (
+                         SELECT id FROM block WHERE document_id = ?2
+                       ))
+                     )",
+                    params![project_id, mutation.document_id],
+                )?;
+            }
+        }
         transaction.execute(
             "INSERT INTO commit_parent(commit_id, parent_id, position) VALUES (?1, ?2, 0)",
             params![command.commit_id, previous_head],
@@ -930,6 +1159,21 @@ impl OptimizerStore {
                 command.occurred_at
             ],
         )?;
+        for (scope_type, scope_id) in [
+            ("project", current.project_id.as_str()),
+            ("document", current.document_id.as_str()),
+            ("block", command.block_id.as_str()),
+        ] {
+            enqueue_summary_invalidation(
+                &transaction,
+                &current.project_id,
+                scope_type,
+                scope_id,
+                &command.commit_id,
+                &command.reason,
+                &command.occurred_at,
+            )?;
+        }
         transaction.execute(
             "INSERT INTO commit_parent(commit_id, parent_id, position) VALUES (?1, ?2, 0)",
             params![command.commit_id, previous_head],
@@ -1637,6 +1881,76 @@ impl OptimizerStore {
                 command.occurred_at
             ],
         )?;
+        enqueue_summary_invalidation(
+            &transaction,
+            &branch_project_id,
+            "project",
+            &branch_project_id,
+            &command.new_commit_id,
+            "restore",
+            &command.occurred_at,
+        )?;
+        for document_id in changed_documents.union(&revised_documents) {
+            let active: bool = transaction.query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM document
+                   WHERE project_id = ?1 AND id = ?2 AND deleted_at IS NULL
+                 )",
+                params![branch_project_id, document_id],
+                |row| row.get(0),
+            )?;
+            if active {
+                enqueue_summary_invalidation(
+                    &transaction,
+                    &branch_project_id,
+                    "document",
+                    document_id,
+                    &command.new_commit_id,
+                    "restore",
+                    &command.occurred_at,
+                )?;
+            } else {
+                transaction.execute(
+                    "DELETE FROM summary_invalidation
+                     WHERE project_id = ?1 AND scope_type = 'document' AND scope_id = ?2",
+                    params![branch_project_id, document_id],
+                )?;
+            }
+        }
+        let changed_block_ids = changes
+            .iter()
+            .filter(|change| change.entity_type == "block")
+            .map(|change| change.entity_id.as_str())
+            .collect::<BTreeSet<_>>();
+        for block_id in changed_block_ids {
+            let active: bool = transaction.query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM block AS b
+                   JOIN document AS d ON d.id = b.document_id
+                   WHERE d.project_id = ?1 AND b.id = ?2
+                     AND b.deleted_at IS NULL AND d.deleted_at IS NULL
+                 )",
+                params![branch_project_id, block_id],
+                |row| row.get(0),
+            )?;
+            if active {
+                enqueue_summary_invalidation(
+                    &transaction,
+                    &branch_project_id,
+                    "block",
+                    block_id,
+                    &command.new_commit_id,
+                    "restore",
+                    &command.occurred_at,
+                )?;
+            } else {
+                transaction.execute(
+                    "DELETE FROM summary_invalidation
+                     WHERE project_id = ?1 AND scope_type = 'block' AND scope_id = ?2",
+                    params![branch_project_id, block_id],
+                )?;
+            }
+        }
         transaction.execute(
             "INSERT INTO commit_parent(commit_id, parent_id, position) VALUES (?1, ?2, 0)",
             params![command.new_commit_id, previous_head],
@@ -1712,7 +2026,7 @@ impl OptimizerStore {
             "SELECT f.block_id, f.document_id, f.plain_text, bm25(block_fts)
              FROM block_fts AS f
              JOIN document AS d ON d.id = f.document_id
-             WHERE d.project_id = ?1 AND block_fts MATCH ?2
+             WHERE d.project_id = ?1 AND d.deleted_at IS NULL AND block_fts MATCH ?2
              ORDER BY bm25(block_fts), f.block_id
              LIMIT ?3",
         )?;
@@ -1815,6 +2129,32 @@ impl OptimizerStore {
         if active_blocks != indexed_blocks {
             return Err(StoreError::InvariantViolation(format!(
                 "FTS index count {indexed_blocks} does not match active block count {active_blocks}"
+            )));
+        }
+        let invalid_summary_invalidations: i64 = self.connection.query_row(
+            "SELECT COUNT(*)
+             FROM summary_invalidation AS si
+             JOIN project AS p ON p.id = si.project_id
+             JOIN commit_node AS c ON c.id = si.source_commit_id
+             WHERE c.project_id <> si.project_id
+                OR (si.scope_type = 'project' AND si.scope_id <> si.project_id)
+                OR (si.scope_type = 'document' AND NOT EXISTS(
+                  SELECT 1 FROM document AS d
+                  WHERE d.project_id = si.project_id AND d.id = si.scope_id
+                    AND d.deleted_at IS NULL
+                ))
+                OR (si.scope_type = 'block' AND NOT EXISTS(
+                  SELECT 1 FROM block AS b
+                  JOIN document AS d ON d.id = b.document_id
+                  WHERE d.project_id = si.project_id AND b.id = si.scope_id
+                    AND b.deleted_at IS NULL AND d.deleted_at IS NULL
+                ))",
+            [],
+            |row| row.get(0),
+        )?;
+        if invalid_summary_invalidations != 0 {
+            return Err(StoreError::InvariantViolation(format!(
+                "{invalid_summary_invalidations} summary invalidations are stale or invalid"
             )));
         }
         self.verify_operation_invariants()?;
@@ -2166,6 +2506,163 @@ fn validate_final_document_tree(documents: &[DocumentRecord]) -> StoreResult<()>
         }
     }
     Ok(())
+}
+
+fn validate_put_summary_record(command: &PutSummaryRecord) -> StoreResult<()> {
+    for (field, value) in [
+        ("project_id", command.project_id.as_str()),
+        ("scope_type", command.scope_type.as_str()),
+        ("scope_id", command.scope_id.as_str()),
+        (
+            "expected_source_commit_id",
+            command.expected_source_commit_id.as_str(),
+        ),
+        ("source_hash", command.source_hash.as_str()),
+        ("summary", command.summary.as_str()),
+        ("summary_hash", command.summary_hash.as_str()),
+        ("provider_id", command.provider_id.as_str()),
+        ("model", command.model.as_str()),
+        ("generated_at", command.generated_at.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(StoreError::Validation(format!(
+                "summary {field} must not be empty"
+            )));
+        }
+    }
+    if !matches!(
+        command.scope_type.as_str(),
+        "block" | "document" | "project"
+    ) {
+        return Err(StoreError::Validation(
+            "summary scope type is unsupported".into(),
+        ));
+    }
+    if command.summary.len() > 2 * 1024 * 1024 {
+        return Err(StoreError::Validation("summary text exceeds 2 MiB".into()));
+    }
+    Ok(())
+}
+
+fn validate_active_summary_scope(
+    transaction: &Transaction<'_>,
+    project_id: &str,
+    scope_type: &str,
+    scope_id: &str,
+) -> StoreResult<()> {
+    let exists: bool = match scope_type {
+        "project" => {
+            if project_id != scope_id {
+                return Err(StoreError::Validation(
+                    "project summary scope must use the project id".into(),
+                ));
+            }
+            transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM project WHERE id = ?1)",
+                [project_id],
+                |row| row.get(0),
+            )?
+        }
+        "document" => transaction.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM document
+               WHERE project_id = ?1 AND id = ?2 AND deleted_at IS NULL
+             )",
+            params![project_id, scope_id],
+            |row| row.get(0),
+        )?,
+        "block" => transaction.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM block AS b
+               JOIN document AS d ON d.id = b.document_id
+               WHERE d.project_id = ?1 AND b.id = ?2
+                 AND b.deleted_at IS NULL AND d.deleted_at IS NULL
+             )",
+            params![project_id, scope_id],
+            |row| row.get(0),
+        )?,
+        _ => {
+            return Err(StoreError::Validation(
+                "summary scope type is unsupported".into(),
+            ));
+        }
+    };
+    if !exists {
+        return Err(StoreError::NotFound {
+            entity: "summary_scope",
+            id: format!("{scope_type}:{scope_id}"),
+        });
+    }
+    Ok(())
+}
+
+fn enqueue_summary_invalidation(
+    transaction: &Transaction<'_>,
+    project_id: &str,
+    scope_type: &str,
+    scope_id: &str,
+    source_commit_id: &str,
+    reason: &str,
+    created_at: &str,
+) -> StoreResult<()> {
+    transaction.execute(
+        "INSERT INTO summary_invalidation(
+           project_id, scope_type, scope_id, source_commit_id, reason,
+           invalidation_count, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)
+         ON CONFLICT(project_id, scope_type, scope_id) DO UPDATE SET
+           source_commit_id = excluded.source_commit_id,
+           reason = excluded.reason,
+           invalidation_count = summary_invalidation.invalidation_count + 1,
+           created_at = excluded.created_at",
+        params![
+            project_id,
+            scope_type,
+            scope_id,
+            source_commit_id,
+            reason,
+            created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+fn read_summary_record(
+    transaction: &Transaction<'_>,
+    project_id: &str,
+    scope_type: &str,
+    scope_id: &str,
+) -> StoreResult<SummaryRecord> {
+    transaction
+        .query_row(
+            "SELECT project_id, scope_type, scope_id, source_commit_id, source_hash,
+                    summary_text, summary_hash, provider_id, model, revision,
+                    generated_at, updated_at
+             FROM summary_record
+             WHERE project_id = ?1 AND scope_type = ?2 AND scope_id = ?3",
+            params![project_id, scope_type, scope_id],
+            |row| {
+                Ok(SummaryRecord {
+                    project_id: row.get(0)?,
+                    scope_type: row.get(1)?,
+                    scope_id: row.get(2)?,
+                    source_commit_id: row.get(3)?,
+                    source_hash: row.get(4)?,
+                    summary: row.get(5)?,
+                    summary_hash: row.get(6)?,
+                    provider_id: row.get(7)?,
+                    model: row.get(8)?,
+                    revision: row.get(9)?,
+                    generated_at: row.get(10)?,
+                    updated_at: row.get(11)?,
+                })
+            },
+        )
+        .optional()?
+        .ok_or_else(|| StoreError::NotFound {
+            entity: "summary_record",
+            id: format!("{scope_type}:{scope_id}"),
+        })
 }
 
 fn validate_set_style_sample_status(command: &SetStyleSampleStatus) -> StoreResult<()> {

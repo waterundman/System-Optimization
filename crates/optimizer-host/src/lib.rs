@@ -32,8 +32,8 @@ pub use workspace_commands::{
     CreateDocumentResponse, CreateDocumentSpec, CreateStyleSampleSpec, DocumentMoveDirection,
     DocumentMutationResponse, ProjectWorkspace, RenameDocumentSpec, ReorderDocumentSpec,
     RestoreCheckpointResponse, RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec,
-    SetDocumentArchivedSpec, SetStyleSampleStatusSpec, StyleSample, VersionCommit, VersionHistory,
-    WorkspaceBlock, WorkspaceCommandError, WorkspaceDocument,
+    SetDocumentArchivedSpec, SetStyleSampleStatusSpec, StyleSample, SummaryInvalidation,
+    VersionCommit, VersionHistory, WorkspaceBlock, WorkspaceCommandError, WorkspaceDocument,
 };
 
 #[derive(Debug)]

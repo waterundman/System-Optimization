@@ -6,6 +6,7 @@ pub const REGISTERED_COMMANDS: &[&str] = &[
     "get_project_workspace",
     "create_document",
     "list_archived_documents",
+    "list_summary_invalidations",
     "rename_document",
     "reorder_document",
     "set_document_archived",

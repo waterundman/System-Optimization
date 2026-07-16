@@ -17,8 +17,10 @@
 - Patch review head、不可变 review event 与 expected-revision 乐观并发；
 - 审查接受、拒绝、冲突和 rebase 与 Operation 生命周期原子同步；
 - 文件数据库从旧 schema 升级前自动创建并 `quick_check` 的在线备份，路径可由 `StoreDiagnostics.migration_backup` 获取。
+- schema v5 的项目/章节/Block 分层摘要记录，以及与正文、结构 Commit 同事务更新的合并失效队列；
+- 摘要完成必须匹配该作用域当前排队的 source Commit，生成期间再次失效会以乐观冲突拒绝陈旧写回；
 
-恢复目前要求文档与 Block 结构未发生变化，只回放内容、哈希和锁定状态。新增、删除或移动节点的恢复将在带结构操作日志后开放。
+恢复支持跨章节创建、改名、排序、软归档和复活；恢复仍创建新的 Commit，不改写旧节点。归档章节不参与活动 FTS、工作区、导出或摘要队列，恢复时其活动 Block 会重新失效以避免漏掉未完成摘要。
 
 存储层不负责生成 ID 或正文内容哈希；调用方必须显式提供。快照编码由存储层统一完成，以固定格式、版本和安全上限。
 

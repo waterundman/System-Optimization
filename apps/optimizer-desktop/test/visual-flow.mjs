@@ -57,14 +57,14 @@ await page.getByRole("heading", { name: "第二章" }).waitFor();
 await page.getByText(/已创建章节/).waitFor();
 await page.screenshot({ path: resolve(screenshotDirectory, "document-created.png"), fullPage: true });
 
-await page.getByRole("button", { name: "章 第二章", exact: true }).hover();
+await page.getByRole("button", { name: "章 第二章", exact: true }).locator("..").hover();
 page.once("dialog", (dialog) => dialog.accept("第二章：雨夜"));
 await page.getByRole("button", { name: "重命名 第二章" }).click();
 await page.getByRole("heading", { name: "第二章：雨夜" }).waitFor();
-await page.getByRole("button", { name: "章 第二章：雨夜", exact: true }).hover();
+await page.getByRole("button", { name: "章 第二章：雨夜", exact: true }).locator("..").hover();
 await page.getByRole("button", { name: "上移 第二章：雨夜" }).click();
 await page.getByText(/已上移“第二章：雨夜”/).waitFor();
-await page.getByRole("button", { name: "章 第二章：雨夜", exact: true }).hover();
+await page.getByRole("button", { name: "章 第二章：雨夜", exact: true }).locator("..").hover();
 page.once("dialog", (dialog) => dialog.accept());
 await page.getByRole("button", { name: "归档 第二章：雨夜" }).click();
 await page.getByText("已归档 · 1").waitFor();
@@ -84,7 +84,7 @@ await page.getByRole("heading", { name: "导入章" }).waitFor();
 await page.getByText(/已导入 导入章\.md/).waitFor();
 await page.getByRole("button", { name: "导出 MD" }).click();
 await page.getByText(/optimizer-export-visual\.md/).waitFor();
-await page.getByRole("button", { name: "雾港来信" }).click();
+await page.getByRole("button", { name: "章 雾港来信", exact: true }).click();
 
 await page.locator('[data-block-id="block-visual-1"]').click();
 await page.getByRole("button", { name: "续写" }).click();

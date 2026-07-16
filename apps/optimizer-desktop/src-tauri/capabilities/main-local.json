@@ -9,6 +9,7 @@
     "allow-style-library",
     "allow-workspace-write",
     "allow-document-lifecycle",
+    "allow-summary-status-read",
     "allow-project-export",
     "allow-version-read",
     "allow-version-write",

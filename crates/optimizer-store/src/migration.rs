@@ -2,7 +2,7 @@ use rusqlite::{Connection, TransactionBehavior};
 
 use crate::error::{StoreError, StoreResult};
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 4;
+pub const CURRENT_SCHEMA_VERSION: i64 = 5;
 
 pub(crate) const MIGRATION_1: &str = r#"
 CREATE TABLE schema_migration (
@@ -457,6 +457,77 @@ BEGIN
 END;
 "#;
 
+const MIGRATION_5: &str = r#"
+CREATE TABLE summary_record (
+  project_id TEXT NOT NULL REFERENCES project(id),
+  scope_type TEXT NOT NULL CHECK(scope_type IN ('block', 'document', 'project')),
+  scope_id TEXT NOT NULL,
+  source_commit_id TEXT NOT NULL REFERENCES commit_node(id),
+  source_hash TEXT NOT NULL,
+  summary_text TEXT NOT NULL,
+  summary_hash TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  model TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0),
+  generated_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(project_id, scope_type, scope_id)
+) STRICT;
+
+CREATE TABLE summary_invalidation (
+  project_id TEXT NOT NULL REFERENCES project(id),
+  scope_type TEXT NOT NULL CHECK(scope_type IN ('block', 'document', 'project')),
+  scope_id TEXT NOT NULL,
+  source_commit_id TEXT NOT NULL REFERENCES commit_node(id),
+  reason TEXT NOT NULL,
+  invalidation_count INTEGER NOT NULL DEFAULT 1 CHECK(invalidation_count >= 1),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(project_id, scope_type, scope_id)
+) STRICT;
+
+CREATE INDEX summary_invalidation_project_created_idx
+  ON summary_invalidation(project_id, created_at, scope_type, scope_id);
+
+INSERT INTO summary_invalidation(
+  project_id, scope_type, scope_id, source_commit_id, reason,
+  invalidation_count, created_at
+)
+SELECT id, 'project', id, head_commit_id, 'schema_v5_backfill', 1, updated_at
+FROM project
+WHERE head_commit_id IS NOT NULL;
+
+INSERT INTO summary_invalidation(
+  project_id, scope_type, scope_id, source_commit_id, reason,
+  invalidation_count, created_at
+)
+SELECT d.project_id, 'document', d.id, p.head_commit_id,
+       'schema_v5_backfill', 1, p.updated_at
+FROM document AS d
+JOIN project AS p ON p.id = d.project_id
+WHERE d.deleted_at IS NULL AND p.head_commit_id IS NOT NULL;
+
+INSERT INTO summary_invalidation(
+  project_id, scope_type, scope_id, source_commit_id, reason,
+  invalidation_count, created_at
+)
+SELECT d.project_id, 'block', b.id, p.head_commit_id,
+       'schema_v5_backfill', 1, p.updated_at
+FROM block AS b
+JOIN document AS d ON d.id = b.document_id
+JOIN project AS p ON p.id = d.project_id
+WHERE b.deleted_at IS NULL AND d.deleted_at IS NULL
+  AND p.head_commit_id IS NOT NULL;
+
+CREATE TRIGGER summary_record_guard BEFORE UPDATE ON summary_record
+WHEN new.project_id IS NOT old.project_id
+  OR new.scope_type IS NOT old.scope_type
+  OR new.scope_id IS NOT old.scope_id
+  OR new.revision <> old.revision + 1
+BEGIN
+  SELECT RAISE(ABORT, 'invalid:summary_record_update');
+END;
+"#;
+
 pub fn migrate(connection: &mut Connection) -> StoreResult<()> {
     let current: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if current > CURRENT_SCHEMA_VERSION {
@@ -519,6 +590,24 @@ pub fn migrate(connection: &mut Connection) -> StoreResult<()> {
             )?;
             transaction.pragma_update(None, "user_version", 4)?;
         }
+        if current < 5 {
+            transaction.execute_batch(MIGRATION_5)?;
+            let violations: i64 = transaction.query_row(
+                "SELECT COUNT(*) FROM pragma_foreign_key_check",
+                [],
+                |row| row.get(0),
+            )?;
+            if violations != 0 {
+                return Err(StoreError::Validation(format!(
+                    "schema migration produced {violations} foreign-key violation(s)"
+                )));
+            }
+            transaction.execute(
+                "INSERT INTO schema_migration(version, applied_at) VALUES (5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                [],
+            )?;
+            transaction.pragma_update(None, "user_version", 5)?;
+        }
         transaction.commit()?;
         Ok(())
     })();
@@ -579,6 +668,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(style_table, "style_sample");
+        let summary_table: String = connection
+            .query_row(
+                "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'summary_invalidation'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(summary_table, "summary_invalidation");
         assert_eq!(applied, CURRENT_SCHEMA_VERSION);
     }
 
@@ -609,6 +706,19 @@ mod tests {
                 ) VALUES (
                   'commit-1', 'project-1', 'root-hash', 'seed', 'user',
                   '2026-07-14T00:00:00Z'
+                );
+                UPDATE project SET head_commit_id = 'commit-1' WHERE id = 'project-1';
+                INSERT INTO document(
+                  id, project_id, kind, title, order_key, revision
+                ) VALUES (
+                  'document-1', 'project-1', 'chapter', 'Chapter', 'a0', 0
+                );
+                INSERT INTO block(
+                  id, document_id, kind, order_key, content_json, plain_text,
+                  content_hash, revision, locked
+                ) VALUES (
+                  'block-1', 'document-1', 'paragraph', 'a0',
+                  '{"type":"paragraph","content":[]}', '', 'block-hash', 0, 0
                 );
                 INSERT INTO context_packet_record(
                   id, operation_intent_id, project_id, base_commit_id,
@@ -691,6 +801,12 @@ mod tests {
             .unwrap();
         assert_eq!(child_rows, 4);
         assert_eq!(foreign_key_violations, 0);
+        let summary_invalidations: i64 = connection
+            .query_row("SELECT COUNT(*) FROM summary_invalidation", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(summary_invalidations, 3);
         assert!(
             connection
                 .execute("DELETE FROM operation_run WHERE id = 'run-local'", [])

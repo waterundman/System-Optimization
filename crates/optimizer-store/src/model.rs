@@ -102,6 +102,47 @@ pub struct DocumentBatchReceipt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SummaryInvalidationRecord {
+    pub project_id: String,
+    pub scope_type: String,
+    pub scope_id: String,
+    pub source_commit_id: String,
+    pub reason: String,
+    pub invalidation_count: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PutSummaryRecord {
+    pub project_id: String,
+    pub scope_type: String,
+    pub scope_id: String,
+    pub expected_source_commit_id: String,
+    pub source_hash: String,
+    pub summary: String,
+    pub summary_hash: String,
+    pub provider_id: String,
+    pub model: String,
+    pub generated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SummaryRecord {
+    pub project_id: String,
+    pub scope_type: String,
+    pub scope_id: String,
+    pub source_commit_id: String,
+    pub source_hash: String,
+    pub summary: String,
+    pub summary_hash: String,
+    pub provider_id: String,
+    pub model: String,
+    pub revision: i64,
+    pub generated_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StyleSampleRecord {
     pub id: String,
     pub project_id: String,

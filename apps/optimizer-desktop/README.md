@@ -36,6 +36,7 @@ Ollama 是无凭据的显式本地 Provider：宿主只连接 `127.0.0.1:11434/v
 ## 工作区与版本
 
 - `get_project_workspace` 返回文档树、结构化 Block、稳定 hash/revision 和当前 HEAD；
+- `list_summary_invalidations` 只返回项目/章节/Block 摘要失效元数据；页面显示待更新数量，不接触摘要生成凭据、正文或 SQLite；
 - `save_block` 使用 Block 与项目 HEAD 双层乐观并发，成功时原子生成 EditJournal 与 autosave Commit；
 - `create_checkpoint` 为当前 HEAD 建立带 checksum 的物化快照；
 - `get_version_history` 只返回 Commit/检查点元数据；
@@ -46,6 +47,8 @@ Ollama 是无凭据的显式本地 Provider：宿主只连接 `127.0.0.1:11434/v
 风格库使用独立 `allow-style-library` permission。选中的正文可固定为项目样本；启用样本作为 L4 Context 候选，归档样本和远程调用中的 `never_send` 样本由 Context Compiler 在模型调用前排除。实际入选内容始终出现在发送确认弹窗中。
 
 文档侧栏可创建版本化章节。原生文件选择器可把最大 2 MiB 的 Markdown/Text 文件导入为一个章节；宿主不接受任意读取路径。导出由独立 `allow-project-export` permission 写入项目包 `exports/`，采用临时文件加原子 rename。检查点恢复支持在章节创建前后软归档与复活结构。
+
+摘要状态读取使用独立的 `allow-summary-status-read` permission。正文自动保存、AI 接受、章节生命周期与检查点恢复会在对应 Store 事务中合并更新作用域失效项；页面只在权威写入完成后刷新计数。后台摘要生成与队列消费保留在 Rust 信任边界，不开放给 WebView。
 
 ## 前端与运行
 

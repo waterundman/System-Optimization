@@ -24,6 +24,11 @@ description = "Allows the bundled editor to list archived chapters and commit ch
 commands.allow = ["list_archived_documents", "rename_document", "reorder_document", "set_document_archived"]
 
 [[permission]]
+identifier = "allow-summary-status-read"
+description = "Allows the bundled editor to inspect coalesced summary invalidation metadata without reading generated summaries."
+commands.allow = ["list_summary_invalidations"]
+
+[[permission]]
 identifier = "allow-project-export"
 description = "Allows the bundled editor to atomically export the current project as Markdown inside its project package."
 commands.allow = ["export_markdown"]
