@@ -19,6 +19,11 @@ description = "Allows the bundled editor to list, create, archive and restore pr
 commands.allow = ["list_style_samples", "create_style_sample", "set_style_sample_status"]
 
 [[permission]]
+identifier = "allow-knowledge-library"
+description = "Allows the bundled editor to maintain project facts and constraints and collect only current target-bound canonical knowledge context."
+commands.allow = ["list_knowledge_items", "create_knowledge_item", "set_knowledge_item_status", "get_knowledge_context"]
+
+[[permission]]
 identifier = "allow-workspace-write"
 description = "Allows the bundled editor to create a chapter, save a block through optimistic concurrency and create audit commits."
 commands.allow = ["create_document", "save_block", "apply_reviewed_proposal"]

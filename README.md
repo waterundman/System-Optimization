@@ -11,7 +11,7 @@
 - `kernel-lab`：无需第三方依赖即可运行的上下文编译示例。
 - `optimizer-host`：Rust 宿主路径边界、原子 `.optimizer` 项目包、严格 JSON 命令适配、宿主最近项目注册表、Operation/Review 持久化、审计读取、Secret Store、一次性模型 capability，以及四个云端 Provider 和固定回环 Ollama 的原生流式执行。
 - `optimizer-desktop`：Tauri 2 桌面入口、宿主验证的最近项目、单项目 Session、文档树、版本化自动保存、冲突草稿、检查点/恢复、模型设置、流式 AI 操作、取消与 Patch/Findings 审查界面。
-- `optimizer-store`：SQLite 3.51.3、Block/Commit/快照、Operation/Artifact/Review 审计日志、FTS5、迁移前在线备份，以及 schema v5 的分层摘要记录与合并失效队列。
+- `optimizer-store`：SQLite 3.51.3、Block/Commit/快照、Operation/Artifact/Review 审计日志、FTS5、迁移前在线备份、分层摘要队列，以及 schema v6 的事实/约束资产。
 - 项目风格库：独立保存、归档和恢复固定样本；canonical 样本以 L4 Context 参与操作，`never_send` 对远程模型强制排除并允许本地 Ollama 使用。
 - `@optimizer/editor-bridge`：稳定 Block ID、UTF-16 选区映射、乐观并发编辑事务与 Tiptap 快照适配。
 - `@optimizer/patch-engine`：中文分层 diff、PatchProposal v2、逐 hunk 审查、原子决策与冲突检测。
@@ -84,6 +84,7 @@ scripts/               工程约束检查
 - WebView 不再拥有原始模型执行命令；确认后的请求先绑定项目 HEAD、Context Packet、目标 Block 与 Provider locality，获得 120 秒内只可消费一次的宿主 capability，项目变化、取消、关闭或重放都会安全失败。
 - AI 工具栏支持续写、润色、压缩、扩写、批评；当前选区为空时使用当前 Block，续写使用光标位置。
 - 用户可把正文选区固定为项目风格样本，在专用抽屉中归档或恢复；风格与正文/事实分层，不会把归档样本重新召回。
+- 用户可维护带 authority、敏感级别和硬/软强度的项目事实与约束；只有 canonical 且绑定当前 HEAD/目标 Block 的条目会进入 L3 Context，`never_send` 不会发往云端模型。
 - Context Compiler、Operation Runner 与 Patch Engine 复用仓库同一份实现；模型输出经过严格 JSON 校验后生成不可变 PatchProposal 或 Findings。
 - 任何云端模型请求发出前都会展示实际编译后的 Context Packet、来源、层级、必需标记、排除项和估算 token；用户确认前不会调用模型宿主命令。
 - 每个 hunk 可接受或拒绝；最终应用在一个 SQLite transaction 内同时创建 `ai_accept` Commit、编辑日志、Review apply 事件和 Operation accepted 状态。

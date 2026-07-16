@@ -4,9 +4,10 @@ use std::fmt::Write as _;
 
 use optimizer_store::{
     AppendReviewEvent, ApplyBlockEdit, ApplyDocumentBatch, BlockRecord, CommitRecord,
-    CreateDocumentWithBlock, CreateStyleSample, DocumentMutation, DocumentRecord, EditReceipt,
-    OperationArtifactKind, OptimizerStore, RestoreSnapshot, ReviewDecision, ReviewEventKind,
-    ReviewSessionStatus, SetStyleSampleStatus, SnapshotRecord, StoreError, StyleSampleRecord,
+    CreateDocumentWithBlock, CreateKnowledgeItem, CreateStyleSample, DocumentMutation,
+    DocumentRecord, EditReceipt, KnowledgeItemRecord, OperationArtifactKind, OptimizerStore,
+    RestoreSnapshot, ReviewDecision, ReviewEventKind, ReviewSessionStatus, SetKnowledgeItemStatus,
+    SetStyleSampleStatus, SnapshotRecord, StoreError, StyleSampleRecord,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -20,6 +21,8 @@ const MAX_CONTENT_JSON_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PLAIN_TEXT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_STYLE_SAMPLE_BYTES: usize = 64 * 1024;
 const MAX_STYLE_TITLE_CHARS: usize = 120;
+const MAX_KNOWLEDGE_CONTENT_BYTES: usize = 64 * 1024;
+const MAX_KNOWLEDGE_TITLE_CHARS: usize = 120;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,6 +78,42 @@ pub struct StyleSample {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct KnowledgeItem {
+    pub schema_version: u32,
+    pub id: String,
+    pub kind: String,
+    pub title: String,
+    pub content: String,
+    pub content_hash: String,
+    pub status: String,
+    pub authority: String,
+    pub sensitivity: String,
+    pub severity: Option<String>,
+    pub revision: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeContextCandidate {
+    pub id: String,
+    pub source_ref: String,
+    pub source_hash: String,
+    pub source_commit_id: String,
+    pub tier: String,
+    pub status: String,
+    pub authority: String,
+    pub sensitivity: String,
+    pub render_mode: String,
+    pub reason_codes: Vec<String>,
+    pub content: String,
+    pub revision: i64,
+    pub generated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SummaryInvalidation {
     pub schema_version: u32,
     pub scope_type: String,
@@ -97,6 +136,30 @@ pub struct SetStyleSampleStatusSpec {
     pub id: String,
     pub expected_revision: i64,
     pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateKnowledgeItemSpec {
+    pub kind: String,
+    pub title: String,
+    pub content: String,
+    pub sensitivity: String,
+    pub severity: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetKnowledgeItemStatusSpec {
+    pub id: String,
+    pub expected_revision: i64,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeContextSpec {
+    pub base_commit_id: String,
+    pub target_block_id: String,
+    pub target_block_revision: i64,
+    pub target_block_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,6 +339,7 @@ pub enum WorkspaceCommandError {
     Validation(String),
     DocumentValidation(String),
     StyleValidation(String),
+    KnowledgeValidation(String),
     NoChanges,
     StoredContent {
         block_id: String,
@@ -292,6 +356,7 @@ impl WorkspaceCommandError {
             Self::Validation(_) => "INVALID_BLOCK_EDIT",
             Self::DocumentValidation(_) => "INVALID_DOCUMENT",
             Self::StyleValidation(_) => "INVALID_STYLE_SAMPLE",
+            Self::KnowledgeValidation(_) => "INVALID_KNOWLEDGE_ITEM",
             Self::NoChanges => "NO_CHANGES",
             Self::StoredContent { .. } => "PROJECT_CONTENT_INVALID",
             Self::Json(_) => "BLOCK_CONTENT_INVALID",
@@ -312,6 +377,7 @@ impl WorkspaceCommandError {
             Self::Validation(message) => message.clone(),
             Self::DocumentValidation(message) => message.clone(),
             Self::StyleValidation(message) => message.clone(),
+            Self::KnowledgeValidation(message) => message.clone(),
             Self::NoChanges => "Block content has not changed".into(),
             Self::StoredContent { block_id, .. } => {
                 format!("Stored content is invalid for block {block_id}")
@@ -341,6 +407,7 @@ impl std::error::Error for WorkspaceCommandError {
             Self::Validation(_)
             | Self::DocumentValidation(_)
             | Self::StyleValidation(_)
+            | Self::KnowledgeValidation(_)
             | Self::NoChanges
             | Self::Clock => None,
         }
@@ -1014,6 +1081,92 @@ pub(crate) fn set_style_sample_status(
         updated_at: now()?,
     })?;
     style_sample(record)
+}
+
+pub(crate) fn list_knowledge_items(
+    store: &OptimizerStore,
+    project_id: &str,
+) -> Result<Vec<KnowledgeItem>, WorkspaceCommandError> {
+    store
+        .list_knowledge_items(project_id)?
+        .into_iter()
+        .map(knowledge_item)
+        .collect::<Result<Vec<_>, _>>()
+}
+
+pub(crate) fn create_knowledge_item(
+    store: &mut OptimizerStore,
+    project_id: &str,
+    spec: &CreateKnowledgeItemSpec,
+) -> Result<KnowledgeItem, WorkspaceCommandError> {
+    validate_knowledge_item(spec)?;
+    let title = spec.title.trim().to_owned();
+    let content = spec.content.trim().to_owned();
+    let record = store.create_knowledge_item(&CreateKnowledgeItem {
+        id: generated_id("knowledge"),
+        project_id: project_id.to_owned(),
+        kind: spec.kind.clone(),
+        title,
+        content_hash: sha256(content.as_bytes()),
+        content,
+        authority: "user_confirmed".into(),
+        sensitivity: spec.sensitivity.clone(),
+        severity: spec.severity.clone(),
+        created_at: now()?,
+    })?;
+    knowledge_item(record)
+}
+
+pub(crate) fn set_knowledge_item_status(
+    store: &mut OptimizerStore,
+    project_id: &str,
+    spec: &SetKnowledgeItemStatusSpec,
+) -> Result<KnowledgeItem, WorkspaceCommandError> {
+    if spec.id.trim().is_empty() || spec.expected_revision < 0 {
+        return Err(WorkspaceCommandError::KnowledgeValidation(
+            "Knowledge item id and non-negative revision are required".into(),
+        ));
+    }
+    if !matches!(spec.status.as_str(), "canonical" | "archived" | "rejected") {
+        return Err(WorkspaceCommandError::KnowledgeValidation(
+            "Knowledge item status must be canonical, archived or rejected".into(),
+        ));
+    }
+    let record = store.set_knowledge_item_status(&SetKnowledgeItemStatus {
+        project_id: project_id.to_owned(),
+        id: spec.id.clone(),
+        expected_revision: spec.expected_revision,
+        status: spec.status.clone(),
+        updated_at: now()?,
+    })?;
+    knowledge_item(record)
+}
+
+pub(crate) fn knowledge_context(
+    store: &OptimizerStore,
+    project_id: &str,
+    spec: &KnowledgeContextSpec,
+) -> Result<Vec<KnowledgeContextCandidate>, WorkspaceCommandError> {
+    let project = store.get_project(project_id)?;
+    if spec.base_commit_id.trim().is_empty() || spec.base_commit_id != project.head_commit_id {
+        return Err(WorkspaceCommandError::KnowledgeValidation(
+            "Knowledge context must bind to the current project HEAD".into(),
+        ));
+    }
+    let target = store.get_project_block(project_id, &spec.target_block_id)?;
+    if target.revision != spec.target_block_revision
+        || target.content_hash != spec.target_block_hash
+    {
+        return Err(WorkspaceCommandError::KnowledgeValidation(
+            "Knowledge context target changed before collection".into(),
+        ));
+    }
+    store
+        .list_knowledge_items(project_id)?
+        .into_iter()
+        .filter(|record| record.status == "canonical")
+        .map(|record| knowledge_context_candidate(record, &project.head_commit_id))
+        .collect()
 }
 
 pub(crate) fn save_block(
@@ -1697,6 +1850,67 @@ fn style_sample(record: StyleSampleRecord) -> Result<StyleSample, WorkspaceComma
     })
 }
 
+fn knowledge_item(record: KnowledgeItemRecord) -> Result<KnowledgeItem, WorkspaceCommandError> {
+    validate_stored_knowledge_item(&record)?;
+    Ok(KnowledgeItem {
+        schema_version: WORKSPACE_SCHEMA_VERSION,
+        id: record.id,
+        kind: record.kind,
+        title: record.title,
+        content: record.content,
+        content_hash: record.content_hash,
+        status: record.status,
+        authority: record.authority,
+        sensitivity: record.sensitivity,
+        severity: record.severity,
+        revision: record.revision,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+    })
+}
+
+fn knowledge_context_candidate(
+    record: KnowledgeItemRecord,
+    source_commit_id: &str,
+) -> Result<KnowledgeContextCandidate, WorkspaceCommandError> {
+    validate_stored_knowledge_item(&record)?;
+    let label = match (record.kind.as_str(), record.severity.as_deref()) {
+        ("fact", None) => "事实",
+        ("constraint", Some("hard")) => "硬约束",
+        ("constraint", Some("soft")) => "软约束",
+        _ => {
+            return Err(WorkspaceCommandError::Store(
+                StoreError::InvariantViolation("stored knowledge type is invalid".into()),
+            ));
+        }
+    };
+    let content = format!("{label}【{}】：{}", record.title, record.content);
+    let reason_code = match (record.kind.as_str(), record.severity.as_deref()) {
+        ("fact", None) => "CANONICAL_FACT",
+        ("constraint", Some("hard")) => "PROJECT_HARD_CONSTRAINT",
+        ("constraint", Some("soft")) => "PROJECT_SOFT_CONSTRAINT",
+        _ => unreachable!("stored knowledge policy was validated above"),
+    };
+    Ok(KnowledgeContextCandidate {
+        id: format!("knowledge-{}-r{}", record.id, record.revision),
+        source_ref: format!(
+            "knowledge:{}:{}@r{}",
+            record.kind, record.id, record.revision
+        ),
+        source_hash: sha256(content.as_bytes()),
+        source_commit_id: source_commit_id.to_owned(),
+        tier: "L3_KNOWLEDGE".into(),
+        status: record.status,
+        authority: record.authority,
+        sensitivity: record.sensitivity,
+        render_mode: "constraint".into(),
+        reason_codes: vec![reason_code.into()],
+        content,
+        revision: record.revision,
+        generated_at: record.updated_at,
+    })
+}
+
 fn checkpoint_summary(record: SnapshotRecord) -> CheckpointSummary {
     CheckpointSummary {
         id: record.id,
@@ -1780,6 +1994,87 @@ fn validate_style_sample(spec: &CreateStyleSampleSpec) -> Result<(), WorkspaceCo
     if !matches!(spec.sensitivity.as_str(), "local_sensitive" | "never_send") {
         return Err(WorkspaceCommandError::StyleValidation(
             "Style sample sensitivity must be local_sensitive or never_send".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_knowledge_item(spec: &CreateKnowledgeItemSpec) -> Result<(), WorkspaceCommandError> {
+    let title = spec.title.trim();
+    let content = spec.content.trim();
+    if title.is_empty() || title.chars().count() > MAX_KNOWLEDGE_TITLE_CHARS {
+        return Err(WorkspaceCommandError::KnowledgeValidation(format!(
+            "Knowledge title must contain 1 to {MAX_KNOWLEDGE_TITLE_CHARS} characters"
+        )));
+    }
+    if content.is_empty() || content.len() > MAX_KNOWLEDGE_CONTENT_BYTES {
+        return Err(WorkspaceCommandError::KnowledgeValidation(format!(
+            "Knowledge content must contain 1 to {MAX_KNOWLEDGE_CONTENT_BYTES} bytes"
+        )));
+    }
+    if !matches!(spec.kind.as_str(), "fact" | "constraint") {
+        return Err(WorkspaceCommandError::KnowledgeValidation(
+            "Knowledge kind must be fact or constraint".into(),
+        ));
+    }
+    let valid_severity = match spec.kind.as_str() {
+        "fact" => spec.severity.is_none(),
+        "constraint" => matches!(spec.severity.as_deref(), Some("hard" | "soft")),
+        _ => false,
+    };
+    if !valid_severity {
+        return Err(WorkspaceCommandError::KnowledgeValidation(
+            "Facts have no severity; constraints require hard or soft severity".into(),
+        ));
+    }
+    if !matches!(
+        spec.sensitivity.as_str(),
+        "public" | "local" | "local_sensitive" | "never_send"
+    ) {
+        return Err(WorkspaceCommandError::KnowledgeValidation(
+            "Knowledge sensitivity is unsupported".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_stored_knowledge_item(
+    record: &KnowledgeItemRecord,
+) -> Result<(), WorkspaceCommandError> {
+    let identity_valid = !record.id.trim().is_empty()
+        && !record.project_id.trim().is_empty()
+        && !record.title.trim().is_empty()
+        && !record.content.trim().is_empty()
+        && !record.created_at.trim().is_empty()
+        && !record.updated_at.trim().is_empty()
+        && record.revision >= 0;
+    let hash_valid = record.content_hash == sha256(record.content.as_bytes());
+    let status_valid = matches!(
+        record.status.as_str(),
+        "canonical" | "archived" | "rejected"
+    );
+    let authority_valid = matches!(
+        record.authority.as_str(),
+        "user_confirmed" | "source_derived" | "model_inferred" | "external_untrusted"
+    );
+    let sensitivity_valid = matches!(
+        record.sensitivity.as_str(),
+        "public" | "local" | "local_sensitive" | "never_send"
+    );
+    let type_valid = match record.kind.as_str() {
+        "fact" => record.severity.is_none(),
+        "constraint" => matches!(record.severity.as_deref(), Some("hard" | "soft")),
+        _ => false,
+    };
+    if !identity_valid
+        || !hash_valid
+        || !status_valid
+        || !authority_valid
+        || !sensitivity_valid
+        || !type_valid
+    {
+        return Err(WorkspaceCommandError::Store(
+            StoreError::InvariantViolation("stored knowledge policy is invalid".into()),
         ));
     }
     Ok(())

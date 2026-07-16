@@ -9,11 +9,11 @@ use crate::error::{StoreError, StoreResult};
 use crate::migration::{CURRENT_SCHEMA_VERSION, migrate};
 use crate::model::{
     ApplyBlockEdit, ApplyDocumentBatch, BlockRecord, BlockSearchHit, BranchRecord, CommitRecord,
-    CreateDocumentReceipt, CreateDocumentWithBlock, CreateSnapshot, CreateStyleSample,
-    DocumentBatchReceipt, DocumentRecord, EditReceipt, ProjectRecord, ProjectSeed,
-    PutSummaryRecord, RestoreReceipt, RestoreSnapshot, ReviewEventKind, ReviewSessionStatus,
-    SetStyleSampleStatus, SnapshotRecord, StyleSampleRecord, SummaryInvalidationRecord,
-    SummaryRecord,
+    CreateDocumentReceipt, CreateDocumentWithBlock, CreateKnowledgeItem, CreateSnapshot,
+    CreateStyleSample, DocumentBatchReceipt, DocumentRecord, EditReceipt, KnowledgeItemRecord,
+    ProjectRecord, ProjectSeed, PutSummaryRecord, RestoreReceipt, RestoreSnapshot, ReviewEventKind,
+    ReviewSessionStatus, SetKnowledgeItemStatus, SetStyleSampleStatus, SnapshotRecord,
+    StyleSampleRecord, SummaryInvalidationRecord, SummaryRecord,
 };
 use crate::operation::append_review_event_in_transaction;
 use crate::snapshot::{
@@ -351,6 +351,112 @@ impl OptimizerStore {
             ));
         }
         let result = read_style_sample(&transaction, &command.project_id, &command.id)?;
+        transaction.commit()?;
+        Ok(result)
+    }
+
+    pub fn list_knowledge_items(&self, project_id: &str) -> StoreResult<Vec<KnowledgeItemRecord>> {
+        if project_id.trim().is_empty() {
+            return Err(StoreError::Validation(
+                "project id must not be empty".into(),
+            ));
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT id, project_id, kind, title, content, content_hash, status,
+                    authority, sensitivity, severity, revision, created_at, updated_at
+             FROM knowledge_item
+             WHERE project_id = ?1
+             ORDER BY status, kind, updated_at DESC, id",
+        )?;
+        statement
+            .query_map([project_id], map_knowledge_item)?
+            .collect::<Result<_, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn create_knowledge_item(
+        &mut self,
+        command: &CreateKnowledgeItem,
+    ) -> StoreResult<KnowledgeItemRecord> {
+        validate_create_knowledge_item(command)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let project_exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM project WHERE id = ?1)",
+            [&command.project_id],
+            |row| row.get(0),
+        )?;
+        if !project_exists {
+            return Err(StoreError::NotFound {
+                entity: "project",
+                id: command.project_id.clone(),
+            });
+        }
+        transaction.execute(
+            "INSERT INTO knowledge_item(
+               id, project_id, kind, title, content, content_hash, status,
+               authority, sensitivity, severity, revision, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'canonical', ?7, ?8, ?9, 0, ?10, ?10)",
+            params![
+                command.id,
+                command.project_id,
+                command.kind,
+                command.title,
+                command.content,
+                command.content_hash,
+                command.authority,
+                command.sensitivity,
+                command.severity,
+                command.created_at,
+            ],
+        )?;
+        let result = read_knowledge_item(&transaction, &command.project_id, &command.id)?;
+        transaction.commit()?;
+        Ok(result)
+    }
+
+    pub fn set_knowledge_item_status(
+        &mut self,
+        command: &SetKnowledgeItemStatus,
+    ) -> StoreResult<KnowledgeItemRecord> {
+        validate_set_knowledge_item_status(command)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = read_knowledge_item(&transaction, &command.project_id, &command.id)?;
+        if current.revision != command.expected_revision {
+            return Err(StoreError::StateConflict {
+                entity: "knowledge_item",
+                id: command.id.clone(),
+                expected_revision: command.expected_revision,
+                actual_revision: current.revision,
+                expected_state: command.status.clone(),
+                actual_state: current.status,
+            });
+        }
+        if current.status == command.status {
+            transaction.commit()?;
+            return Ok(current);
+        }
+        let updated = transaction.execute(
+            "UPDATE knowledge_item
+             SET status = ?1, revision = revision + 1, updated_at = ?2
+             WHERE project_id = ?3 AND id = ?4 AND revision = ?5",
+            params![
+                command.status,
+                command.updated_at,
+                command.project_id,
+                command.id,
+                command.expected_revision,
+            ],
+        )?;
+        if updated != 1 {
+            return Err(StoreError::InvariantViolation(
+                "knowledge item status update changed an unexpected row count".into(),
+            ));
+        }
+        let result = read_knowledge_item(&transaction, &command.project_id, &command.id)?;
         transaction.commit()?;
         Ok(result)
     }
@@ -2432,6 +2538,56 @@ fn validate_create_style_sample(command: &CreateStyleSample) -> StoreResult<()> 
     Ok(())
 }
 
+fn validate_create_knowledge_item(command: &CreateKnowledgeItem) -> StoreResult<()> {
+    for (field, value) in [
+        ("id", command.id.as_str()),
+        ("project_id", command.project_id.as_str()),
+        ("kind", command.kind.as_str()),
+        ("title", command.title.as_str()),
+        ("content", command.content.as_str()),
+        ("content_hash", command.content_hash.as_str()),
+        ("authority", command.authority.as_str()),
+        ("sensitivity", command.sensitivity.as_str()),
+        ("created_at", command.created_at.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(StoreError::Validation(format!("{field} must not be empty")));
+        }
+    }
+    if !matches!(command.kind.as_str(), "fact" | "constraint") {
+        return Err(StoreError::Validation(
+            "knowledge item kind is unsupported".into(),
+        ));
+    }
+    if !matches!(
+        command.authority.as_str(),
+        "user_confirmed" | "source_derived" | "model_inferred" | "external_untrusted"
+    ) {
+        return Err(StoreError::Validation(
+            "knowledge item authority is unsupported".into(),
+        ));
+    }
+    if !matches!(
+        command.sensitivity.as_str(),
+        "public" | "local" | "local_sensitive" | "never_send"
+    ) {
+        return Err(StoreError::Validation(
+            "knowledge item sensitivity is unsupported".into(),
+        ));
+    }
+    let severity_is_valid = match command.kind.as_str() {
+        "fact" => command.severity.is_none(),
+        "constraint" => matches!(command.severity.as_deref(), Some("hard" | "soft")),
+        _ => false,
+    };
+    if !severity_is_valid {
+        return Err(StoreError::Validation(
+            "knowledge item severity does not match its kind".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_create_document(command: &CreateDocumentWithBlock) -> StoreResult<()> {
     for (field, value) in [
         ("document_id", command.document_id.as_str()),
@@ -2799,6 +2955,33 @@ fn validate_set_style_sample_status(command: &SetStyleSampleStatus) -> StoreResu
     Ok(())
 }
 
+fn validate_set_knowledge_item_status(command: &SetKnowledgeItemStatus) -> StoreResult<()> {
+    if command.expected_revision < 0 {
+        return Err(StoreError::Validation(
+            "expected_revision must be non-negative".into(),
+        ));
+    }
+    for (field, value) in [
+        ("project_id", command.project_id.as_str()),
+        ("id", command.id.as_str()),
+        ("status", command.status.as_str()),
+        ("updated_at", command.updated_at.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(StoreError::Validation(format!("{field} must not be empty")));
+        }
+    }
+    if !matches!(
+        command.status.as_str(),
+        "canonical" | "archived" | "rejected"
+    ) {
+        return Err(StoreError::Validation(
+            "knowledge item status is unsupported".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn map_document_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<DocumentRecord> {
     Ok(DocumentRecord {
         id: row.get(0)?,
@@ -2827,6 +3010,24 @@ fn map_style_sample(row: &rusqlite::Row<'_>) -> rusqlite::Result<StyleSampleReco
     })
 }
 
+fn map_knowledge_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<KnowledgeItemRecord> {
+    Ok(KnowledgeItemRecord {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        kind: row.get(2)?,
+        title: row.get(3)?,
+        content: row.get(4)?,
+        content_hash: row.get(5)?,
+        status: row.get(6)?,
+        authority: row.get(7)?,
+        sensitivity: row.get(8)?,
+        severity: row.get(9)?,
+        revision: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+    })
+}
+
 fn read_style_sample(
     transaction: &Transaction<'_>,
     project_id: &str,
@@ -2843,6 +3044,26 @@ fn read_style_sample(
         .optional()?
         .ok_or_else(|| StoreError::NotFound {
             entity: "style_sample",
+            id: id.to_owned(),
+        })
+}
+
+fn read_knowledge_item(
+    transaction: &Transaction<'_>,
+    project_id: &str,
+    id: &str,
+) -> StoreResult<KnowledgeItemRecord> {
+    transaction
+        .query_row(
+            "SELECT id, project_id, kind, title, content, content_hash, status,
+                    authority, sensitivity, severity, revision, created_at, updated_at
+             FROM knowledge_item WHERE project_id = ?1 AND id = ?2",
+            params![project_id, id],
+            map_knowledge_item,
+        )
+        .optional()?
+        .ok_or_else(|| StoreError::NotFound {
+            entity: "knowledge_item",
             id: id.to_owned(),
         })
 }

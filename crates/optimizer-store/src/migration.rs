@@ -2,7 +2,7 @@ use rusqlite::{Connection, TransactionBehavior};
 
 use crate::error::{StoreError, StoreResult};
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 5;
+pub const CURRENT_SCHEMA_VERSION: i64 = 6;
 
 pub(crate) const MIGRATION_1: &str = r#"
 CREATE TABLE schema_migration (
@@ -528,6 +528,36 @@ BEGIN
 END;
 "#;
 
+const MIGRATION_6: &str = r#"
+CREATE TABLE knowledge_item (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES project(id),
+  kind TEXT NOT NULL CHECK(kind IN ('fact', 'constraint')),
+  title TEXT NOT NULL,
+  content TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('canonical', 'archived', 'rejected')),
+  authority TEXT NOT NULL CHECK(authority IN (
+    'user_confirmed', 'source_derived', 'model_inferred', 'external_untrusted'
+  )),
+  sensitivity TEXT NOT NULL CHECK(sensitivity IN (
+    'public', 'local', 'local_sensitive', 'never_send'
+  )),
+  severity TEXT CHECK(
+    (kind = 'fact' AND severity IS NULL)
+    OR (kind = 'constraint' AND severity IN ('hard', 'soft'))
+  ),
+  revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX knowledge_item_project_status_kind_idx
+  ON knowledge_item(project_id, status, kind, updated_at, id);
+
+UPDATE project SET schema_version = 6 WHERE schema_version < 6;
+"#;
+
 pub fn migrate(connection: &mut Connection) -> StoreResult<()> {
     let current: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if current > CURRENT_SCHEMA_VERSION {
@@ -608,6 +638,24 @@ pub fn migrate(connection: &mut Connection) -> StoreResult<()> {
             )?;
             transaction.pragma_update(None, "user_version", 5)?;
         }
+        if current < 6 {
+            transaction.execute_batch(MIGRATION_6)?;
+            let violations: i64 = transaction.query_row(
+                "SELECT COUNT(*) FROM pragma_foreign_key_check",
+                [],
+                |row| row.get(0),
+            )?;
+            if violations != 0 {
+                return Err(StoreError::Validation(format!(
+                    "schema migration produced {violations} foreign-key violation(s)"
+                )));
+            }
+            transaction.execute(
+                "INSERT INTO schema_migration(version, applied_at) VALUES (6, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                [],
+            )?;
+            transaction.pragma_update(None, "user_version", 6)?;
+        }
         transaction.commit()?;
         Ok(())
     })();
@@ -668,6 +716,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(style_table, "style_sample");
+        let knowledge_table: String = connection
+            .query_row(
+                "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'knowledge_item'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(knowledge_table, "knowledge_item");
         let summary_table: String = connection
             .query_row(
                 "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'summary_invalidation'",

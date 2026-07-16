@@ -477,15 +477,19 @@ function contextSource(input, hasher) {
         content: `项目：${input.projectTitle}\n文档：${document?.title ?? "未命名"}\n文档类型：${document?.kind ?? "document"}`,
         signals: { relevance: 0.8, structuralProximity: 1, freshness: 1 },
       }));
-      const summaryContext = await input.loadSummaryContext?.({
+      const hostBinding = {
         schemaVersion: 1,
         baseCommitId: input.workspace.headCommitId,
         targetBlockId: input.block.id,
         targetBlockRevision: input.block.revision,
         targetBlockHash: input.block.contentHash,
-      }) ?? [];
+      };
+      const [summaryContext, knowledgeContext] = await Promise.all([
+        input.loadSummaryContext?.(hostBinding) ?? [],
+        input.loadKnowledgeContext?.(hostBinding) ?? [],
+      ]);
       for (const summary of summaryContext) {
-        validateHostSummaryContext(summary);
+        validateHostContextCandidate(summary, "summary", input.workspace.headCommitId);
         const normalized = await candidate(hasher, {
           id: summary.id,
           sourceRef: summary.sourceRef,
@@ -503,7 +507,27 @@ function contextSource(input, hasher) {
           },
         });
         if (normalized.sourceHash !== summary.sourceHash) {
-          throw new Error("Host summary content hash does not match its payload");
+          throw new Error("Host context content hash does not match its payload");
+        }
+        candidates.push(normalized);
+      }
+      for (const knowledge of knowledgeContext) {
+        validateHostContextCandidate(knowledge, "knowledge", input.workspace.headCommitId);
+        const normalized = await candidate(hasher, {
+          id: knowledge.id,
+          sourceRef: knowledge.sourceRef,
+          tier: knowledge.tier,
+          authority: knowledge.authority,
+          renderMode: knowledge.renderMode,
+          reasonCodes: knowledge.reasonCodes,
+          content: knowledge.content,
+          status: knowledge.status,
+          sensitivity: knowledge.sensitivity,
+          selectedByUser: knowledge.authority === "user_confirmed",
+          signals: { relevance: 0.92, structuralProximity: 0.5, freshness: 1 },
+        });
+        if (normalized.sourceHash !== knowledge.sourceHash) {
+          throw new Error("Host context content hash does not match its payload");
         }
         candidates.push(normalized);
       }
@@ -527,25 +551,40 @@ function contextSource(input, hasher) {
   };
 }
 
-function validateHostSummaryContext(summary) {
+function validateHostContextCandidate(item, kind, expectedCommitId) {
   const allowed = (value, values) => typeof value === "string" && values.includes(value);
-  if (!summary
-    || typeof summary.id !== "string"
-    || !summary.id
-    || typeof summary.sourceRef !== "string"
-    || !summary.sourceRef
-    || !/^sha256:[0-9a-f]{64}$/.test(summary.sourceHash)
-    || !allowed(summary.tier, ["L2_STRUCTURAL", "L3_KNOWLEDGE"])
-    || !allowed(summary.status, ["canonical"])
-    || !allowed(summary.authority, ["source_derived", "model_inferred"])
-    || !allowed(summary.sensitivity, ["public", "local", "local_sensitive", "never_send"])
-    || summary.renderMode !== "summary"
-    || !Array.isArray(summary.reasonCodes)
-    || !summary.reasonCodes.length
-    || !summary.reasonCodes.every((item) => typeof item === "string" && item.length > 0)
-    || typeof summary.content !== "string"
-    || !summary.content) {
-    throw new TypeError("Host summary context is malformed");
+  const summary = kind === "summary";
+  const shapeValid = item
+    && typeof item.id === "string"
+    && item.id
+    && typeof item.sourceRef === "string"
+    && item.sourceRef
+    && /^sha256:[0-9a-f]{64}$/.test(item.sourceHash)
+    && item.sourceCommitId === expectedCommitId
+    && allowed(item.tier, summary ? ["L2_STRUCTURAL", "L3_KNOWLEDGE"] : ["L3_KNOWLEDGE"])
+    && item.status === "canonical"
+    && allowed(
+      item.authority,
+      summary
+        ? ["source_derived", "model_inferred"]
+        : ["user_confirmed", "source_derived", "model_inferred", "external_untrusted"],
+    )
+    && allowed(item.sensitivity, ["public", "local", "local_sensitive", "never_send"])
+    && item.renderMode === (summary ? "summary" : "constraint")
+    && Array.isArray(item.reasonCodes)
+    && item.reasonCodes.length
+    && item.reasonCodes.every((reason) => typeof reason === "string" && reason.length > 0)
+    && typeof item.content === "string"
+    && item.content
+    && Number.isInteger(item.revision)
+    && item.revision >= 0
+    && typeof item.generatedAt === "string"
+    && item.generatedAt.length > 0;
+  const sourceValid = summary
+    ? item?.sourceRef?.startsWith("summary:")
+    : item?.sourceRef?.startsWith("knowledge:");
+  if (!shapeValid || !sourceValid) {
+    throw new TypeError(`Host ${kind} context is malformed`);
   }
 }
 

@@ -4,12 +4,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use optimizer_store::{
     AppendReviewEvent, ApplyBlockEdit, ApplyDocumentBatch, CURRENT_SCHEMA_VERSION,
-    CreateDocumentWithBlock, CreateSnapshot, CreateStyleSample, DocumentMutation,
-    MINIMUM_SQLITE_VERSION, ModelUsageRecord, NewContextPacket, NewOperationArtifact,
-    NewOperationLifecycleEvent, NewOperationRun, OperationArtifactKind, OperationFailureRecord,
-    OperationState, OptimizerStore, PersistOperationBundle, ProjectSeed, PutSummaryRecord,
-    RestoreSnapshot, ReviewDecision, ReviewEventKind, ReviewSessionStatus, SeedBlock, SeedDocument,
-    SetStyleSampleStatus, StoreError, encode_snapshot,
+    CreateDocumentWithBlock, CreateKnowledgeItem, CreateSnapshot, CreateStyleSample,
+    DocumentMutation, MINIMUM_SQLITE_VERSION, ModelUsageRecord, NewContextPacket,
+    NewOperationArtifact, NewOperationLifecycleEvent, NewOperationRun, OperationArtifactKind,
+    OperationFailureRecord, OperationState, OptimizerStore, PersistOperationBundle, ProjectSeed,
+    PutSummaryRecord, RestoreSnapshot, ReviewDecision, ReviewEventKind, ReviewSessionStatus,
+    SeedBlock, SeedDocument, SetKnowledgeItemStatus, SetStyleSampleStatus, StoreError,
+    encode_snapshot,
 };
 
 struct TempDatabase {
@@ -211,6 +212,77 @@ fn stores_style_samples_separately_and_archives_with_optimistic_concurrency() {
             expected_revision: 0,
             status: "canonical".into(),
             updated_at: "2026-07-15T01:02:00.000Z".into(),
+        })
+        .unwrap_err();
+    assert!(matches!(stale, StoreError::StateConflict { .. }));
+}
+
+#[test]
+fn stores_canonical_facts_and_constraints_with_explicit_policy() {
+    let temp = TempDatabase::new();
+    let mut store = open_seeded(&temp.database);
+    let fact = store
+        .create_knowledge_item(&CreateKnowledgeItem {
+            id: "fact-1".into(),
+            project_id: "project-1".into(),
+            kind: "fact".into(),
+            title: "主角视觉".into(),
+            content: "事实【主角视觉】：主角左眼失明".into(),
+            content_hash: "sha256:fact-1".into(),
+            authority: "user_confirmed".into(),
+            sensitivity: "local_sensitive".into(),
+            severity: None,
+            created_at: "2026-07-16T01:00:00.000Z".into(),
+        })
+        .unwrap();
+    let constraint = store
+        .create_knowledge_item(&CreateKnowledgeItem {
+            id: "constraint-1".into(),
+            project_id: "project-1".into(),
+            kind: "constraint".into(),
+            title: "禁止剧透".into(),
+            content: "硬约束【禁止剧透】：本章不得揭示凶手身份".into(),
+            content_hash: "sha256:constraint-1".into(),
+            authority: "user_confirmed".into(),
+            sensitivity: "never_send".into(),
+            severity: Some("hard".into()),
+            created_at: "2026-07-16T01:01:00.000Z".into(),
+        })
+        .unwrap();
+    assert_eq!(fact.status, "canonical");
+    assert_eq!(constraint.severity.as_deref(), Some("hard"));
+    assert_eq!(store.list_knowledge_items("project-1").unwrap().len(), 2);
+
+    let archived = store
+        .set_knowledge_item_status(&SetKnowledgeItemStatus {
+            project_id: "project-1".into(),
+            id: fact.id,
+            expected_revision: 0,
+            status: "archived".into(),
+            updated_at: "2026-07-16T01:02:00.000Z".into(),
+        })
+        .unwrap();
+    assert_eq!(archived.status, "archived");
+    assert_eq!(archived.revision, 1);
+
+    let rejected = store
+        .set_knowledge_item_status(&SetKnowledgeItemStatus {
+            project_id: "project-1".into(),
+            id: constraint.id,
+            expected_revision: 0,
+            status: "rejected".into(),
+            updated_at: "2026-07-16T01:03:00.000Z".into(),
+        })
+        .unwrap();
+    assert_eq!(rejected.status, "rejected");
+
+    let stale = store
+        .set_knowledge_item_status(&SetKnowledgeItemStatus {
+            project_id: "project-1".into(),
+            id: archived.id,
+            expected_revision: 0,
+            status: "canonical".into(),
+            updated_at: "2026-07-16T01:04:00.000Z".into(),
         })
         .unwrap_err();
     assert!(matches!(stale, StoreError::StateConflict { .. }));

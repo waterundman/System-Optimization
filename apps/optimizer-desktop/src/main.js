@@ -32,6 +32,7 @@ const state = {
   providersOpen: false,
   stylesOpen: false,
   styleSamples: [],
+  knowledgeItems: [],
   archivedDocuments: [],
   summaryInvalidations: [],
   summaryRefreshTimer: null,
@@ -359,14 +360,16 @@ function setFormBusy(form, busy) {
 
 async function loadWorkspace() {
   const preferred = state.selectedDocumentId;
-  const [workspace, styleSamples, archivedDocuments, summaryInvalidations] = await Promise.all([
+  const [workspace, styleSamples, knowledgeItems, archivedDocuments, summaryInvalidations] = await Promise.all([
     invokeHost("get_project_workspace"),
     invokeHost("list_style_samples"),
+    invokeHost("list_knowledge_items"),
     invokeHost("list_archived_documents"),
     invokeHost("list_summary_invalidations"),
   ]);
   state.workspace = workspace;
   state.styleSamples = styleSamples;
+  state.knowledgeItems = knowledgeItems;
   state.archivedDocuments = archivedDocuments;
   state.summaryInvalidations = summaryInvalidations;
   state.selectedDocumentId = selectInitialDocument(state.workspace, preferred);
@@ -398,7 +401,7 @@ function renderWorkspace() {
       button("导出 MD", "ghost-button", exportMarkdown),
       button("建立检查点", "ghost-button", createCheckpoint),
       button(state.versionsOpen ? "收起版本" : "版本历史", "ghost-button", toggleVersions),
-      button(state.stylesOpen ? "收起风格" : "风格样本", "ghost-button", toggleStyles),
+      button(state.stylesOpen ? "收起知识" : "知识 / 风格", "ghost-button", toggleStyles),
       button(state.providersOpen ? "收起模型" : "模型设置", "ghost-button", toggleProviders),
       button("关闭项目", "quiet-button", closeProject),
     ]),
@@ -907,6 +910,7 @@ async function runAiOperation(operationType) {
       operationType,
       styleSamples: state.styleSamples,
       loadSummaryContext: (input) => invokeHost("get_summary_context", { input }),
+      loadKnowledgeContext: (input) => invokeHost("get_knowledge_context", { input }),
       signal: controller.signal,
       onProgress: updateAiProgress,
       confirmContext: confirmCompiledContext,
@@ -1403,20 +1407,32 @@ function toggleStyles() {
 function styleDrawer() {
   const active = state.styleSamples.filter((sample) => sample.status === "canonical");
   const archived = state.styleSamples.filter((sample) => sample.status === "archived");
+  const canonicalKnowledge = state.knowledgeItems.filter((item) => item.status === "canonical");
+  const inactiveKnowledge = state.knowledgeItems.filter((item) => item.status !== "canonical");
   const drawer = element("aside", { className: "version-drawer style-drawer" }, [
     element("div", { className: "drawer-heading" }, [
       element("div", {}, [
-        element("span", { className: "eyebrow", text: "STYLE MEMORY" }),
-        element("h2", { text: "固定风格样本" }),
+        element("span", { className: "eyebrow", text: "KNOWLEDGE & STYLE" }),
+        element("h2", { text: "项目知识与风格" }),
       ]),
       button("×", "icon-button", toggleStyles, { title: "关闭" }),
     ]),
     element("p", {
       className: "style-help",
-      text: "选中正文后点击“固定风格”。启用样本会进入 L4 Context，并在每次发送前预览；归档内容不会被重新召回。",
+      text: "canonical 事实与约束进入 L3 Context；归档或拒绝内容永不召回。never_send 只允许发给本地模型。",
     }),
-    element("h3", { text: `启用 · ${active.length}` }),
+    knowledgeForm(),
+    element("h3", { text: `有效事实 / 约束 · ${canonicalKnowledge.length}` }),
   ]);
+  if (!canonicalKnowledge.length) {
+    drawer.append(element("p", { className: "drawer-empty", text: "尚无有效事实或约束。" }));
+  }
+  for (const item of canonicalKnowledge) drawer.append(knowledgeItemCard(item));
+  if (inactiveKnowledge.length) {
+    drawer.append(element("h3", { text: `非 canonical · ${inactiveKnowledge.length}` }));
+    for (const item of inactiveKnowledge) drawer.append(knowledgeItemCard(item));
+  }
+  drawer.append(element("h3", { text: `启用风格 · ${active.length}` }));
   if (!active.length) {
     drawer.append(element("p", { className: "drawer-empty", text: "尚无启用样本。请先在正文中选择一段文字。" }));
   }
@@ -1426,6 +1442,110 @@ function styleDrawer() {
     for (const sample of archived) drawer.append(styleSampleCard(sample));
   }
   return drawer;
+}
+
+function knowledgeForm() {
+  const kind = element("select", { name: "kind", attrs: { "aria-label": "知识类型" } }, [
+    element("option", { value: "fact", text: "事实" }),
+    element("option", { value: "constraint", text: "约束" }),
+  ]);
+  const severity = element("select", { name: "severity", disabled: true, attrs: { "aria-label": "约束强度" } }, [
+    element("option", { value: "hard", text: "硬约束" }),
+    element("option", { value: "soft", text: "软约束" }),
+  ]);
+  kind.addEventListener("change", () => { severity.disabled = kind.value !== "constraint"; });
+  const sensitivity = element("select", { name: "sensitivity", attrs: { "aria-label": "发送策略" } }, [
+    element("option", { value: "local_sensitive", text: "可在确认后发送" }),
+    element("option", { value: "never_send", text: "仅本地模型" }),
+    element("option", { value: "local", text: "本地内容" }),
+    element("option", { value: "public", text: "公开内容" }),
+  ]);
+  const content = element("textarea", {
+    name: "content",
+    placeholder: "写入不可违背的事实，或 AI 必须遵守的约束",
+    attrs: { required: "", rows: "3", maxlength: "65536" },
+  });
+  const form = element("form", { className: "knowledge-form" }, [
+    element("div", { className: "knowledge-form-grid" }, [kind, severity, sensitivity]),
+    labeledInput("标题", "title", "例如：主角视觉 / 禁止剧透", true),
+    element("label", { className: "field" }, [element("span", { text: "内容" }), content]),
+    element("button", { className: "primary-button", text: "添加为 canonical", type: "submit" }),
+  ]);
+  form.addEventListener("submit", createKnowledgeItem);
+  return form;
+}
+
+function knowledgeItemCard(item) {
+  const inactive = item.status !== "canonical";
+  const kindLabel = item.kind === "fact"
+    ? "事实"
+    : (item.severity === "hard" ? "硬约束" : "软约束");
+  const actions = inactive
+    ? [button("恢复 canonical", "small-button", () => updateKnowledgeItemStatus(item, "canonical"))]
+    : [
+        button("归档", "small-button", () => updateKnowledgeItemStatus(item, "archived")),
+        button("拒绝", "small-button", () => updateKnowledgeItemStatus(item, "rejected")),
+      ];
+  return element("article", { className: `style-card knowledge-card${inactive ? " archived" : ""}` }, [
+    element("div", { className: "style-card-heading" }, [
+      element("strong", { text: item.title }),
+      element("span", {
+        className: `policy-pill${item.sensitivity === "never_send" ? " local-only" : ""}`,
+        text: `${kindLabel} · ${item.sensitivity === "never_send" ? "仅本地" : item.status}`,
+      }),
+    ]),
+    element("p", { text: item.content }),
+    element("div", { className: "style-card-footer" }, [
+      element("code", { text: `r${item.revision} · ${item.authority} · ${item.contentHash.slice(0, 15)}…` }),
+      element("div", { className: "knowledge-actions" }, actions),
+    ]),
+  ]);
+}
+
+async function createKnowledgeItem(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const kind = formValue(form, "kind");
+  const input = {
+    schemaVersion: 1,
+    kind,
+    title: formValue(form, "title"),
+    content: formValue(form, "content"),
+    sensitivity: formValue(form, "sensitivity"),
+    severity: kind === "constraint" ? formValue(form, "severity") : null,
+  };
+  setFormBusy(form, true);
+  try {
+    const created = await invokeHost("create_knowledge_item", {
+      input,
+    });
+    state.knowledgeItems = [created, ...state.knowledgeItems];
+    setNotice("success", "项目知识已设为 canonical；下次 AI 操作会在发送前列出它。" );
+    renderWorkspace();
+  } catch (error) {
+    setNotice("error", normalizeHostError(error).message);
+    setFormBusy(form, false);
+  }
+}
+
+async function updateKnowledgeItemStatus(item, status) {
+  try {
+    const updated = await invokeHost("set_knowledge_item_status", {
+      input: {
+        schemaVersion: 1,
+        id: item.id,
+        expectedRevision: item.revision,
+        status,
+      },
+    });
+    state.knowledgeItems = state.knowledgeItems.map((candidate) => candidate.id === updated.id ? updated : candidate);
+    setNotice("success", status === "canonical" ? "知识已恢复为 canonical。" : `知识已${status === "archived" ? "归档" : "拒绝"}，不会再进入上下文。`);
+    renderWorkspace();
+  } catch (error) {
+    setNotice("error", normalizeHostError(error).message);
+    state.knowledgeItems = await invokeHost("list_knowledge_items").catch(() => state.knowledgeItems);
+    renderWorkspace();
+  }
 }
 
 function styleSampleCard(sample) {
@@ -1799,6 +1919,7 @@ async function closeProject() {
     state.providersOpen = false;
     state.stylesOpen = false;
     state.styleSamples = [];
+    state.knowledgeItems = [];
     state.archivedDocuments = [];
     state.summaryInvalidations = [];
     clearTimeout(state.summaryRefreshTimer);

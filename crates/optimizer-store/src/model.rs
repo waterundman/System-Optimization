@@ -177,6 +177,46 @@ pub struct SetStyleSampleStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeItemRecord {
+    pub id: String,
+    pub project_id: String,
+    pub kind: String,
+    pub title: String,
+    pub content: String,
+    pub content_hash: String,
+    pub status: String,
+    pub authority: String,
+    pub sensitivity: String,
+    pub severity: Option<String>,
+    pub revision: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateKnowledgeItem {
+    pub id: String,
+    pub project_id: String,
+    pub kind: String,
+    pub title: String,
+    pub content: String,
+    pub content_hash: String,
+    pub authority: String,
+    pub sensitivity: String,
+    pub severity: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetKnowledgeItemStatus {
+    pub project_id: String,
+    pub id: String,
+    pub expected_revision: i64,
+    pub status: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateDocumentWithBlock {
     pub document_id: String,
     pub document_parent_id: Option<String>,

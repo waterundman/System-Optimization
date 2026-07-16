@@ -36,11 +36,12 @@ pub use summary_worker::{
 pub use workspace_commands::{
     ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, ArchivedDocument,
     ChangeDocumentDepthSpec, CheckpointSummary, CreateDocumentResponse, CreateDocumentSpec,
-    CreateStyleSampleSpec, DocumentDepthDirection, DocumentMoveDirection, DocumentMutationResponse,
+    CreateKnowledgeItemSpec, CreateStyleSampleSpec, DocumentDepthDirection, DocumentMoveDirection,
+    DocumentMutationResponse, KnowledgeContextCandidate, KnowledgeContextSpec, KnowledgeItem,
     ProjectWorkspace, RenameDocumentSpec, ReorderDocumentSpec, RestoreCheckpointResponse,
     RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec, SetDocumentArchivedSpec,
-    SetStyleSampleStatusSpec, StyleSample, SummaryInvalidation, VersionCommit, VersionHistory,
-    WorkspaceBlock, WorkspaceCommandError, WorkspaceDocument,
+    SetKnowledgeItemStatusSpec, SetStyleSampleStatusSpec, StyleSample, SummaryInvalidation,
+    VersionCommit, VersionHistory, WorkspaceBlock, WorkspaceCommandError, WorkspaceDocument,
 };
 
 #[derive(Debug)]

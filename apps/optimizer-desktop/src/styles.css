@@ -290,6 +290,13 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .style-card-footer code { min-width: 0; overflow: hidden; color: #978f82; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .policy-pill { padding: 3px 6px; flex: 0 0 auto; color: #315f49; border-radius: 999px; background: var(--accent-soft); font-size: 9px; font-weight: 750; }
 .policy-pill.local-only { color: #7b5225; background: #f7e8ce; }
+.knowledge-form { margin-bottom: 18px; padding: 12px; border: 1px solid #d8d1c5; border-radius: 10px; background: #fffdf8; }
+.knowledge-form-grid { display: grid; grid-template-columns: 0.75fr 0.9fr 1.35fr; gap: 6px; margin-bottom: 10px; }
+.knowledge-form select { min-width: 0; padding: 8px 7px; border: 1px solid #d5cfc4; border-radius: 7px; color: #514b42; background: white; font-size: 10px; }
+.knowledge-form textarea { min-height: 72px; resize: vertical; }
+.knowledge-form .primary-button { width: 100%; }
+.knowledge-card .policy-pill { max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.knowledge-actions { display: flex; flex: 0 0 auto; gap: 5px; }
 
 .ai-review-card { margin: -20px 0 34px; padding: 20px; border: 1px solid #b9cdbf; border-radius: 14px; background: #f2f7f2; box-shadow: 0 10px 30px rgb(52 85 65 / 8%); }
 .review-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }

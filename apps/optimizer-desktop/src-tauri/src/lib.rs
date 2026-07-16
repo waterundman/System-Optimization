@@ -4,17 +4,19 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use optimizer_host::{
     ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, ArchivedDocument,
     CancelModelRequestResponse, ChangeDocumentDepthSpec, CheckpointSummary, CreateDocumentResponse,
-    CreateDocumentSpec, CreateStyleSampleSpec, DocumentDepthDirection, DocumentMoveDirection,
-    DocumentMutationResponse, ExportMarkdownResponse, ModelAuthorizationScope, ModelExecutionHost,
-    ModelExecutionRequest, ModelExecutionSummary, ModelGatewayError, ModelProviderId,
-    ModelRequestAuthorization, ModelStreamEvent, NewProjectSpec, OllamaModelList, OpenedProject,
-    OperationAuditResponse, OperationCommandError, PersistOperationResponse, PersistReviewResponse,
-    ProjectInfo, ProjectPackageError, ProjectWorkspace, RecentProject, RecentProjectError,
-    RecentProjectRegistry, RefreshSummariesSpec, RenameDocumentSpec, ReorderDocumentSpec,
-    RestoreCheckpointResponse, RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec,
-    SecretReference, SecretStore, SecretStoreError, SecretValue, SetDocumentArchivedSpec,
-    SetStyleSampleStatusSpec, StyleSample, SummaryContextCandidate, SummaryContextSpec,
-    SummaryInvalidation, SummaryRefreshReport, VersionHistory, WorkspaceCommandError,
+    CreateDocumentSpec, CreateKnowledgeItemSpec, CreateStyleSampleSpec, DocumentDepthDirection,
+    DocumentMoveDirection, DocumentMutationResponse, ExportMarkdownResponse,
+    KnowledgeContextCandidate, KnowledgeContextSpec, KnowledgeItem, ModelAuthorizationScope,
+    ModelExecutionHost, ModelExecutionRequest, ModelExecutionSummary, ModelGatewayError,
+    ModelProviderId, ModelRequestAuthorization, ModelStreamEvent, NewProjectSpec, OllamaModelList,
+    OpenedProject, OperationAuditResponse, OperationCommandError, PersistOperationResponse,
+    PersistReviewResponse, ProjectInfo, ProjectPackageError, ProjectWorkspace, RecentProject,
+    RecentProjectError, RecentProjectRegistry, RefreshSummariesSpec, RenameDocumentSpec,
+    ReorderDocumentSpec, RestoreCheckpointResponse, RestoreCheckpointSpec, SaveBlockResponse,
+    SaveBlockSpec, SecretReference, SecretStore, SecretStoreError, SecretValue,
+    SetDocumentArchivedSpec, SetKnowledgeItemStatusSpec, SetStyleSampleStatusSpec, StyleSample,
+    SummaryContextCandidate, SummaryContextSpec, SummaryInvalidation, SummaryRefreshReport,
+    VersionHistory, WorkspaceCommandError,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Runtime, State, ipc::Channel};
@@ -319,6 +321,59 @@ impl DesktopState {
                 id: input.id,
                 expected_revision: input.expected_revision,
                 status: input.status,
+            })
+            .map_err(CommandError::from)
+    }
+
+    pub fn list_knowledge_items(&self) -> CommandResult<Vec<KnowledgeItem>> {
+        self.current_project()?
+            .knowledge_items()
+            .map_err(CommandError::from)
+    }
+
+    pub fn create_knowledge_item(
+        &self,
+        input: CreateKnowledgeItemRequest,
+    ) -> CommandResult<KnowledgeItem> {
+        input.validate()?;
+        let mut project = self.current_project()?;
+        project
+            .create_knowledge_item(&CreateKnowledgeItemSpec {
+                kind: input.kind.as_str().into(),
+                title: input.title,
+                content: input.content,
+                sensitivity: input.sensitivity.as_str().into(),
+                severity: input.severity.map(|value| value.as_str().into()),
+            })
+            .map_err(CommandError::from)
+    }
+
+    pub fn set_knowledge_item_status(
+        &self,
+        input: SetKnowledgeItemStatusRequest,
+    ) -> CommandResult<KnowledgeItem> {
+        input.validate()?;
+        let mut project = self.current_project()?;
+        project
+            .set_knowledge_item_status(&SetKnowledgeItemStatusSpec {
+                id: input.id,
+                expected_revision: input.expected_revision,
+                status: input.status.as_str().into(),
+            })
+            .map_err(CommandError::from)
+    }
+
+    pub fn get_knowledge_context(
+        &self,
+        input: GetKnowledgeContextRequest,
+    ) -> CommandResult<Vec<KnowledgeContextCandidate>> {
+        input.validate()?;
+        self.current_project()?
+            .knowledge_context(&KnowledgeContextSpec {
+                base_commit_id: input.base_commit_id,
+                target_block_id: input.target_block_id,
+                target_block_revision: input.target_block_revision,
+                target_block_hash: input.target_block_hash,
             })
             .map_err(CommandError::from)
     }
@@ -924,6 +979,153 @@ impl SetStyleSampleStatusRequest {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KnowledgeKindRequest {
+    Fact,
+    Constraint,
+}
+
+impl KnowledgeKindRequest {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Fact => "fact",
+            Self::Constraint => "constraint",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KnowledgeSeverityRequest {
+    Hard,
+    Soft,
+}
+
+impl KnowledgeSeverityRequest {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Hard => "hard",
+            Self::Soft => "soft",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeSensitivityRequest {
+    Public,
+    Local,
+    LocalSensitive,
+    NeverSend,
+}
+
+impl KnowledgeSensitivityRequest {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Local => "local",
+            Self::LocalSensitive => "local_sensitive",
+            Self::NeverSend => "never_send",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KnowledgeStatusRequest {
+    Canonical,
+    Archived,
+    Rejected,
+}
+
+impl KnowledgeStatusRequest {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Canonical => "canonical",
+            Self::Archived => "archived",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateKnowledgeItemRequest {
+    pub schema_version: u32,
+    pub kind: KnowledgeKindRequest,
+    pub title: String,
+    pub content: String,
+    pub sensitivity: KnowledgeSensitivityRequest,
+    pub severity: Option<KnowledgeSeverityRequest>,
+}
+
+impl CreateKnowledgeItemRequest {
+    fn validate(&self) -> CommandResult<()> {
+        validate_request_schema(self.schema_version)?;
+        let severity_valid = match self.kind {
+            KnowledgeKindRequest::Fact => self.severity.is_none(),
+            KnowledgeKindRequest::Constraint => self.severity.is_some(),
+        };
+        if !severity_valid {
+            return Err(CommandError::basic(
+                "KNOWLEDGE_SEVERITY_INVALID",
+                "Facts have no severity; constraints require hard or soft severity",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetKnowledgeItemStatusRequest {
+    pub schema_version: u32,
+    pub id: String,
+    pub expected_revision: i64,
+    pub status: KnowledgeStatusRequest,
+}
+
+impl SetKnowledgeItemStatusRequest {
+    fn validate(&self) -> CommandResult<()> {
+        validate_request_schema(self.schema_version)?;
+        if !is_safe_binding_id(&self.id) || self.expected_revision < 0 {
+            return Err(CommandError::basic(
+                "KNOWLEDGE_STATUS_INVALID",
+                "Knowledge item id and revision are invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GetKnowledgeContextRequest {
+    pub schema_version: u32,
+    pub base_commit_id: String,
+    pub target_block_id: String,
+    pub target_block_revision: i64,
+    pub target_block_hash: String,
+}
+
+impl GetKnowledgeContextRequest {
+    fn validate(&self) -> CommandResult<()> {
+        validate_request_schema(self.schema_version)?;
+        if !is_safe_binding_id(&self.base_commit_id)
+            || !is_safe_binding_id(&self.target_block_id)
+            || self.target_block_revision < 0
+            || !is_sha256(&self.target_block_hash)
+        {
+            return Err(CommandError::basic(
+                "KNOWLEDGE_CONTEXT_BINDING_INVALID",
+                "Knowledge context binding is invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl SaveBlockRequest {
     fn validate(&self) -> CommandResult<()> {
         if self.schema_version != 1 {
@@ -1195,6 +1397,10 @@ pub fn attach<R: Runtime>(builder: tauri::Builder<R>, state: DesktopState) -> ta
             list_style_samples,
             create_style_sample,
             set_style_sample_status,
+            list_knowledge_items,
+            create_knowledge_item,
+            set_knowledge_item_status,
+            get_knowledge_context,
             save_block,
             apply_reviewed_proposal,
             get_version_history,
@@ -1361,6 +1567,35 @@ async fn set_style_sample_status(
     state: State<'_, DesktopState>,
 ) -> CommandResult<StyleSample> {
     spawn_host_task(state, move |state| state.set_style_sample_status(input)).await
+}
+
+#[tauri::command]
+async fn list_knowledge_items(state: State<'_, DesktopState>) -> CommandResult<Vec<KnowledgeItem>> {
+    spawn_host_task(state, DesktopState::list_knowledge_items).await
+}
+
+#[tauri::command]
+async fn create_knowledge_item(
+    input: CreateKnowledgeItemRequest,
+    state: State<'_, DesktopState>,
+) -> CommandResult<KnowledgeItem> {
+    spawn_host_task(state, move |state| state.create_knowledge_item(input)).await
+}
+
+#[tauri::command]
+async fn set_knowledge_item_status(
+    input: SetKnowledgeItemStatusRequest,
+    state: State<'_, DesktopState>,
+) -> CommandResult<KnowledgeItem> {
+    spawn_host_task(state, move |state| state.set_knowledge_item_status(input)).await
+}
+
+#[tauri::command]
+async fn get_knowledge_context(
+    input: GetKnowledgeContextRequest,
+    state: State<'_, DesktopState>,
+) -> CommandResult<Vec<KnowledgeContextCandidate>> {
+    spawn_host_task(state, move |state| state.get_knowledge_context(input)).await
 }
 
 #[tauri::command]
@@ -1812,6 +2047,77 @@ mod tests {
     }
 
     #[test]
+    fn knowledge_library_is_strict_target_bound_and_excludes_inactive_items() {
+        let (state, _, parent) = state();
+        assert_eq!(
+            state.list_knowledge_items().unwrap_err().code,
+            "NO_PROJECT_OPEN"
+        );
+        open_test_project(&state, &parent);
+        assert_eq!(
+            state
+                .create_knowledge_item(CreateKnowledgeItemRequest {
+                    schema_version: 1,
+                    kind: KnowledgeKindRequest::Fact,
+                    title: "无效事实".into(),
+                    content: "事实不允许约束强度".into(),
+                    sensitivity: KnowledgeSensitivityRequest::LocalSensitive,
+                    severity: Some(KnowledgeSeverityRequest::Hard),
+                })
+                .unwrap_err()
+                .code,
+            "KNOWLEDGE_SEVERITY_INVALID"
+        );
+        let created = state
+            .create_knowledge_item(CreateKnowledgeItemRequest {
+                schema_version: 1,
+                kind: KnowledgeKindRequest::Constraint,
+                title: "禁止剧透".into(),
+                content: "本章不得揭示凶手身份".into(),
+                sensitivity: KnowledgeSensitivityRequest::NeverSend,
+                severity: Some(KnowledgeSeverityRequest::Hard),
+            })
+            .unwrap();
+        assert_eq!(created.authority, "user_confirmed");
+        let workspace = state.get_project_workspace().unwrap();
+        let block = &workspace.blocks[0];
+        let binding = GetKnowledgeContextRequest {
+            schema_version: 1,
+            base_commit_id: workspace.head_commit_id.clone(),
+            target_block_id: block.id.clone(),
+            target_block_revision: block.revision,
+            target_block_hash: block.content_hash.clone(),
+        };
+        let context = state.get_knowledge_context(binding.clone()).unwrap();
+        assert_eq!(context.len(), 1);
+        assert_eq!(context[0].sensitivity, "never_send");
+        assert_eq!(context[0].render_mode, "constraint");
+
+        let archived = state
+            .set_knowledge_item_status(SetKnowledgeItemStatusRequest {
+                schema_version: 1,
+                id: created.id,
+                expected_revision: created.revision,
+                status: KnowledgeStatusRequest::Archived,
+            })
+            .unwrap();
+        assert_eq!(archived.status, "archived");
+        assert!(state.get_knowledge_context(binding).unwrap().is_empty());
+
+        let stale = GetKnowledgeContextRequest {
+            schema_version: 1,
+            base_commit_id: "commit-stale".into(),
+            target_block_id: block.id.clone(),
+            target_block_revision: block.revision,
+            target_block_hash: block.content_hash.clone(),
+        };
+        assert_eq!(
+            state.get_knowledge_context(stale).unwrap_err().code,
+            "INVALID_KNOWLEDGE_ITEM"
+        );
+    }
+
+    #[test]
     fn creates_a_versioned_chapter_through_the_current_session() {
         let (state, _, parent) = state();
         let info = open_test_project(&state, &parent);
@@ -2234,6 +2540,7 @@ mod tests {
                 "allow-recent-projects",
                 "allow-workspace-read",
                 "allow-style-library",
+                "allow-knowledge-library",
                 "allow-workspace-write",
                 "allow-document-lifecycle",
                 "allow-summary-status-read",

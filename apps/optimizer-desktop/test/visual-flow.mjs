@@ -49,11 +49,20 @@ await page.screenshot({ path: resolve(screenshotDirectory, "ollama-settings.png"
 await page.getByRole("button", { name: "DeepSeek" }).click();
 await page.getByRole("button", { name: "收起模型" }).click();
 
-await page.getByRole("button", { name: "风格样本" }).click();
-await page.getByRole("heading", { name: "固定风格样本" }).waitFor();
+await page.getByRole("button", { name: "知识 / 风格" }).click();
+await page.getByRole("heading", { name: "项目知识与风格" }).waitFor();
+await page.getByText("主角视觉").waitFor();
 await page.getByText("克制的短句").waitFor();
+await page.getByLabel("知识类型").selectOption("constraint");
+await page.getByLabel("约束强度").selectOption("hard");
+await page.getByLabel("发送策略").selectOption("never_send");
+await page.getByLabel("标题").fill("禁止剧透");
+await page.getByLabel("内容").fill("本章不得揭示凶手身份");
+await page.getByRole("button", { name: "添加为 canonical" }).click();
+await page.getByText(/项目知识已设为 canonical/).waitFor();
+await page.getByText("禁止剧透").waitFor();
 await page.screenshot({ path: resolve(screenshotDirectory, "style-library.png"), fullPage: true });
-await page.getByRole("button", { name: "收起风格" }).click();
+await page.getByRole("button", { name: "收起知识" }).click();
 
 page.once("dialog", (dialog) => dialog.accept("第二章"));
 await page.getByRole("button", { name: "新建顶层章节" }).click();
@@ -108,8 +117,13 @@ await page.getByRole("heading", { name: "确认即将发送的上下文" }).wait
 assert.ok(await page.locator(".context-item").count() >= 1);
 assert.equal(await page.getByText("L4_STYLE_GLOBAL", { exact: true }).count(), 1);
 assert.ok(await page.getByText("L2_STRUCTURAL", { exact: true }).count() >= 1);
-assert.equal(await page.getByText("L3_KNOWLEDGE", { exact: true }).count(), 1);
+assert.ok(await page.getByText("L3_KNOWLEDGE", { exact: true }).count() >= 2);
 await page.getByText(/summary:project:project-visual-1@/).waitFor();
+await page.getByText(/knowledge:fact:knowledge-visual-1@r0/).waitFor();
+assert.equal(
+  await page.locator(".context-exclusions code", { hasText: "knowledge:constraint:knowledge-visual-2@r0" }).count(),
+  1,
+);
 await page.screenshot({ path: resolve(screenshotDirectory, "context-preview.png"), fullPage: true });
 await page.getByRole("button", { name: "确认并发送" }).click();
 await page.getByRole("heading", { name: "逐项审查 AI 修改" }).waitFor();

@@ -43,6 +43,21 @@
     createdAt: "2026-07-15T00:00:00Z",
     updatedAt: "2026-07-15T00:00:00Z",
   }];
+  const knowledgeItems = [{
+    schemaVersion: 1,
+    id: "knowledge-visual-1",
+    kind: "fact",
+    title: "主角视觉",
+    content: "主角左眼失明",
+    contentHash: `sha256:${"5".repeat(64)}`,
+    status: "canonical",
+    authority: "user_confirmed",
+    sensitivity: "local_sensitive",
+    severity: null,
+    revision: 0,
+    createdAt: "2026-07-16T00:00:00Z",
+    updatedAt: "2026-07-16T00:00:00Z",
+  }];
   const archivedDocuments = [];
   const archivedBlocks = new Map();
   const session = {
@@ -55,7 +70,7 @@
       title: "雾港来信",
       language: "zh-CN",
       directory: "W:\\写作\\雾港来信.optimizer",
-      databaseSchemaVersion: 5,
+      databaseSchemaVersion: 6,
       headCommitId: workspace.headCommitId,
       revision: 0,
       createdAt: "2026-07-15T00:00:00Z",
@@ -176,6 +191,34 @@
         renderMode: "summary",
         generatedAt: "2026-07-16T00:00:00Z",
       })));
+    }
+    if (command === "get_knowledge_context") {
+      if (args.input.baseCommitId !== workspace.headCommitId) return [];
+      const target = workspace.blocks.find((item) => item.id === args.input.targetBlockId);
+      if (!target || target.revision !== args.input.targetBlockRevision || target.contentHash !== args.input.targetBlockHash) {
+        throw { code: "KNOWLEDGE_CONTEXT_BINDING_INVALID", message: "Target changed" };
+      }
+      return Promise.all(knowledgeItems
+        .filter((item) => item.status === "canonical")
+        .map(async (item) => {
+          const label = item.kind === "fact" ? "事实" : (item.severity === "hard" ? "硬约束" : "软约束");
+          const content = `${label}【${item.title}】：${item.content}`;
+          return {
+            id: `knowledge-${item.id}-r${item.revision}`,
+            sourceRef: `knowledge:${item.kind}:${item.id}@r${item.revision}`,
+            sourceHash: await contentHash(content),
+            sourceCommitId: workspace.headCommitId,
+            tier: "L3_KNOWLEDGE",
+            status: "canonical",
+            authority: item.authority,
+            sensitivity: item.sensitivity,
+            renderMode: "constraint",
+            reasonCodes: [item.kind === "fact" ? "CANONICAL_FACT" : `PROJECT_${item.severity.toUpperCase()}_CONSTRAINT`],
+            content,
+            revision: item.revision,
+            generatedAt: item.updatedAt,
+          };
+        }));
     }
     if (command === "create_document") {
       const index = workspace.documents.length + 1;
@@ -312,6 +355,36 @@
       const sample = styleSamples.find((item) => item.id === args.input.id);
       Object.assign(sample, { status: args.input.status, revision: sample.revision + 1 });
       return structuredClone(sample);
+    }
+    if (command === "list_knowledge_items") return structuredClone(knowledgeItems);
+    if (command === "create_knowledge_item") {
+      const created = {
+        schemaVersion: 1,
+        id: `knowledge-visual-${knowledgeItems.length + 1}`,
+        kind: args.input.kind,
+        title: args.input.title,
+        content: args.input.content,
+        contentHash: await contentHash(args.input.content),
+        status: "canonical",
+        authority: "user_confirmed",
+        sensitivity: args.input.sensitivity,
+        severity: args.input.severity,
+        revision: 0,
+        createdAt: "2026-07-16T00:01:00Z",
+        updatedAt: "2026-07-16T00:01:00Z",
+      };
+      knowledgeItems.unshift(created);
+      return structuredClone(created);
+    }
+    if (command === "set_knowledge_item_status") {
+      const item = knowledgeItems.find((candidate) => candidate.id === args.input.id);
+      if (!item || item.revision !== args.input.expectedRevision) throw { code: "CONFLICT", message: "Knowledge changed" };
+      Object.assign(item, {
+        status: args.input.status,
+        revision: item.revision + 1,
+        updatedAt: "2026-07-16T00:02:00Z",
+      });
+      return structuredClone(item);
     }
     if (command === "has_provider_secret") {
       return { schemaVersion: 1, reference: args.reference, exists: true };

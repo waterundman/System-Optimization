@@ -13,20 +13,22 @@ use uuid::Uuid;
 use crate::summary_worker::{refresh_summaries, summary_context};
 use crate::workspace_commands::{
     apply_reviewed_proposal, block_content_hash, change_document_depth, create_checkpoint,
-    create_document, create_style_sample, list_archived_documents, list_style_samples,
-    list_summary_invalidations, load_project_workspace, load_version_history, project_root_hash,
-    rename_document, reorder_document, restore_checkpoint, save_block, set_document_archived,
-    set_style_sample_status,
+    create_document, create_knowledge_item, create_style_sample, knowledge_context,
+    list_archived_documents, list_knowledge_items, list_style_samples, list_summary_invalidations,
+    load_project_workspace, load_version_history, project_root_hash, rename_document,
+    reorder_document, restore_checkpoint, save_block, set_document_archived,
+    set_knowledge_item_status, set_style_sample_status,
 };
 use crate::{
     ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, ArchivedDocument,
     ChangeDocumentDepthSpec, CheckpointSummary, CreateDocumentResponse, CreateDocumentSpec,
-    CreateStyleSampleSpec, DocumentMutationResponse, HostError, OperationCommandHost, ProjectRoot,
-    ProjectWorkspace, RefreshSummariesSpec, RenameDocumentSpec, ReorderDocumentSpec,
+    CreateKnowledgeItemSpec, CreateStyleSampleSpec, DocumentMutationResponse, HostError,
+    KnowledgeContextCandidate, KnowledgeContextSpec, KnowledgeItem, OperationCommandHost,
+    ProjectRoot, ProjectWorkspace, RefreshSummariesSpec, RenameDocumentSpec, ReorderDocumentSpec,
     RestoreCheckpointResponse, RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec,
-    SetDocumentArchivedSpec, SetStyleSampleStatusSpec, StyleSample, SummaryContextCandidate,
-    SummaryContextSpec, SummaryInvalidation, SummaryRefreshReport, VersionHistory,
-    WorkspaceCommandError,
+    SetDocumentArchivedSpec, SetKnowledgeItemStatusSpec, SetStyleSampleStatusSpec, StyleSample,
+    SummaryContextCandidate, SummaryContextSpec, SummaryInvalidation, SummaryRefreshReport,
+    VersionHistory, WorkspaceCommandError,
 };
 
 const PACKAGE_SCHEMA_VERSION: u32 = 1;
@@ -379,6 +381,31 @@ impl OpenedProject {
         spec: &SetStyleSampleStatusSpec,
     ) -> Result<StyleSample, WorkspaceCommandError> {
         set_style_sample_status(self.operations.store_mut(), &self.project_id, spec)
+    }
+
+    pub fn knowledge_items(&self) -> Result<Vec<KnowledgeItem>, WorkspaceCommandError> {
+        list_knowledge_items(self.operations.store(), &self.project_id)
+    }
+
+    pub fn create_knowledge_item(
+        &mut self,
+        spec: &CreateKnowledgeItemSpec,
+    ) -> Result<KnowledgeItem, WorkspaceCommandError> {
+        create_knowledge_item(self.operations.store_mut(), &self.project_id, spec)
+    }
+
+    pub fn set_knowledge_item_status(
+        &mut self,
+        spec: &SetKnowledgeItemStatusSpec,
+    ) -> Result<KnowledgeItem, WorkspaceCommandError> {
+        set_knowledge_item_status(self.operations.store_mut(), &self.project_id, spec)
+    }
+
+    pub fn knowledge_context(
+        &self,
+        spec: &KnowledgeContextSpec,
+    ) -> Result<Vec<KnowledgeContextCandidate>, WorkspaceCommandError> {
+        knowledge_context(self.operations.store(), &self.project_id, spec)
     }
 
     pub fn save_block(
@@ -916,6 +943,92 @@ mod tests {
                 .iter()
                 .all(|item| item.content.contains("更新后的正文"))
         );
+    }
+
+    #[test]
+    fn maintains_canonical_knowledge_and_serves_only_current_target_bound_context() {
+        let parent = TempParent::new();
+        let mut project = OpenedProject::create(&parent.0, &spec()).unwrap();
+        let workspace = project.workspace().unwrap();
+        let target = &workspace.blocks[0];
+        let fact = project
+            .create_knowledge_item(&CreateKnowledgeItemSpec {
+                kind: "fact".into(),
+                title: "主角视觉".into(),
+                content: "主角左眼失明".into(),
+                sensitivity: "local_sensitive".into(),
+                severity: None,
+            })
+            .unwrap();
+        let constraint = project
+            .create_knowledge_item(&CreateKnowledgeItemSpec {
+                kind: "constraint".into(),
+                title: "禁止剧透".into(),
+                content: "本章不得揭示凶手身份".into(),
+                sensitivity: "never_send".into(),
+                severity: Some("hard".into()),
+            })
+            .unwrap();
+        assert_eq!(project.knowledge_items().unwrap().len(), 2);
+
+        let context = project
+            .knowledge_context(&KnowledgeContextSpec {
+                base_commit_id: workspace.head_commit_id.clone(),
+                target_block_id: target.id.clone(),
+                target_block_revision: target.revision,
+                target_block_hash: target.content_hash.clone(),
+            })
+            .unwrap();
+        assert_eq!(context.len(), 2);
+        assert!(context.iter().all(|item| item.tier == "L3_KNOWLEDGE"));
+        assert!(context.iter().all(|item| item.render_mode == "constraint"));
+        assert!(
+            context
+                .iter()
+                .all(|item| item.authority == "user_confirmed")
+        );
+        assert!(context.iter().any(|item| {
+            item.reason_codes == ["CANONICAL_FACT"]
+                && item.content == "事实【主角视觉】：主角左眼失明"
+        }));
+        assert!(context.iter().any(|item| {
+            item.reason_codes == ["PROJECT_HARD_CONSTRAINT"] && item.sensitivity == "never_send"
+        }));
+
+        project
+            .set_knowledge_item_status(&SetKnowledgeItemStatusSpec {
+                id: fact.id,
+                expected_revision: fact.revision,
+                status: "archived".into(),
+            })
+            .unwrap();
+        project
+            .set_knowledge_item_status(&SetKnowledgeItemStatusSpec {
+                id: constraint.id,
+                expected_revision: constraint.revision,
+                status: "rejected".into(),
+            })
+            .unwrap();
+        assert!(
+            project
+                .knowledge_context(&KnowledgeContextSpec {
+                    base_commit_id: workspace.head_commit_id.clone(),
+                    target_block_id: target.id.clone(),
+                    target_block_revision: target.revision,
+                    target_block_hash: target.content_hash.clone(),
+                })
+                .unwrap()
+                .is_empty()
+        );
+        assert!(matches!(
+            project.knowledge_context(&KnowledgeContextSpec {
+                base_commit_id: "commit-stale".into(),
+                target_block_id: target.id.clone(),
+                target_block_revision: target.revision,
+                target_block_hash: target.content_hash.clone(),
+            }),
+            Err(WorkspaceCommandError::KnowledgeValidation(_))
+        ));
     }
 
     #[test]

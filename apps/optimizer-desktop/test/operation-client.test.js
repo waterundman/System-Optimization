@@ -81,6 +81,7 @@ test("rejects tampered host summary context before authorization", async () => {
         id: "summary-tampered",
         sourceRef: "summary:project:project-tampered@commit-tampered",
         sourceHash: `sha256:${"f".repeat(64)}`,
+        sourceCommitId: "commit-tampered",
         tier: "L3_KNOWLEDGE",
         status: "canonical",
         authority: "source_derived",
@@ -88,6 +89,8 @@ test("rejects tampered host summary context before authorization", async () => {
         renderMode: "summary",
         reasonCodes: ["PROJECT_SUMMARY"],
         content: "已被篡改的摘要",
+        revision: 0,
+        generatedAt: "2026-07-16T00:00:00Z",
       }],
     }),
   );
@@ -239,6 +242,27 @@ test("runs Context Compiler to host stream to persisted patch proposal without p
         generatedAt: "2026-07-15T00:00:00Z",
       }];
     },
+    loadKnowledgeContext: async (binding) => {
+      hostCalls.push("get_knowledge_context");
+      assert.equal(binding.baseCommitId, workspace.headCommitId);
+      assert.equal(binding.targetBlockHash, block.contentHash);
+      return [
+        hostKnowledgeCandidate({
+          id: "fact-1",
+          sourceRef: "knowledge:fact:fact-1@r0",
+          content: "事实【主角视觉】：主角左眼失明",
+          sensitivity: "local_sensitive",
+          reasonCode: "CANONICAL_FACT",
+        }),
+        hostKnowledgeCandidate({
+          id: "constraint-1",
+          sourceRef: "knowledge:constraint:constraint-1@r0",
+          content: "硬约束【禁止剧透】：本章不得揭示凶手身份",
+          sensitivity: "never_send",
+          reasonCode: "PROJECT_HARD_CONSTRAINT",
+        }),
+      ];
+    },
     confirmContext: async (packet) => {
       confirmedContext = packet;
     },
@@ -248,6 +272,11 @@ test("runs Context Compiler to host stream to persisted patch proposal without p
   assert.ok(confirmedContext.items.length >= 1);
   assert.ok(confirmedContext.items.some((item) => item.sourceRef === "style:style-canonical"));
   assert.ok(confirmedContext.items.some((item) => item.sourceRef === "summary:project:project-1@commit-1"));
+  assert.ok(confirmedContext.items.some((item) => item.sourceRef === "knowledge:fact:fact-1@r0"));
+  assert.equal(
+    confirmedContext.exclusions.find((item) => item.sourceRef === "knowledge:constraint:constraint-1@r0")?.reason,
+    "POLICY_DENIED",
+  );
   assert.deepEqual(
     Object.fromEntries(confirmedContext.exclusions
       .filter((item) => item.sourceRef.startsWith("style:"))
@@ -260,8 +289,9 @@ test("runs Context Compiler to host stream to persisted patch proposal without p
   assert.equal(execution.result.kind, "patch_proposal");
   assert.equal(execution.result.proposal.hunks.length, 1);
   assert.equal(execution.result.proposal.hunks[0].replacement, "你好，世界");
-  assert.deepEqual(hostCalls.slice(0, 3), [
+  assert.deepEqual(hostCalls.slice(0, 4), [
     "get_summary_context",
+    "get_knowledge_context",
     "authorize_model_request",
     "execute_authorized_model_stream",
   ]);
@@ -272,3 +302,21 @@ test("runs Context Compiler to host stream to persisted patch proposal without p
   assert.equal(persisted[0].includes("apiKey"), false);
   assert.equal(persisted[0].includes("secret-never"), false);
 });
+
+function hostKnowledgeCandidate({ id, sourceRef, content, sensitivity, reasonCode }) {
+  return {
+    id: `knowledge-${id}-r0`,
+    sourceRef,
+    sourceHash: `sha256:${createHash("sha256").update(content).digest("hex")}`,
+    sourceCommitId: "commit-1",
+    tier: "L3_KNOWLEDGE",
+    status: "canonical",
+    authority: "user_confirmed",
+    sensitivity,
+    renderMode: "constraint",
+    reasonCodes: [reasonCode],
+    content,
+    revision: 0,
+    generatedAt: "2026-07-16T00:00:00Z",
+  };
+}
