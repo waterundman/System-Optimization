@@ -1,15 +1,17 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use optimizer_host::{
-    ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, CancelModelRequestResponse,
-    CheckpointSummary, CreateDocumentResponse, CreateDocumentSpec, CreateStyleSampleSpec,
-    ExportMarkdownResponse, ModelAuthorizationScope, ModelExecutionHost, ModelExecutionRequest,
-    ModelExecutionSummary, ModelGatewayError, ModelProviderId, ModelRequestAuthorization,
-    ModelStreamEvent, NewProjectSpec, OllamaModelList, OpenedProject, OperationAuditResponse,
-    OperationCommandError, PersistOperationResponse, PersistReviewResponse, ProjectInfo,
-    ProjectPackageError, ProjectWorkspace, RestoreCheckpointResponse, RestoreCheckpointSpec,
-    SaveBlockResponse, SaveBlockSpec, SecretReference, SecretStore, SecretStoreError, SecretValue,
-    SetStyleSampleStatusSpec, StyleSample, VersionHistory, WorkspaceCommandError,
+    ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, ArchivedDocument,
+    CancelModelRequestResponse, CheckpointSummary, CreateDocumentResponse, CreateDocumentSpec,
+    CreateStyleSampleSpec, DocumentMoveDirection, DocumentMutationResponse, ExportMarkdownResponse,
+    ModelAuthorizationScope, ModelExecutionHost, ModelExecutionRequest, ModelExecutionSummary,
+    ModelGatewayError, ModelProviderId, ModelRequestAuthorization, ModelStreamEvent,
+    NewProjectSpec, OllamaModelList, OpenedProject, OperationAuditResponse, OperationCommandError,
+    PersistOperationResponse, PersistReviewResponse, ProjectInfo, ProjectPackageError,
+    ProjectWorkspace, RenameDocumentSpec, ReorderDocumentSpec, RestoreCheckpointResponse,
+    RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec, SecretReference, SecretStore,
+    SecretStoreError, SecretValue, SetDocumentArchivedSpec, SetStyleSampleStatusSpec, StyleSample,
+    VersionHistory, WorkspaceCommandError,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Runtime, State, ipc::Channel};
@@ -103,6 +105,60 @@ impl DesktopState {
             .create_document(&CreateDocumentSpec {
                 title: input.title,
                 initial_text: input.initial_text,
+            })
+            .map_err(CommandError::from)
+    }
+
+    pub fn list_archived_documents(&self) -> CommandResult<Vec<ArchivedDocument>> {
+        self.current_project()?
+            .archived_documents()
+            .map_err(CommandError::from)
+    }
+
+    pub fn rename_document(
+        &self,
+        input: RenameDocumentRequest,
+    ) -> CommandResult<DocumentMutationResponse> {
+        input.validate()?;
+        let mut project = self.current_project()?;
+        project
+            .rename_document(&RenameDocumentSpec {
+                document_id: input.document_id,
+                expected_revision: input.expected_revision,
+                title: input.title,
+            })
+            .map_err(CommandError::from)
+    }
+
+    pub fn reorder_document(
+        &self,
+        input: ReorderDocumentRequest,
+    ) -> CommandResult<DocumentMutationResponse> {
+        input.validate()?;
+        let mut project = self.current_project()?;
+        project
+            .reorder_document(&ReorderDocumentSpec {
+                document_id: input.document_id,
+                expected_revision: input.expected_revision,
+                direction: match input.direction {
+                    DocumentMoveDirectionRequest::Up => DocumentMoveDirection::Up,
+                    DocumentMoveDirectionRequest::Down => DocumentMoveDirection::Down,
+                },
+            })
+            .map_err(CommandError::from)
+    }
+
+    pub fn set_document_archived(
+        &self,
+        input: SetDocumentArchivedRequest,
+    ) -> CommandResult<DocumentMutationResponse> {
+        input.validate()?;
+        let mut project = self.current_project()?;
+        project
+            .set_document_archived(&SetDocumentArchivedSpec {
+                document_id: input.document_id,
+                expected_revision: input.expected_revision,
+                archived: input.archived,
             })
             .map_err(CommandError::from)
     }
@@ -483,6 +539,13 @@ impl From<ModelGatewayError> for CommandError {
     }
 }
 
+fn validate_request_schema(schema_version: u32) -> CommandResult<()> {
+    if schema_version != 1 {
+        return Err(CommandError::unsupported_request_schema(schema_version));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateProjectRequest {
@@ -539,6 +602,58 @@ impl CreateDocumentRequest {
             ));
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RenameDocumentRequest {
+    pub schema_version: u32,
+    pub document_id: String,
+    pub expected_revision: i64,
+    pub title: String,
+}
+
+impl RenameDocumentRequest {
+    fn validate(&self) -> CommandResult<()> {
+        validate_request_schema(self.schema_version)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DocumentMoveDirectionRequest {
+    Up,
+    Down,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReorderDocumentRequest {
+    pub schema_version: u32,
+    pub document_id: String,
+    pub expected_revision: i64,
+    pub direction: DocumentMoveDirectionRequest,
+}
+
+impl ReorderDocumentRequest {
+    fn validate(&self) -> CommandResult<()> {
+        validate_request_schema(self.schema_version)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetDocumentArchivedRequest {
+    pub schema_version: u32,
+    pub document_id: String,
+    pub expected_revision: i64,
+    pub archived: bool,
+}
+
+impl SetDocumentArchivedRequest {
+    fn validate(&self) -> CommandResult<()> {
+        validate_request_schema(self.schema_version)
     }
 }
 
@@ -830,6 +945,10 @@ pub fn attach<R: Runtime>(builder: tauri::Builder<R>, state: DesktopState) -> ta
             get_project_session,
             get_project_workspace,
             create_document,
+            list_archived_documents,
+            rename_document,
+            reorder_document,
+            set_document_archived,
             export_markdown,
             list_style_samples,
             create_style_sample,
@@ -891,6 +1010,37 @@ async fn create_document(
     state: State<'_, DesktopState>,
 ) -> CommandResult<CreateDocumentResponse> {
     spawn_host_task(state, move |state| state.create_document(input)).await
+}
+
+#[tauri::command]
+async fn list_archived_documents(
+    state: State<'_, DesktopState>,
+) -> CommandResult<Vec<ArchivedDocument>> {
+    spawn_host_task(state, DesktopState::list_archived_documents).await
+}
+
+#[tauri::command]
+async fn rename_document(
+    input: RenameDocumentRequest,
+    state: State<'_, DesktopState>,
+) -> CommandResult<DocumentMutationResponse> {
+    spawn_host_task(state, move |state| state.rename_document(input)).await
+}
+
+#[tauri::command]
+async fn reorder_document(
+    input: ReorderDocumentRequest,
+    state: State<'_, DesktopState>,
+) -> CommandResult<DocumentMutationResponse> {
+    spawn_host_task(state, move |state| state.reorder_document(input)).await
+}
+
+#[tauri::command]
+async fn set_document_archived(
+    input: SetDocumentArchivedRequest,
+    state: State<'_, DesktopState>,
+) -> CommandResult<DocumentMutationResponse> {
+    spawn_host_task(state, move |state| state.set_document_archived(input)).await
 }
 
 #[tauri::command]
@@ -1326,6 +1476,83 @@ mod tests {
     }
 
     #[test]
+    fn manages_document_lifecycle_through_versioned_desktop_commands() {
+        let (state, _, parent) = state();
+        assert_eq!(
+            state.list_archived_documents().unwrap_err().code,
+            "NO_PROJECT_OPEN"
+        );
+        open_test_project(&state, &parent);
+        let created = state
+            .create_document(CreateDocumentRequest {
+                schema_version: 1,
+                title: "Chapter two".into(),
+                initial_text: "The rain reached the platform.".into(),
+            })
+            .unwrap();
+        let renamed = state
+            .rename_document(RenameDocumentRequest {
+                schema_version: 1,
+                document_id: created.document.id.clone(),
+                expected_revision: created.document.revision,
+                title: "Chapter two: Rain".into(),
+            })
+            .unwrap();
+        let renamed_document = renamed
+            .workspace
+            .documents
+            .iter()
+            .find(|document| document.id == created.document.id)
+            .unwrap();
+        let reordered = state
+            .reorder_document(ReorderDocumentRequest {
+                schema_version: 1,
+                document_id: renamed_document.id.clone(),
+                expected_revision: renamed_document.revision,
+                direction: DocumentMoveDirectionRequest::Up,
+            })
+            .unwrap();
+        assert_eq!(reordered.workspace.documents[0].id, created.document.id);
+        let reordered_document = &reordered.workspace.documents[0];
+        let archived = state
+            .set_document_archived(SetDocumentArchivedRequest {
+                schema_version: 1,
+                document_id: reordered_document.id.clone(),
+                expected_revision: reordered_document.revision,
+                archived: true,
+            })
+            .unwrap();
+        assert_eq!(archived.workspace.documents.len(), 1);
+        assert_eq!(archived.workspace.blocks.len(), 1);
+        let archived_document = state.list_archived_documents().unwrap().remove(0);
+        assert_eq!(archived_document.title, "Chapter two: Rain");
+
+        let restored = state
+            .set_document_archived(SetDocumentArchivedRequest {
+                schema_version: 1,
+                document_id: archived_document.id.clone(),
+                expected_revision: archived_document.revision,
+                archived: false,
+            })
+            .unwrap();
+        assert_eq!(restored.workspace.documents.len(), 2);
+        assert_eq!(restored.workspace.blocks.len(), 2);
+        assert!(state.list_archived_documents().unwrap().is_empty());
+        assert_eq!(
+            state
+                .rename_document(RenameDocumentRequest {
+                    schema_version: 1,
+                    document_id: archived_document.id,
+                    expected_revision: archived_document.revision,
+                    title: "stale".into(),
+                })
+                .unwrap_err()
+                .code,
+            "CONFLICT"
+        );
+    }
+
+    #[test]
     fn command_errors_are_structured_and_do_not_echo_secret_values() {
         let (state, _, parent) = state();
         let info = open_test_project(&state, &parent);
@@ -1591,6 +1818,7 @@ mod tests {
                 "allow-workspace-read",
                 "allow-style-library",
                 "allow-workspace-write",
+                "allow-document-lifecycle",
                 "allow-project-export",
                 "allow-version-read",
                 "allow-version-write",

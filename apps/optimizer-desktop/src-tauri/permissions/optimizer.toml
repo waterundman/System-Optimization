@@ -19,6 +19,11 @@ description = "Allows the bundled editor to create a chapter, save a block throu
 commands.allow = ["create_document", "save_block", "apply_reviewed_proposal"]
 
 [[permission]]
+identifier = "allow-document-lifecycle"
+description = "Allows the bundled editor to list archived chapters and commit chapter rename, reorder, archive and restore mutations."
+commands.allow = ["list_archived_documents", "rename_document", "reorder_document", "set_document_archived"]
+
+[[permission]]
 identifier = "allow-project-export"
 description = "Allows the bundled editor to atomically export the current project as Markdown inside its project package."
 commands.allow = ["export_markdown"]

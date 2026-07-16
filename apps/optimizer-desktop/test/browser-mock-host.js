@@ -1,4 +1,8 @@
 (() => {
+  if (new URLSearchParams(window.location.search).has("autoDialogs")) {
+    window.prompt = (message) => message.includes("新的章节") ? "第二章：雨夜" : "第二章";
+    window.confirm = () => true;
+  }
   const block = {
     id: "block-visual-1",
     documentId: "document-visual-1",
@@ -38,6 +42,8 @@
     createdAt: "2026-07-15T00:00:00Z",
     updatedAt: "2026-07-15T00:00:00Z",
   }];
+  const archivedDocuments = [];
+  const archivedBlocks = new Map();
   const session = {
     schemaVersion: 1,
     isOpen: true,
@@ -59,9 +65,25 @@
     onmessage = null;
   }
   let authorizedModelRequest = null;
+  function documentMutationResponse(reason) {
+    const previousHeadCommitId = workspace.headCommitId;
+    workspace.revision += 1;
+    workspace.headCommitId = `commit-visual-${reason}-${workspace.revision}`;
+    session.project.revision = workspace.revision;
+    session.project.headCommitId = workspace.headCommitId;
+    return {
+      schemaVersion: 1,
+      commitId: workspace.headCommitId,
+      previousHeadCommitId,
+      headCommitId: workspace.headCommitId,
+      projectRevision: workspace.revision,
+      workspace: structuredClone(workspace),
+    };
+  }
   async function invoke(command, args = {}) {
     if (command === "get_project_session") return structuredClone(session);
     if (command === "get_project_workspace") return structuredClone(workspace);
+    if (command === "list_archived_documents") return structuredClone(archivedDocuments);
     if (command === "create_document") {
       const index = workspace.documents.length + 1;
       const document = {
@@ -95,6 +117,50 @@
         document: structuredClone(document),
         block: structuredClone(createdBlock),
       };
+    }
+    if (command === "rename_document") {
+      const document = workspace.documents.find((item) => item.id === args.input.documentId);
+      if (!document || document.revision !== args.input.expectedRevision) throw { code: "CONFLICT", message: "Document changed" };
+      document.title = args.input.title.trim();
+      document.revision += 1;
+      return documentMutationResponse("rename");
+    }
+    if (command === "reorder_document") {
+      workspace.documents.sort((left, right) => left.orderKey.localeCompare(right.orderKey));
+      const index = workspace.documents.findIndex((item) => item.id === args.input.documentId);
+      const target = args.input.direction === "up" ? index - 1 : index + 1;
+      if (index < 0 || target < 0 || target >= workspace.documents.length) throw { code: "NO_CHANGES", message: "No changes" };
+      workspace.documents.splice(target, 0, workspace.documents.splice(index, 1)[0]);
+      workspace.documents.forEach((document, position) => {
+        document.orderKey = `d-${String(position).padStart(8, "0")}-visual`;
+        document.revision += 1;
+      });
+      return documentMutationResponse("reorder");
+    }
+    if (command === "set_document_archived") {
+      if (args.input.archived) {
+        const index = workspace.documents.findIndex((item) => item.id === args.input.documentId);
+        const document = workspace.documents[index];
+        if (!document || document.revision !== args.input.expectedRevision) throw { code: "CONFLICT", message: "Document changed" };
+        workspace.documents.splice(index, 1);
+        document.revision += 1;
+        archivedDocuments.push({ ...document, schemaVersion: 1, archivedAt: "2026-07-16T00:00:00Z" });
+        const blocks = workspace.blocks.filter((item) => item.documentId === document.id);
+        archivedBlocks.set(document.id, blocks);
+        workspace.blocks = workspace.blocks.filter((item) => item.documentId !== document.id);
+        return documentMutationResponse("archive");
+      }
+      const index = archivedDocuments.findIndex((item) => item.id === args.input.documentId);
+      const archived = archivedDocuments[index];
+      if (!archived || archived.revision !== args.input.expectedRevision) throw { code: "CONFLICT", message: "Document changed" };
+      archivedDocuments.splice(index, 1);
+      const { archivedAt: _archivedAt, schemaVersion: _schemaVersion, ...document } = archived;
+      document.revision += 1;
+      workspace.documents.push(document);
+      workspace.documents.sort((left, right) => left.orderKey.localeCompare(right.orderKey));
+      workspace.blocks.push(...(archivedBlocks.get(document.id) ?? []));
+      archivedBlocks.delete(document.id);
+      return documentMutationResponse("restore");
     }
     if (command === "export_markdown") {
       return {

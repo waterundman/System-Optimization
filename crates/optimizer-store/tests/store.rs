@@ -3,11 +3,12 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use optimizer_store::{
-    AppendReviewEvent, ApplyBlockEdit, CURRENT_SCHEMA_VERSION, CreateDocumentWithBlock,
-    CreateSnapshot, CreateStyleSample, MINIMUM_SQLITE_VERSION, ModelUsageRecord, NewContextPacket,
-    NewOperationArtifact, NewOperationLifecycleEvent, NewOperationRun, OperationArtifactKind,
-    OperationFailureRecord, OperationState, OptimizerStore, PersistOperationBundle, ProjectSeed,
-    RestoreSnapshot, ReviewDecision, ReviewEventKind, ReviewSessionStatus, SeedBlock, SeedDocument,
+    AppendReviewEvent, ApplyBlockEdit, ApplyDocumentBatch, CURRENT_SCHEMA_VERSION,
+    CreateDocumentWithBlock, CreateSnapshot, CreateStyleSample, DocumentMutation,
+    MINIMUM_SQLITE_VERSION, ModelUsageRecord, NewContextPacket, NewOperationArtifact,
+    NewOperationLifecycleEvent, NewOperationRun, OperationArtifactKind, OperationFailureRecord,
+    OperationState, OptimizerStore, PersistOperationBundle, ProjectSeed, RestoreSnapshot,
+    ReviewDecision, ReviewEventKind, ReviewSessionStatus, SeedBlock, SeedDocument,
     SetStyleSampleStatus, StoreError, encode_snapshot,
 };
 
@@ -261,6 +262,188 @@ fn creates_a_document_block_and_commit_atomically() {
 }
 
 #[test]
+fn mutates_document_lifecycle_as_versioned_atomic_batches() {
+    let temp = TempDatabase::new();
+    let mut store = open_seeded(&temp.database);
+    store
+        .create_document_with_block(&CreateDocumentWithBlock {
+            document_id: "document-2".into(),
+            document_parent_id: None,
+            document_kind: "chapter".into(),
+            document_title: "Chapter two".into(),
+            document_order_key: "z-document-2".into(),
+            block_id: "block-2".into(),
+            block_kind: "paragraph".into(),
+            block_order_key: "a0".into(),
+            block_content_json: r#"{"type":"paragraph","content":[]}"#.into(),
+            block_plain_text: String::new(),
+            block_content_hash: "sha256:block-2".into(),
+            block_locked: false,
+            commit_id: "commit-document-2".into(),
+            branch_id: "branch-main".into(),
+            expected_head_commit_id: "commit-initial".into(),
+            expected_project_revision: 0,
+            new_root_hash: "sha256:root-document-2".into(),
+            actor_type: "user".into(),
+            actor_id: None,
+            occurred_at: "2026-07-16T00:00:00.000Z".into(),
+        })
+        .unwrap();
+
+    let renamed = store
+        .apply_document_batch(&ApplyDocumentBatch {
+            mutations: vec![DocumentMutation {
+                document_id: "document-2".into(),
+                expected_revision: 0,
+                parent_id: None,
+                kind: "chapter".into(),
+                title: "Renamed chapter".into(),
+                order_key: "z-document-2".into(),
+                active: true,
+                before_hash: "sha256:document-2-before-rename".into(),
+                after_hash: "sha256:document-2-after-rename".into(),
+                operation: "rename".into(),
+            }],
+            commit_id: "commit-document-rename".into(),
+            branch_id: "branch-main".into(),
+            expected_head_commit_id: "commit-document-2".into(),
+            expected_project_revision: 1,
+            new_root_hash: "sha256:root-document-rename".into(),
+            reason: "document_rename".into(),
+            actor_type: "user".into(),
+            actor_id: None,
+            occurred_at: "2026-07-16T00:01:00.000Z".into(),
+        })
+        .unwrap();
+    assert_eq!(renamed.project_revision, 2);
+    assert_eq!(
+        store.get_document("project-1", "document-2").unwrap().title,
+        "Renamed chapter"
+    );
+
+    store
+        .apply_document_batch(&ApplyDocumentBatch {
+            mutations: vec![
+                DocumentMutation {
+                    document_id: "document-1".into(),
+                    expected_revision: 0,
+                    parent_id: None,
+                    kind: "chapter".into(),
+                    title: seed().documents[0].title.clone(),
+                    order_key: "d-00000002".into(),
+                    active: true,
+                    before_hash: "sha256:document-1-before-reorder".into(),
+                    after_hash: "sha256:document-1-after-reorder".into(),
+                    operation: "reorder".into(),
+                },
+                DocumentMutation {
+                    document_id: "document-2".into(),
+                    expected_revision: 1,
+                    parent_id: None,
+                    kind: "chapter".into(),
+                    title: "Renamed chapter".into(),
+                    order_key: "d-00000001".into(),
+                    active: true,
+                    before_hash: "sha256:document-2-before-reorder".into(),
+                    after_hash: "sha256:document-2-after-reorder".into(),
+                    operation: "reorder".into(),
+                },
+            ],
+            commit_id: "commit-document-reorder".into(),
+            branch_id: "branch-main".into(),
+            expected_head_commit_id: "commit-document-rename".into(),
+            expected_project_revision: 2,
+            new_root_hash: "sha256:root-document-reorder".into(),
+            reason: "document_reorder".into(),
+            actor_type: "user".into(),
+            actor_id: None,
+            occurred_at: "2026-07-16T00:02:00.000Z".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        store.list_documents("project-1").unwrap()[0].id,
+        "document-2"
+    );
+
+    store
+        .apply_document_batch(&ApplyDocumentBatch {
+            mutations: vec![DocumentMutation {
+                document_id: "document-2".into(),
+                expected_revision: 2,
+                parent_id: None,
+                kind: "chapter".into(),
+                title: "Renamed chapter".into(),
+                order_key: "d-00000001".into(),
+                active: false,
+                before_hash: "sha256:document-2-before-archive".into(),
+                after_hash: "sha256:document-2-after-archive".into(),
+                operation: "archive".into(),
+            }],
+            commit_id: "commit-document-archive".into(),
+            branch_id: "branch-main".into(),
+            expected_head_commit_id: "commit-document-reorder".into(),
+            expected_project_revision: 3,
+            new_root_hash: "sha256:root-document-archive".into(),
+            reason: "document_archive".into(),
+            actor_type: "user".into(),
+            actor_id: None,
+            occurred_at: "2026-07-16T00:03:00.000Z".into(),
+        })
+        .unwrap();
+    assert_eq!(store.list_documents("project-1").unwrap().len(), 1);
+    assert_eq!(
+        store.list_archived_documents("project-1").unwrap()[0].id,
+        "document-2"
+    );
+    assert_eq!(store.list_blocks("project-1").unwrap().len(), 1);
+
+    store
+        .apply_document_batch(&ApplyDocumentBatch {
+            mutations: vec![DocumentMutation {
+                document_id: "document-2".into(),
+                expected_revision: 3,
+                parent_id: None,
+                kind: "chapter".into(),
+                title: "Renamed chapter".into(),
+                order_key: "d-00000001".into(),
+                active: true,
+                before_hash: "sha256:document-2-before-restore".into(),
+                after_hash: "sha256:document-2-after-restore".into(),
+                operation: "restore".into(),
+            }],
+            commit_id: "commit-document-restore".into(),
+            branch_id: "branch-main".into(),
+            expected_head_commit_id: "commit-document-archive".into(),
+            expected_project_revision: 4,
+            new_root_hash: "sha256:root-document-restore".into(),
+            reason: "document_restore".into(),
+            actor_type: "user".into(),
+            actor_id: None,
+            occurred_at: "2026-07-16T00:04:00.000Z".into(),
+        })
+        .unwrap();
+    assert_eq!(store.list_documents("project-1").unwrap().len(), 2);
+    assert!(
+        store
+            .list_archived_documents("project-1")
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(store.list_blocks("project-1").unwrap().len(), 2);
+    assert_eq!(store.get_project("project-1").unwrap().revision, 5);
+    assert_eq!(
+        store
+            .list_commits("project-1")
+            .unwrap()
+            .last()
+            .unwrap()
+            .reason,
+        "document_restore"
+    );
+    store.verify_invariants().unwrap();
+}
+
+#[test]
 fn restores_across_document_creation_by_archiving_and_reviving_structure() {
     let temp = TempDatabase::new();
     let mut store = open_seeded(&temp.database);
@@ -337,6 +520,162 @@ fn restores_across_document_creation_by_archiving_and_reviving_structure() {
         store.get_block("block-2").unwrap().plain_text,
         "new chapter"
     );
+    store.verify_invariants().unwrap();
+}
+
+#[test]
+fn restores_versioned_document_metadata_and_archive_state_from_snapshot() {
+    let temp = TempDatabase::new();
+    let mut store = open_seeded(&temp.database);
+    store
+        .create_document_with_block(&CreateDocumentWithBlock {
+            document_id: "document-2".into(),
+            document_parent_id: None,
+            document_kind: "chapter".into(),
+            document_title: "Chapter two".into(),
+            document_order_key: "z-document-2".into(),
+            block_id: "block-2".into(),
+            block_kind: "paragraph".into(),
+            block_order_key: "a0".into(),
+            block_content_json: r#"{"type":"paragraph","content":[]}"#.into(),
+            block_plain_text: String::new(),
+            block_content_hash: "sha256:block-2".into(),
+            block_locked: false,
+            commit_id: "commit-document-2".into(),
+            branch_id: "branch-main".into(),
+            expected_head_commit_id: "commit-initial".into(),
+            expected_project_revision: 0,
+            new_root_hash: "sha256:root-document-2".into(),
+            actor_type: "user".into(),
+            actor_id: None,
+            occurred_at: "2026-07-16T01:00:00.000Z".into(),
+        })
+        .unwrap();
+    let snapshot = store
+        .create_head_snapshot(
+            "snapshot-document-metadata",
+            "project-1",
+            "2026-07-16T01:01:00.000Z",
+        )
+        .unwrap();
+
+    store
+        .apply_document_batch(&ApplyDocumentBatch {
+            mutations: vec![DocumentMutation {
+                document_id: "document-2".into(),
+                expected_revision: 0,
+                parent_id: None,
+                kind: "chapter".into(),
+                title: "Renamed chapter".into(),
+                order_key: "z-document-2".into(),
+                active: true,
+                before_hash: "sha256:before-rename".into(),
+                after_hash: "sha256:after-rename".into(),
+                operation: "rename".into(),
+            }],
+            commit_id: "commit-rename-after-snapshot".into(),
+            branch_id: "branch-main".into(),
+            expected_head_commit_id: "commit-document-2".into(),
+            expected_project_revision: 1,
+            new_root_hash: "sha256:root-renamed".into(),
+            reason: "document_rename".into(),
+            actor_type: "user".into(),
+            actor_id: None,
+            occurred_at: "2026-07-16T01:02:00.000Z".into(),
+        })
+        .unwrap();
+    store
+        .apply_document_batch(&ApplyDocumentBatch {
+            mutations: vec![
+                DocumentMutation {
+                    document_id: "document-1".into(),
+                    expected_revision: 0,
+                    parent_id: None,
+                    kind: "chapter".into(),
+                    title: seed().documents[0].title.clone(),
+                    order_key: "d-00000002".into(),
+                    active: true,
+                    before_hash: "sha256:document-1-before-reorder".into(),
+                    after_hash: "sha256:document-1-after-reorder".into(),
+                    operation: "reorder".into(),
+                },
+                DocumentMutation {
+                    document_id: "document-2".into(),
+                    expected_revision: 1,
+                    parent_id: None,
+                    kind: "chapter".into(),
+                    title: "Renamed chapter".into(),
+                    order_key: "d-00000001".into(),
+                    active: true,
+                    before_hash: "sha256:document-2-before-reorder".into(),
+                    after_hash: "sha256:document-2-after-reorder".into(),
+                    operation: "reorder".into(),
+                },
+            ],
+            commit_id: "commit-reorder-after-snapshot".into(),
+            branch_id: "branch-main".into(),
+            expected_head_commit_id: "commit-rename-after-snapshot".into(),
+            expected_project_revision: 2,
+            new_root_hash: "sha256:root-reordered".into(),
+            reason: "document_reorder".into(),
+            actor_type: "user".into(),
+            actor_id: None,
+            occurred_at: "2026-07-16T01:03:00.000Z".into(),
+        })
+        .unwrap();
+    store
+        .apply_document_batch(&ApplyDocumentBatch {
+            mutations: vec![DocumentMutation {
+                document_id: "document-2".into(),
+                expected_revision: 2,
+                parent_id: None,
+                kind: "chapter".into(),
+                title: "Renamed chapter".into(),
+                order_key: "d-00000001".into(),
+                active: false,
+                before_hash: "sha256:before-archive".into(),
+                after_hash: "sha256:after-archive".into(),
+                operation: "archive".into(),
+            }],
+            commit_id: "commit-archive-after-snapshot".into(),
+            branch_id: "branch-main".into(),
+            expected_head_commit_id: "commit-reorder-after-snapshot".into(),
+            expected_project_revision: 3,
+            new_root_hash: "sha256:root-archived".into(),
+            reason: "document_archive".into(),
+            actor_type: "user".into(),
+            actor_id: None,
+            occurred_at: "2026-07-16T01:04:00.000Z".into(),
+        })
+        .unwrap();
+
+    let restored = store
+        .restore_snapshot(&RestoreSnapshot {
+            snapshot_id: snapshot.id,
+            branch_id: "branch-main".into(),
+            new_commit_id: "commit-restore-document-metadata".into(),
+            edit_id_prefix: "edit-restore-document-metadata".into(),
+            actor_type: "user".into(),
+            actor_id: None,
+            occurred_at: "2026-07-16T01:05:00.000Z".into(),
+        })
+        .unwrap();
+
+    assert_eq!(restored.restored_root_hash, "sha256:root-document-2");
+    let documents = store.list_documents("project-1").unwrap();
+    assert_eq!(documents.len(), 2);
+    assert_eq!(documents[0].id, "document-1");
+    assert_eq!(documents[1].id, "document-2");
+    assert_eq!(documents[1].title, "Chapter two");
+    assert_eq!(documents[0].revision, 2);
+    assert_eq!(documents[1].revision, 4);
+    assert!(
+        store
+            .list_archived_documents("project-1")
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(store.list_blocks("project-1").unwrap().len(), 2);
     store.verify_invariants().unwrap();
 }
 

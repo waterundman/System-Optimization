@@ -63,6 +63,42 @@ pub struct DocumentRecord {
     pub title: String,
     pub order_key: String,
     pub revision: i64,
+    pub deleted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentMutation {
+    pub document_id: String,
+    pub expected_revision: i64,
+    pub parent_id: Option<String>,
+    pub kind: String,
+    pub title: String,
+    pub order_key: String,
+    pub active: bool,
+    pub before_hash: String,
+    pub after_hash: String,
+    pub operation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyDocumentBatch {
+    pub mutations: Vec<DocumentMutation>,
+    pub commit_id: String,
+    pub branch_id: String,
+    pub expected_head_commit_id: String,
+    pub expected_project_revision: i64,
+    pub new_root_hash: String,
+    pub reason: String,
+    pub actor_type: String,
+    pub actor_id: Option<String>,
+    pub occurred_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentBatchReceipt {
+    pub commit_id: String,
+    pub previous_head_commit_id: String,
+    pub project_revision: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

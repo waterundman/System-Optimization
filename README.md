@@ -18,7 +18,7 @@
 - `@optimizer/model-gateway`：DeepSeek、Qwen、Kimi、MiniMax 与本地 Ollama，支持流式输出、取消、超时与统一错误。
 - `@optimizer/operation-runner`：ContextPacket → Provider → 严格输出校验 → PatchProposal/Findings，并生成版本化 Store bundle。
 - 确定性 `optimizer-json+zstd` 快照编码、SHA-256 完整性校验与“恢复为新 Commit”。
-- 版本化章节创建与结构恢复：Document/Block 创建在单事务中形成 Commit；检查点可跨章节创建前后归档或复活结构。
+- 版本化章节生命周期与结构恢复：创建、重命名、相邻移动、软归档和恢复均形成 Commit；项目根哈希 v2 绑定章节元数据与活动 Block，检查点可恢复章节集合、标题、顺序和归档状态。
 - 用户显式选文件的 Markdown 导入，以及限制在项目包 `exports/` 内的原子 Markdown 导出。
 - 架构依赖检查、Schema 解析检查、Node 测试与 Rust 测试。
 - ADR 与工程设计 DOCX。
@@ -59,12 +59,13 @@ scripts/               工程约束检查
 2. Ollama 缺失模型拉取指引、版本兼容提示与可选上下文窗口配置。
 3. 依赖源可用后将正文输入适配器替换为 Tiptap，并提供行内 decoration 审查。
 4. 显式成本策略下的重试、Provider fallback 与费用上限。
-5. 最近项目、章节改名/移动/删除，以及结构化摘要失效队列。
+5. 最近项目、树形章节与结构化摘要失效队列。
 
 ## 最新迭代：可运行桌面工作区
 
 - 欢迎页可创建或打开经 Host 校验的 `.optimizer` 项目包，项目凭据不会进入 WebView。
 - 工作区显示文档树、结构化 Block、保存状态、有效字符数与版本抽屉。
+- 文档树支持章节重命名、上移/下移、软归档和恢复；结构命令先刷新正文草稿并以权威工作区响应推进 HEAD。
 - 900ms 串行自动保存绑定 Block revision/hash；冲突时保留本地草稿并重新加载权威版本。
 - 检查点与恢复均通过 Host，恢复创建新 Commit，不覆盖历史。
 - 静态前端没有第三方 npm 运行时依赖和远程资源；Tauri CSP 只开放本地资源与 IPC。

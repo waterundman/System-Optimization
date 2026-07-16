@@ -57,6 +57,21 @@ await page.getByRole("heading", { name: "第二章" }).waitFor();
 await page.getByText(/已创建章节/).waitFor();
 await page.screenshot({ path: resolve(screenshotDirectory, "document-created.png"), fullPage: true });
 
+await page.getByRole("button", { name: "章 第二章", exact: true }).hover();
+page.once("dialog", (dialog) => dialog.accept("第二章：雨夜"));
+await page.getByRole("button", { name: "重命名 第二章" }).click();
+await page.getByRole("heading", { name: "第二章：雨夜" }).waitFor();
+await page.getByRole("button", { name: "章 第二章：雨夜", exact: true }).hover();
+await page.getByRole("button", { name: "上移 第二章：雨夜" }).click();
+await page.getByText(/已上移“第二章：雨夜”/).waitFor();
+await page.getByRole("button", { name: "章 第二章：雨夜", exact: true }).hover();
+page.once("dialog", (dialog) => dialog.accept());
+await page.getByRole("button", { name: "归档 第二章：雨夜" }).click();
+await page.getByText("已归档 · 1").waitFor();
+await page.getByRole("button", { name: "恢复 第二章：雨夜" }).click();
+await page.getByRole("heading", { name: "第二章：雨夜" }).waitFor();
+await page.screenshot({ path: resolve(screenshotDirectory, "document-lifecycle.png"), fullPage: true });
+
 const fileChooserPromise = page.waitForEvent("filechooser");
 await page.getByRole("button", { name: "导入 MD" }).click();
 const fileChooser = await fileChooserPromise;

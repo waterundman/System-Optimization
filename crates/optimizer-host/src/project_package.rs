@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Component, Path};
 
 use optimizer_store::{
-    OptimizerStore, ProjectRecord, ProjectSeed, SeedBlock, SeedDocument, StoreError,
+    DocumentRecord, OptimizerStore, ProjectRecord, ProjectSeed, SeedBlock, SeedDocument, StoreError,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -12,15 +12,17 @@ use uuid::Uuid;
 
 use crate::workspace_commands::{
     apply_reviewed_proposal, block_content_hash, create_checkpoint, create_document,
-    create_style_sample, list_style_samples, load_project_workspace, load_version_history,
-    project_root_hash, restore_checkpoint, save_block, set_style_sample_status,
+    create_style_sample, list_archived_documents, list_style_samples, load_project_workspace,
+    load_version_history, project_root_hash, rename_document, reorder_document, restore_checkpoint,
+    save_block, set_document_archived, set_style_sample_status,
 };
 use crate::{
-    ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, CheckpointSummary,
-    CreateDocumentResponse, CreateDocumentSpec, CreateStyleSampleSpec, HostError,
-    OperationCommandHost, ProjectRoot, ProjectWorkspace, RestoreCheckpointResponse,
-    RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec, SetStyleSampleStatusSpec, StyleSample,
-    VersionHistory, WorkspaceCommandError,
+    ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, ArchivedDocument, CheckpointSummary,
+    CreateDocumentResponse, CreateDocumentSpec, CreateStyleSampleSpec, DocumentMutationResponse,
+    HostError, OperationCommandHost, ProjectRoot, ProjectWorkspace, RenameDocumentSpec,
+    ReorderDocumentSpec, RestoreCheckpointResponse, RestoreCheckpointSpec, SaveBlockResponse,
+    SaveBlockSpec, SetDocumentArchivedSpec, SetStyleSampleStatusSpec, StyleSample, VersionHistory,
+    WorkspaceCommandError,
 };
 
 const PACKAGE_SCHEMA_VERSION: u32 = 1;
@@ -287,6 +289,46 @@ impl OpenedProject {
         )
     }
 
+    pub fn archived_documents(&self) -> Result<Vec<ArchivedDocument>, WorkspaceCommandError> {
+        list_archived_documents(self.operations.store(), &self.project_id)
+    }
+
+    pub fn rename_document(
+        &mut self,
+        spec: &RenameDocumentSpec,
+    ) -> Result<DocumentMutationResponse, WorkspaceCommandError> {
+        rename_document(
+            self.operations.store_mut(),
+            &self.project_id,
+            &self.main_branch_id,
+            spec,
+        )
+    }
+
+    pub fn reorder_document(
+        &mut self,
+        spec: &ReorderDocumentSpec,
+    ) -> Result<DocumentMutationResponse, WorkspaceCommandError> {
+        reorder_document(
+            self.operations.store_mut(),
+            &self.project_id,
+            &self.main_branch_id,
+            spec,
+        )
+    }
+
+    pub fn set_document_archived(
+        &mut self,
+        spec: &SetDocumentArchivedSpec,
+    ) -> Result<DocumentMutationResponse, WorkspaceCommandError> {
+        set_document_archived(
+            self.operations.store_mut(),
+            &self.project_id,
+            &self.main_branch_id,
+            spec,
+        )
+    }
+
     pub fn style_samples(&self) -> Result<Vec<StyleSample>, WorkspaceCommandError> {
         list_style_samples(self.operations.store(), &self.project_id)
     }
@@ -439,7 +481,20 @@ fn create_staged_package(path: &Path, spec: &NewProjectSpec) -> Result<(), Proje
         serde_json::to_string(&content).map_err(ProjectPackageError::ManifestJson)?;
     let content_hash = block_content_hash("paragraph", &content, "", false)
         .map_err(ProjectPackageError::Workspace)?;
-    let root_hash = project_root_hash([(block_id.as_str(), content_hash.as_str())]);
+    let initial_document = DocumentRecord {
+        id: document_id.clone(),
+        project_id: project_id.clone(),
+        parent_id: None,
+        kind: "chapter".into(),
+        title: "正文".into(),
+        order_key: "a0".into(),
+        revision: 0,
+        deleted_at: None,
+    };
+    let root_hash = project_root_hash(
+        [&initial_document],
+        [(block_id.as_str(), content_hash.as_str())],
+    );
     let seed = ProjectSeed {
         project_id: project_id.clone(),
         title: spec.title.trim().into(),
@@ -451,7 +506,7 @@ fn create_staged_package(path: &Path, spec: &NewProjectSpec) -> Result<(), Proje
             id: document_id.clone(),
             parent_id: None,
             kind: "chapter".into(),
-            title: "正文".into(),
+            title: initial_document.title,
             order_key: "a0".into(),
         }],
         blocks: vec![SeedBlock {
@@ -727,6 +782,103 @@ mod tests {
             }),
             Err(WorkspaceCommandError::Store(StoreError::Conflict { .. }))
         ));
+    }
+
+    #[test]
+    fn versions_document_lifecycle_and_restores_it_from_a_checkpoint() {
+        let parent = TempParent::new();
+        let mut project = OpenedProject::create(&parent.0, &spec()).unwrap();
+        let initial = project.workspace().unwrap();
+        let first = initial.documents[0].clone();
+        let created = project
+            .create_document(&CreateDocumentSpec {
+                title: "第二章".into(),
+                initial_text: "雨落在旧站台。".into(),
+            })
+            .unwrap();
+        let checkpoint = project.create_checkpoint().unwrap();
+        let checkpoint_root = checkpoint.root_hash.clone();
+        let before_block = project
+            .workspace()
+            .unwrap()
+            .blocks
+            .into_iter()
+            .find(|block| block.document_id == created.document.id)
+            .unwrap();
+
+        let renamed = project
+            .rename_document(&RenameDocumentSpec {
+                document_id: created.document.id.clone(),
+                expected_revision: created.document.revision,
+                title: "第二章：雨夜".into(),
+            })
+            .unwrap();
+        assert_eq!(renamed.workspace.documents[1].title, "第二章：雨夜");
+        let rename_commit = project
+            .version_history()
+            .unwrap()
+            .commits
+            .into_iter()
+            .find(|commit| commit.id == renamed.commit_id)
+            .unwrap();
+        assert_ne!(rename_commit.root_hash, checkpoint_root);
+        assert_eq!(
+            renamed
+                .workspace
+                .blocks
+                .iter()
+                .find(|block| block.id == before_block.id)
+                .unwrap()
+                .content_hash,
+            before_block.content_hash
+        );
+
+        let renamed_document = renamed
+            .workspace
+            .documents
+            .iter()
+            .find(|document| document.id == created.document.id)
+            .unwrap();
+        let reordered = project
+            .reorder_document(&ReorderDocumentSpec {
+                document_id: renamed_document.id.clone(),
+                expected_revision: renamed_document.revision,
+                direction: crate::DocumentMoveDirection::Up,
+            })
+            .unwrap();
+        assert_eq!(reordered.workspace.documents[0].id, created.document.id);
+        let reordered_document = reordered
+            .workspace
+            .documents
+            .iter()
+            .find(|document| document.id == created.document.id)
+            .unwrap();
+        let archived = project
+            .set_document_archived(&SetDocumentArchivedSpec {
+                document_id: reordered_document.id.clone(),
+                expected_revision: reordered_document.revision,
+                archived: true,
+            })
+            .unwrap();
+        assert_eq!(archived.workspace.documents.len(), 1);
+        assert_eq!(archived.workspace.documents[0].id, first.id);
+        assert_eq!(
+            project.archived_documents().unwrap()[0].title,
+            "第二章：雨夜"
+        );
+
+        let restored = project
+            .restore_checkpoint(&RestoreCheckpointSpec {
+                checkpoint_id: checkpoint.id,
+            })
+            .unwrap();
+        assert_eq!(restored.restored_root_hash, checkpoint_root);
+        assert_eq!(restored.workspace.documents.len(), 2);
+        assert_eq!(restored.workspace.documents[0].id, first.id);
+        assert_eq!(restored.workspace.documents[1].id, created.document.id);
+        assert_eq!(restored.workspace.documents[1].title, "第二章");
+        assert!(project.archived_documents().unwrap().is_empty());
+        assert_eq!(restored.workspace.blocks.len(), 2);
     }
 
     #[test]

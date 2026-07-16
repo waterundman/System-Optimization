@@ -3,10 +3,10 @@ use std::fmt;
 use std::fmt::Write as _;
 
 use optimizer_store::{
-    AppendReviewEvent, ApplyBlockEdit, BlockRecord, CommitRecord, CreateDocumentWithBlock,
-    CreateStyleSample, DocumentRecord, EditReceipt, OperationArtifactKind, OptimizerStore,
-    RestoreSnapshot, ReviewDecision, ReviewEventKind, ReviewSessionStatus, SetStyleSampleStatus,
-    SnapshotRecord, StoreError, StyleSampleRecord,
+    AppendReviewEvent, ApplyBlockEdit, ApplyDocumentBatch, BlockRecord, CommitRecord,
+    CreateDocumentWithBlock, CreateStyleSample, DocumentMutation, DocumentRecord, EditReceipt,
+    OperationArtifactKind, OptimizerStore, RestoreSnapshot, ReviewDecision, ReviewEventKind,
+    ReviewSessionStatus, SetStyleSampleStatus, SnapshotRecord, StoreError, StyleSampleRecord,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -102,6 +102,57 @@ pub struct CreateDocumentResponse {
     pub project_revision: i64,
     pub document: WorkspaceDocument,
     pub block: WorkspaceBlock,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivedDocument {
+    pub schema_version: u32,
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub kind: String,
+    pub title: String,
+    pub order_key: String,
+    pub revision: i64,
+    pub archived_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenameDocumentSpec {
+    pub document_id: String,
+    pub expected_revision: i64,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocumentMoveDirection {
+    Up,
+    Down,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReorderDocumentSpec {
+    pub document_id: String,
+    pub expected_revision: i64,
+    pub direction: DocumentMoveDirection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetDocumentArchivedSpec {
+    pub document_id: String,
+    pub expected_revision: i64,
+    pub archived: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentMutationResponse {
+    pub schema_version: u32,
+    pub commit_id: String,
+    pub previous_head_commit_id: String,
+    pub head_commit_id: String,
+    pub project_revision: i64,
+    pub workspace: ProjectWorkspace,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -340,6 +391,17 @@ pub(crate) fn create_document(
     });
     let content_json = serde_json::to_string(&content).map_err(WorkspaceCommandError::Json)?;
     let content_hash = block_content_hash("paragraph", &content, &spec.initial_text, false)?;
+    let mut documents = store.list_documents(project_id)?;
+    documents.push(DocumentRecord {
+        id: document_id.clone(),
+        project_id: project_id.to_owned(),
+        parent_id: None,
+        kind: "chapter".into(),
+        title: title.to_owned(),
+        order_key: format!("z-{document_id}"),
+        revision: 0,
+        deleted_at: None,
+    });
     let mut blocks = store.list_blocks(project_id)?;
     blocks.push(BlockRecord {
         id: block_id.clone(),
@@ -353,6 +415,7 @@ pub(crate) fn create_document(
         locked: false,
     });
     let root_hash = project_root_hash(
+        documents.iter(),
         blocks
             .iter()
             .map(|block| (block.id.as_str(), block.content_hash.as_str())),
@@ -396,6 +459,290 @@ pub(crate) fn create_document(
         project_revision: receipt.project_revision,
         document: workspace_document(document),
         block: workspace_block(block)?,
+    })
+}
+
+pub(crate) fn list_archived_documents(
+    store: &OptimizerStore,
+    project_id: &str,
+) -> Result<Vec<ArchivedDocument>, WorkspaceCommandError> {
+    store
+        .list_archived_documents(project_id)?
+        .into_iter()
+        .map(|document| {
+            let archived_at = document.deleted_at.clone().ok_or_else(|| {
+                WorkspaceCommandError::Store(StoreError::InvariantViolation(
+                    "archived document has no deleted_at timestamp".into(),
+                ))
+            })?;
+            Ok(ArchivedDocument {
+                schema_version: WORKSPACE_SCHEMA_VERSION,
+                id: document.id,
+                parent_id: document.parent_id,
+                kind: document.kind,
+                title: document.title,
+                order_key: document.order_key,
+                revision: document.revision,
+                archived_at,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn rename_document(
+    store: &mut OptimizerStore,
+    project_id: &str,
+    main_branch_id: &str,
+    spec: &RenameDocumentSpec,
+) -> Result<DocumentMutationResponse, WorkspaceCommandError> {
+    validate_document_reference(&spec.document_id, spec.expected_revision)?;
+    let title = spec.title.trim();
+    if title.is_empty() || title.chars().count() > 200 {
+        return Err(WorkspaceCommandError::DocumentValidation(
+            "Document title must contain 1 to 200 characters".into(),
+        ));
+    }
+    let project = store.get_project(project_id)?;
+    let current = store.get_document(project_id, &spec.document_id)?;
+    validate_document_revision(&current, spec.expected_revision, &project.head_commit_id)?;
+    if current.deleted_at.is_some() {
+        return Err(WorkspaceCommandError::DocumentValidation(
+            "Archived documents must be restored before renaming".into(),
+        ));
+    }
+    if current.title == title {
+        return Err(WorkspaceCommandError::NoChanges);
+    }
+    let mut next = current.clone();
+    next.title = title.to_owned();
+    let mut active_documents = store.list_documents(project_id)?;
+    let position = active_documents
+        .iter()
+        .position(|document| document.id == current.id)
+        .ok_or_else(|| missing_active_document(&current.id))?;
+    active_documents[position] = next.clone();
+    commit_document_mutations(
+        store,
+        project_id,
+        main_branch_id,
+        &project.head_commit_id,
+        project.revision,
+        active_documents,
+        vec![document_mutation(&current, &next, true, true, "rename")],
+        "document_rename",
+    )
+}
+
+pub(crate) fn reorder_document(
+    store: &mut OptimizerStore,
+    project_id: &str,
+    main_branch_id: &str,
+    spec: &ReorderDocumentSpec,
+) -> Result<DocumentMutationResponse, WorkspaceCommandError> {
+    validate_document_reference(&spec.document_id, spec.expected_revision)?;
+    let project = store.get_project(project_id)?;
+    let mut current_documents = store.list_documents(project_id)?;
+    let current_index = current_documents
+        .iter()
+        .position(|document| document.id == spec.document_id)
+        .ok_or_else(|| missing_active_document(&spec.document_id))?;
+    validate_document_revision(
+        &current_documents[current_index],
+        spec.expected_revision,
+        &project.head_commit_id,
+    )?;
+    let target_index = match spec.direction {
+        DocumentMoveDirection::Up => current_index.checked_sub(1),
+        DocumentMoveDirection::Down => {
+            (current_index + 1 < current_documents.len()).then_some(current_index + 1)
+        }
+    }
+    .ok_or(WorkspaceCommandError::NoChanges)?;
+    let before = current_documents.clone();
+    current_documents.swap(current_index, target_index);
+    let order_namespace = Uuid::new_v4().simple();
+    for (index, document) in current_documents.iter_mut().enumerate() {
+        document.order_key = format!("d-{index:08}-{order_namespace}");
+    }
+    let mutations = current_documents
+        .iter()
+        .filter_map(|next| {
+            let current = before
+                .iter()
+                .find(|document| document.id == next.id)
+                .expect("reordered document originates from the current workspace");
+            (current.order_key != next.order_key)
+                .then(|| document_mutation(current, next, true, true, "reorder"))
+        })
+        .collect::<Vec<_>>();
+    if mutations.is_empty() {
+        return Err(WorkspaceCommandError::NoChanges);
+    }
+    commit_document_mutations(
+        store,
+        project_id,
+        main_branch_id,
+        &project.head_commit_id,
+        project.revision,
+        current_documents,
+        mutations,
+        "document_reorder",
+    )
+}
+
+pub(crate) fn set_document_archived(
+    store: &mut OptimizerStore,
+    project_id: &str,
+    main_branch_id: &str,
+    spec: &SetDocumentArchivedSpec,
+) -> Result<DocumentMutationResponse, WorkspaceCommandError> {
+    validate_document_reference(&spec.document_id, spec.expected_revision)?;
+    let project = store.get_project(project_id)?;
+    let current = store.get_document(project_id, &spec.document_id)?;
+    validate_document_revision(&current, spec.expected_revision, &project.head_commit_id)?;
+    let currently_archived = current.deleted_at.is_some();
+    if currently_archived == spec.archived {
+        return Err(WorkspaceCommandError::NoChanges);
+    }
+    let mut next = current.clone();
+    next.deleted_at = spec.archived.then(|| "archived".into());
+    let mut active_documents = store.list_documents(project_id)?;
+    let (operation, reason, before_active, after_active) = if spec.archived {
+        if active_documents.len() <= 1 {
+            return Err(WorkspaceCommandError::DocumentValidation(
+                "A project must retain at least one active document".into(),
+            ));
+        }
+        active_documents.retain(|document| document.id != current.id);
+        ("archive", "document_archive", true, false)
+    } else {
+        active_documents.push(next.clone());
+        active_documents.sort_by(|left, right| {
+            left.order_key
+                .cmp(&right.order_key)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        ("restore", "document_restore", false, true)
+    };
+    commit_document_mutations(
+        store,
+        project_id,
+        main_branch_id,
+        &project.head_commit_id,
+        project.revision,
+        active_documents,
+        vec![document_mutation(
+            &current,
+            &next,
+            before_active,
+            after_active,
+            operation,
+        )],
+        reason,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn commit_document_mutations(
+    store: &mut OptimizerStore,
+    project_id: &str,
+    main_branch_id: &str,
+    expected_head_commit_id: &str,
+    expected_project_revision: i64,
+    active_documents: Vec<DocumentRecord>,
+    mutations: Vec<DocumentMutation>,
+    reason: &str,
+) -> Result<DocumentMutationResponse, WorkspaceCommandError> {
+    let active_ids = active_documents
+        .iter()
+        .map(|document| document.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let blocks = store.list_all_blocks(project_id)?;
+    let root_hash = project_root_hash(
+        active_documents.iter(),
+        blocks
+            .iter()
+            .filter(|block| active_ids.contains(block.document_id.as_str()))
+            .map(|block| (block.id.as_str(), block.content_hash.as_str())),
+    );
+    let receipt = store.apply_document_batch(&ApplyDocumentBatch {
+        mutations,
+        commit_id: generated_id("commit"),
+        branch_id: main_branch_id.to_owned(),
+        expected_head_commit_id: expected_head_commit_id.to_owned(),
+        expected_project_revision,
+        new_root_hash: root_hash,
+        reason: reason.to_owned(),
+        actor_type: "user".into(),
+        actor_id: None,
+        occurred_at: now()?,
+    })?;
+    let workspace = load_project_workspace(store, project_id, main_branch_id)?;
+    Ok(DocumentMutationResponse {
+        schema_version: WORKSPACE_SCHEMA_VERSION,
+        commit_id: receipt.commit_id.clone(),
+        previous_head_commit_id: receipt.previous_head_commit_id,
+        head_commit_id: receipt.commit_id,
+        project_revision: receipt.project_revision,
+        workspace,
+    })
+}
+
+fn document_mutation(
+    current: &DocumentRecord,
+    next: &DocumentRecord,
+    before_active: bool,
+    after_active: bool,
+    operation: &str,
+) -> DocumentMutation {
+    DocumentMutation {
+        document_id: current.id.clone(),
+        expected_revision: current.revision,
+        parent_id: next.parent_id.clone(),
+        kind: next.kind.clone(),
+        title: next.title.clone(),
+        order_key: next.order_key.clone(),
+        active: after_active,
+        before_hash: document_state_hash(current, before_active),
+        after_hash: document_state_hash(next, after_active),
+        operation: operation.to_owned(),
+    }
+}
+
+fn validate_document_reference(
+    document_id: &str,
+    expected_revision: i64,
+) -> Result<(), WorkspaceCommandError> {
+    if document_id.trim().is_empty() || expected_revision < 0 {
+        return Err(WorkspaceCommandError::DocumentValidation(
+            "Document id and non-negative revision are required".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_document_revision(
+    document: &DocumentRecord,
+    expected_revision: i64,
+    head_commit_id: &str,
+) -> Result<(), WorkspaceCommandError> {
+    if document.revision != expected_revision {
+        return Err(WorkspaceCommandError::Store(StoreError::StateConflict {
+            entity: "document",
+            id: document.id.clone(),
+            expected_revision,
+            actual_revision: document.revision,
+            expected_state: head_commit_id.to_owned(),
+            actual_state: head_commit_id.to_owned(),
+        }));
+    }
+    Ok(())
+}
+
+fn missing_active_document(id: &str) -> WorkspaceCommandError {
+    WorkspaceCommandError::Store(StoreError::NotFound {
+        entity: "document",
+        id: id.to_owned(),
     })
 }
 
@@ -493,17 +840,21 @@ pub(crate) fn save_block(
     {
         return Err(WorkspaceCommandError::NoChanges);
     }
+    let documents = store.list_documents(project_id)?;
     let blocks = store.list_blocks(project_id)?;
-    let root_hash = project_root_hash(blocks.iter().map(|block| {
-        (
-            block.id.as_str(),
-            if block.id == current.id {
-                content_hash.as_str()
-            } else {
-                block.content_hash.as_str()
-            },
-        )
-    }));
+    let root_hash = project_root_hash(
+        documents.iter(),
+        blocks.iter().map(|block| {
+            (
+                block.id.as_str(),
+                if block.id == current.id {
+                    content_hash.as_str()
+                } else {
+                    block.content_hash.as_str()
+                },
+            )
+        }),
+    );
     let command = ApplyBlockEdit {
         edit_id: generated_id("edit"),
         commit_id: generated_id("commit"),
@@ -682,17 +1033,21 @@ pub(crate) fn apply_reviewed_proposal(
         &next_plain_text,
         current.locked,
     )?;
+    let documents = store.list_documents(project_id)?;
     let blocks = store.list_blocks(project_id)?;
-    let root_hash = project_root_hash(blocks.iter().map(|block| {
-        (
-            block.id.as_str(),
-            if block.id == current.id {
-                content_hash.as_str()
-            } else {
-                block.content_hash.as_str()
-            },
-        )
-    }));
+    let root_hash = project_root_hash(
+        documents.iter(),
+        blocks.iter().map(|block| {
+            (
+                block.id.as_str(),
+                if block.id == current.id {
+                    content_hash.as_str()
+                } else {
+                    block.content_hash.as_str()
+                },
+            )
+        }),
+    );
     let occurred_at = now()?;
     let commit_id = generated_id("commit");
     let accepted_ids = accepted
@@ -1025,21 +1380,54 @@ pub(crate) fn block_content_hash(
     Ok(sha256(&payload))
 }
 
-pub(crate) fn project_root_hash<'a>(
-    entries: impl IntoIterator<Item = (&'a str, &'a str)>,
+pub(crate) fn document_state_hash(document: &DocumentRecord, active: bool) -> String {
+    let mut payload = b"optimizer-document-state-v1\0".to_vec();
+    append_hash_field(&mut payload, document.id.as_bytes());
+    match &document.parent_id {
+        Some(parent_id) => {
+            payload.push(1);
+            append_hash_field(&mut payload, parent_id.as_bytes());
+        }
+        None => payload.push(0),
+    }
+    append_hash_field(&mut payload, document.kind.as_bytes());
+    append_hash_field(&mut payload, document.title.as_bytes());
+    append_hash_field(&mut payload, document.order_key.as_bytes());
+    payload.push(u8::from(active));
+    sha256(&payload)
+}
+
+pub(crate) fn project_root_hash<'a, 'b>(
+    documents: impl IntoIterator<Item = &'a DocumentRecord>,
+    blocks: impl IntoIterator<Item = (&'b str, &'b str)>,
 ) -> String {
-    let mut entries: Vec<_> = entries.into_iter().collect();
-    entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
-    let mut payload = b"optimizer-project-root-v1\0".to_vec();
-    for (block_id, content_hash) in entries {
-        payload.extend_from_slice(block_id.len().to_string().as_bytes());
-        payload.push(b':');
-        payload.extend_from_slice(block_id.as_bytes());
-        payload.extend_from_slice(content_hash.len().to_string().as_bytes());
-        payload.push(b':');
-        payload.extend_from_slice(content_hash.as_bytes());
+    let mut entries = documents
+        .into_iter()
+        .map(|document| {
+            (
+                format!("document:{}", document.id),
+                document_state_hash(document, true),
+            )
+        })
+        .chain(
+            blocks
+                .into_iter()
+                .map(|(id, hash)| (format!("block:{id}"), hash.to_owned())),
+        )
+        .collect::<Vec<_>>();
+    entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    let mut payload = b"optimizer-project-root-v2\0".to_vec();
+    for (entity_id, state_hash) in entries {
+        append_hash_field(&mut payload, entity_id.as_bytes());
+        append_hash_field(&mut payload, state_hash.as_bytes());
     }
     sha256(&payload)
+}
+
+fn append_hash_field(payload: &mut Vec<u8>, value: &[u8]) {
+    payload.extend_from_slice(value.len().to_string().as_bytes());
+    payload.push(b':');
+    payload.extend_from_slice(value);
 }
 
 fn save_response(

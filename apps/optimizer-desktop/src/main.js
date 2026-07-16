@@ -31,6 +31,7 @@ const state = {
   providersOpen: false,
   stylesOpen: false,
   styleSamples: [],
+  archivedDocuments: [],
   selectedProviderId: "deepseek",
   providerSettings: loadProviderSettings(),
   ollamaDiscovery: null,
@@ -257,8 +258,14 @@ function setFormBusy(form, busy) {
 
 async function loadWorkspace() {
   const preferred = state.selectedDocumentId;
-  state.workspace = await invokeHost("get_project_workspace");
-  state.styleSamples = await invokeHost("list_style_samples");
+  const [workspace, styleSamples, archivedDocuments] = await Promise.all([
+    invokeHost("get_project_workspace"),
+    invokeHost("list_style_samples"),
+    invokeHost("list_archived_documents"),
+  ]);
+  state.workspace = workspace;
+  state.styleSamples = styleSamples;
+  state.archivedDocuments = archivedDocuments;
   state.selectedDocumentId = selectInitialDocument(state.workspace, preferred);
   await refreshProviderSecretStatus();
   renderWorkspace();
@@ -313,14 +320,49 @@ function documentSidebar() {
     (left, right) => left.orderKey.localeCompare(right.orderKey) || left.id.localeCompare(right.id),
   );
   const list = element("nav", { className: "document-list", attrs: { "aria-label": "文档" } });
-  for (const document of documents) {
-    const item = button(document.title, `document-button${document.id === state.selectedDocumentId ? " active" : ""}`, () => {
+  for (const [index, document] of documents.entries()) {
+    const select = button("", `document-button${document.id === state.selectedDocumentId ? " active" : ""}`, () => {
       state.selectedDocumentId = document.id;
       state.conflictDraft = null;
       renderWorkspace();
     });
-    item.prepend(element("span", { className: "document-icon", text: document.kind === "chapter" ? "章" : "文" }));
-    list.append(item);
+    select.append(
+      element("span", { className: "document-icon", text: document.kind === "chapter" ? "章" : "文" }),
+      element("span", { className: "document-name", text: document.title }),
+    );
+    const actions = element("span", { className: "document-actions" }, [
+      button("↑", "document-action", () => reorderDocument(document, "up"), {
+        title: `上移“${document.title}”`,
+        disabled: index === 0,
+        attrs: { "aria-label": `上移 ${document.title}` },
+      }),
+      button("↓", "document-action", () => reorderDocument(document, "down"), {
+        title: `下移“${document.title}”`,
+        disabled: index === documents.length - 1,
+        attrs: { "aria-label": `下移 ${document.title}` },
+      }),
+      button("✎", "document-action", () => renameDocument(document), {
+        title: `重命名“${document.title}”`,
+        attrs: { "aria-label": `重命名 ${document.title}` },
+      }),
+      button("×", "document-action document-action-danger", () => archiveDocument(document), {
+        title: documents.length === 1 ? "项目必须保留一个有效章节" : `归档“${document.title}”`,
+        disabled: documents.length === 1,
+        attrs: { "aria-label": `归档 ${document.title}` },
+      }),
+    ]);
+    list.append(element("div", { className: "document-row" }, [select, actions]));
+  }
+  if (state.archivedDocuments.length) {
+    list.append(element("div", { className: "archived-heading", text: `已归档 · ${state.archivedDocuments.length}` }));
+    for (const document of state.archivedDocuments) {
+      list.append(element("div", { className: "archived-document-row" }, [
+        element("span", { text: document.title, title: document.title }),
+        button("恢复", "document-restore", () => restoreArchivedDocument(document), {
+          attrs: { "aria-label": `恢复 ${document.title}` },
+        }),
+      ]));
+    }
   }
   return element("aside", { className: "sidebar" }, [
     element("div", { className: "sidebar-heading" }, [
@@ -336,6 +378,73 @@ function documentSidebar() {
       element("strong", { text: countVisibleCharacters(state.workspace).toLocaleString("zh-CN") }),
     ]),
   ]);
+}
+
+async function commitDocumentMutation(command, input, preferredDocumentId, successMessage) {
+  try {
+    await flushAll();
+    const response = await invokeHost(command, { input: { schemaVersion: 1, ...input } });
+    state.workspace = response.workspace;
+    state.archivedDocuments = await invokeHost("list_archived_documents");
+    state.session = {
+      ...state.session,
+      project: {
+        ...state.session.project,
+        headCommitId: response.headCommitId,
+        revision: response.projectRevision,
+      },
+    };
+    state.selectedDocumentId = selectInitialDocument(response.workspace, preferredDocumentId);
+    state.versionHistory = null;
+    state.conflictDraft = null;
+    state.activeBlockId = null;
+    state.aiSelection = null;
+    state.aiReview = null;
+    setNotice("success", successMessage);
+    renderWorkspace();
+  } catch (error) {
+    setNotice("error", normalizeHostError(error).message);
+    await loadWorkspace().catch(() => renderWorkspace());
+  }
+}
+
+async function renameDocument(document) {
+  const title = window.prompt("新的章节标题", document.title);
+  if (title === null || title.trim() === document.title) return;
+  await commitDocumentMutation(
+    "rename_document",
+    { documentId: document.id, expectedRevision: document.revision, title },
+    document.id,
+    `已重命名为“${title.trim()}”，并记录版本。`,
+  );
+}
+
+async function reorderDocument(document, direction) {
+  await commitDocumentMutation(
+    "reorder_document",
+    { documentId: document.id, expectedRevision: document.revision, direction },
+    document.id,
+    `已${direction === "up" ? "上移" : "下移"}“${document.title}”，并记录版本。`,
+  );
+}
+
+async function archiveDocument(document) {
+  if (!window.confirm(`归档“${document.title}”？正文会被保留，并可从侧栏恢复。`)) return;
+  await commitDocumentMutation(
+    "set_document_archived",
+    { documentId: document.id, expectedRevision: document.revision, archived: true },
+    state.selectedDocumentId === document.id ? null : state.selectedDocumentId,
+    `已归档“${document.title}”，正文和版本记录仍被保留。`,
+  );
+}
+
+async function restoreArchivedDocument(document) {
+  await commitDocumentMutation(
+    "set_document_archived",
+    { documentId: document.id, expectedRevision: document.revision, archived: false },
+    document.id,
+    `已恢复“${document.title}”。`,
+  );
 }
 
 async function createDocument() {
@@ -1397,6 +1506,16 @@ async function restoreCheckpoint(checkpointId) {
       input: { schemaVersion: 1, checkpointId },
     });
     state.workspace = response.workspace;
+    state.archivedDocuments = await invokeHost("list_archived_documents");
+    state.session = {
+      ...state.session,
+      project: {
+        ...state.session.project,
+        headCommitId: response.workspace.headCommitId,
+        revision: response.workspace.revision,
+      },
+    };
+    state.selectedDocumentId = selectInitialDocument(response.workspace, state.selectedDocumentId);
     state.versionHistory = null;
     state.conflictDraft = null;
     setNotice("success", `已恢复 ${response.changedBlocks} 个 Block，并创建新的恢复提交。`);
@@ -1420,6 +1539,7 @@ async function closeProject() {
     state.providersOpen = false;
     state.stylesOpen = false;
     state.styleSamples = [];
+    state.archivedDocuments = [];
     state.conflictDraft = null;
     state.aiRunning = null;
     state.aiContextPreview = null;

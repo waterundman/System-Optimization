@@ -28,11 +28,12 @@ pub use project_package::{
 pub use secrets::WindowsCredentialStore;
 pub use secrets::{MemorySecretStore, SecretReference, SecretStore, SecretStoreError, SecretValue};
 pub use workspace_commands::{
-    ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, CheckpointSummary,
-    CreateDocumentResponse, CreateDocumentSpec, CreateStyleSampleSpec, ProjectWorkspace,
+    ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, ArchivedDocument, CheckpointSummary,
+    CreateDocumentResponse, CreateDocumentSpec, CreateStyleSampleSpec, DocumentMoveDirection,
+    DocumentMutationResponse, ProjectWorkspace, RenameDocumentSpec, ReorderDocumentSpec,
     RestoreCheckpointResponse, RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec,
-    SetStyleSampleStatusSpec, StyleSample, VersionCommit, VersionHistory, WorkspaceBlock,
-    WorkspaceCommandError, WorkspaceDocument,
+    SetDocumentArchivedSpec, SetStyleSampleStatusSpec, StyleSample, VersionCommit, VersionHistory,
+    WorkspaceBlock, WorkspaceCommandError, WorkspaceDocument,
 };
 
 #[derive(Debug)]
