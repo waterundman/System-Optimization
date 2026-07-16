@@ -9,14 +9,15 @@ use optimizer_host::{
     KnowledgeContextCandidate, KnowledgeContextSpec, KnowledgeItem, ModelAuthorizationScope,
     ModelExecutionHost, ModelExecutionRequest, ModelExecutionSummary, ModelGatewayError,
     ModelProviderId, ModelRequestAuthorization, ModelStreamEvent, NewProjectSpec, OllamaModelList,
-    OpenedProject, OperationAuditResponse, OperationCommandError, PersistOperationResponse,
-    PersistReviewResponse, ProjectInfo, ProjectPackageError, ProjectWorkspace, RecentProject,
-    RecentProjectError, RecentProjectRegistry, RefreshSummariesSpec, RenameDocumentSpec,
-    ReorderDocumentSpec, RestoreCheckpointResponse, RestoreCheckpointSpec, SaveBlockResponse,
-    SaveBlockSpec, SecretReference, SecretStore, SecretStoreError, SecretValue,
-    SetDocumentArchivedSpec, SetKnowledgeItemStatusSpec, SetStyleSampleStatusSpec, StyleSample,
-    SummaryContextCandidate, SummaryContextSpec, SummaryInvalidation, SummaryRefreshReport,
-    VersionHistory, WorkspaceCommandError,
+    OpenedProject, OperationAuditResponse, OperationCommandError, OperationContextCandidate,
+    OperationContextSpec, PersistOperationResponse, PersistReviewResponse, ProjectInfo,
+    ProjectPackageError, ProjectWorkspace, RecentProject, RecentProjectError,
+    RecentProjectRegistry, RefreshSummariesSpec, RenameDocumentSpec, ReorderDocumentSpec,
+    RestoreCheckpointResponse, RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec,
+    SecretReference, SecretStore, SecretStoreError, SecretValue, SetDocumentArchivedSpec,
+    SetKnowledgeItemStatusSpec, SetStyleSampleStatusSpec, StyleSample, SummaryContextCandidate,
+    SummaryContextSpec, SummaryInvalidation, SummaryRefreshReport, VersionHistory,
+    WorkspaceCommandError,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Runtime, State, ipc::Channel};
@@ -374,6 +375,23 @@ impl DesktopState {
                 target_block_id: input.target_block_id,
                 target_block_revision: input.target_block_revision,
                 target_block_hash: input.target_block_hash,
+            })
+            .map_err(CommandError::from)
+    }
+
+    pub fn get_operation_context(
+        &self,
+        input: GetOperationContextRequest,
+    ) -> CommandResult<Vec<OperationContextCandidate>> {
+        input.validate()?;
+        self.current_project()?
+            .operation_context(&OperationContextSpec {
+                base_commit_id: input.base_commit_id,
+                target_block_id: input.target_block_id,
+                target_block_revision: input.target_block_revision,
+                target_block_hash: input.target_block_hash,
+                from: input.from,
+                to: input.to,
             })
             .map_err(CommandError::from)
     }
@@ -1126,6 +1144,37 @@ impl GetKnowledgeContextRequest {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GetOperationContextRequest {
+    pub schema_version: u32,
+    pub base_commit_id: String,
+    pub target_block_id: String,
+    pub target_block_revision: i64,
+    pub target_block_hash: String,
+    pub from: usize,
+    pub to: usize,
+}
+
+impl GetOperationContextRequest {
+    fn validate(&self) -> CommandResult<()> {
+        validate_request_schema(self.schema_version)?;
+        if !is_safe_binding_id(&self.base_commit_id)
+            || !is_safe_binding_id(&self.target_block_id)
+            || self.target_block_revision < 0
+            || !is_sha256(&self.target_block_hash)
+            || self.from > self.to
+            || self.to > 4 * 1024 * 1024
+        {
+            return Err(CommandError::basic(
+                "OPERATION_CONTEXT_BINDING_INVALID",
+                "Operation context binding or UTF-16 selection is invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl SaveBlockRequest {
     fn validate(&self) -> CommandResult<()> {
         if self.schema_version != 1 {
@@ -1401,6 +1450,7 @@ pub fn attach<R: Runtime>(builder: tauri::Builder<R>, state: DesktopState) -> ta
             create_knowledge_item,
             set_knowledge_item_status,
             get_knowledge_context,
+            get_operation_context,
             save_block,
             apply_reviewed_proposal,
             get_version_history,
@@ -1596,6 +1646,14 @@ async fn get_knowledge_context(
     state: State<'_, DesktopState>,
 ) -> CommandResult<Vec<KnowledgeContextCandidate>> {
     spawn_host_task(state, move |state| state.get_knowledge_context(input)).await
+}
+
+#[tauri::command]
+async fn get_operation_context(
+    input: GetOperationContextRequest,
+    state: State<'_, DesktopState>,
+) -> CommandResult<Vec<OperationContextCandidate>> {
+    spawn_host_task(state, move |state| state.get_operation_context(input)).await
 }
 
 #[tauri::command]
@@ -2092,6 +2150,42 @@ mod tests {
         assert_eq!(context.len(), 1);
         assert_eq!(context[0].sensitivity, "never_send");
         assert_eq!(context[0].render_mode, "constraint");
+        let operation_context = state
+            .get_operation_context(GetOperationContextRequest {
+                schema_version: 1,
+                base_commit_id: workspace.head_commit_id.clone(),
+                target_block_id: block.id.clone(),
+                target_block_revision: block.revision,
+                target_block_hash: block.content_hash.clone(),
+                from: 0,
+                to: 0,
+            })
+            .unwrap();
+        assert!(
+            operation_context
+                .iter()
+                .any(|item| item.tier == "L0_TARGET" && item.mandatory)
+        );
+        assert!(
+            operation_context
+                .iter()
+                .any(|item| item.source_ref.starts_with("knowledge:constraint:"))
+        );
+        assert_eq!(
+            state
+                .get_operation_context(GetOperationContextRequest {
+                    schema_version: 1,
+                    base_commit_id: workspace.head_commit_id.clone(),
+                    target_block_id: block.id.clone(),
+                    target_block_revision: block.revision,
+                    target_block_hash: block.content_hash.clone(),
+                    from: 1,
+                    to: 0,
+                })
+                .unwrap_err()
+                .code,
+            "OPERATION_CONTEXT_BINDING_INVALID"
+        );
 
         let archived = state
             .set_knowledge_item_status(SetKnowledgeItemStatusRequest {
@@ -2541,6 +2635,7 @@ mod tests {
                 "allow-workspace-read",
                 "allow-style-library",
                 "allow-knowledge-library",
+                "allow-operation-context",
                 "allow-workspace-write",
                 "allow-document-lifecycle",
                 "allow-summary-status-read",

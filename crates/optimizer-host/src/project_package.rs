@@ -10,6 +10,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
+use crate::operation_context::collect_operation_context;
 use crate::summary_worker::{refresh_summaries, summary_context};
 use crate::workspace_commands::{
     apply_reviewed_proposal, block_content_hash, change_document_depth, create_checkpoint,
@@ -24,11 +25,12 @@ use crate::{
     ChangeDocumentDepthSpec, CheckpointSummary, CreateDocumentResponse, CreateDocumentSpec,
     CreateKnowledgeItemSpec, CreateStyleSampleSpec, DocumentMutationResponse, HostError,
     KnowledgeContextCandidate, KnowledgeContextSpec, KnowledgeItem, OperationCommandHost,
-    ProjectRoot, ProjectWorkspace, RefreshSummariesSpec, RenameDocumentSpec, ReorderDocumentSpec,
-    RestoreCheckpointResponse, RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec,
-    SetDocumentArchivedSpec, SetKnowledgeItemStatusSpec, SetStyleSampleStatusSpec, StyleSample,
-    SummaryContextCandidate, SummaryContextSpec, SummaryInvalidation, SummaryRefreshReport,
-    VersionHistory, WorkspaceCommandError,
+    OperationContextCandidate, OperationContextSpec, ProjectRoot, ProjectWorkspace,
+    RefreshSummariesSpec, RenameDocumentSpec, ReorderDocumentSpec, RestoreCheckpointResponse,
+    RestoreCheckpointSpec, SaveBlockResponse, SaveBlockSpec, SetDocumentArchivedSpec,
+    SetKnowledgeItemStatusSpec, SetStyleSampleStatusSpec, StyleSample, SummaryContextCandidate,
+    SummaryContextSpec, SummaryInvalidation, SummaryRefreshReport, VersionHistory,
+    WorkspaceCommandError,
 };
 
 const PACKAGE_SCHEMA_VERSION: u32 = 1;
@@ -406,6 +408,13 @@ impl OpenedProject {
         spec: &KnowledgeContextSpec,
     ) -> Result<Vec<KnowledgeContextCandidate>, WorkspaceCommandError> {
         knowledge_context(self.operations.store(), &self.project_id, spec)
+    }
+
+    pub fn operation_context(
+        &self,
+        spec: &OperationContextSpec,
+    ) -> Result<Vec<OperationContextCandidate>, WorkspaceCommandError> {
+        collect_operation_context(self.operations.store(), &self.project_id, spec)
     }
 
     pub fn save_block(
@@ -1028,6 +1037,106 @@ mod tests {
                 target_block_hash: target.content_hash.clone(),
             }),
             Err(WorkspaceCommandError::KnowledgeValidation(_))
+        ));
+    }
+
+    #[test]
+    fn collects_all_operation_context_sources_from_the_current_host_snapshot() {
+        let parent = TempParent::new();
+        let mut project = OpenedProject::create(&parent.0, &spec()).unwrap();
+        let initial = project.workspace().unwrap();
+        let block = &initial.blocks[0];
+        let saved = project
+            .save_block(&SaveBlockSpec {
+                block_id: block.id.clone(),
+                expected_revision: block.revision,
+                expected_hash: block.content_hash.clone(),
+                content: serde_json::json!({
+                    "type": "paragraph",
+                    "content": [{ "type": "text", "text": "开场😀雨停了。" }]
+                }),
+                plain_text: "开场😀雨停了。".into(),
+            })
+            .unwrap();
+        let style = project
+            .create_style_sample(&CreateStyleSampleSpec {
+                title: "短句".into(),
+                content: "灯还亮着。".into(),
+                sensitivity: "local_sensitive".into(),
+            })
+            .unwrap();
+        project
+            .set_style_sample_status(&SetStyleSampleStatusSpec {
+                id: style.id,
+                expected_revision: style.revision,
+                status: "archived".into(),
+            })
+            .unwrap();
+        project
+            .create_knowledge_item(&CreateKnowledgeItemSpec {
+                kind: "fact".into(),
+                title: "天气".into(),
+                content: "雨已经停了".into(),
+                sensitivity: "local_sensitive".into(),
+                severity: None,
+            })
+            .unwrap();
+        project
+            .refresh_summaries(&RefreshSummariesSpec { max_items: 8 })
+            .unwrap();
+
+        let spec = OperationContextSpec {
+            base_commit_id: saved.head_commit_id.clone(),
+            target_block_id: saved.block.id.clone(),
+            target_block_revision: saved.block.revision,
+            target_block_hash: saved.block.content_hash.clone(),
+            from: 2,
+            to: 4,
+        };
+        let candidates = project.operation_context(&spec).unwrap();
+        assert!(candidates.iter().all(|item| {
+            item.source_commit_id == saved.head_commit_id && item.source_hash.starts_with("sha256:")
+        }));
+        let target = candidates
+            .iter()
+            .find(|item| item.tier == "L0_TARGET")
+            .unwrap();
+        assert_eq!(target.content, "😀");
+        assert!(target.mandatory && target.selected_by_user);
+        assert!(
+            candidates
+                .iter()
+                .any(|item| { item.reason_codes == ["TARGET_PREFIX"] && item.content == "开场" })
+        );
+        assert!(candidates.iter().any(|item| {
+            item.reason_codes == ["TARGET_SUFFIX"] && item.content == "雨停了。"
+        }));
+        assert!(candidates.iter().any(|item| {
+            item.reason_codes == ["DOCUMENT_STRUCTURE"] && item.content.contains("My Novel")
+        }));
+        assert!(candidates.iter().any(|item| {
+            item.source_ref.starts_with("summary:project:") && item.tier == "L3_KNOWLEDGE"
+        }));
+        assert!(candidates.iter().any(|item| {
+            item.source_ref.starts_with("knowledge:fact:") && item.status == "canonical"
+        }));
+        assert!(
+            candidates
+                .iter()
+                .any(|item| { item.source_ref.starts_with("style:") && item.status == "archived" })
+        );
+
+        let mut split_surrogate = spec.clone();
+        split_surrogate.from = 3;
+        assert!(matches!(
+            project.operation_context(&split_surrogate),
+            Err(WorkspaceCommandError::ContextValidation(_))
+        ));
+        let mut stale = spec;
+        stale.base_commit_id = "commit-stale".into();
+        assert!(matches!(
+            project.operation_context(&stale),
+            Err(WorkspaceCommandError::ContextValidation(_))
         ));
     }
 

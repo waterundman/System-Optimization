@@ -416,144 +416,63 @@ function operationIntent(input, id, createdAt) {
 
 function contextSource(input, hasher) {
   return {
-    id: "desktop-workspace-v1",
+    id: "desktop-host-context-v1",
     async collect() {
-      const targetText = input.block.plainText.slice(input.from, input.to);
-      const document = input.workspace.documents.find(
-        (candidate) => candidate.id === input.block.documentId,
-      );
-      const documentBlocks = input.workspace.blocks
-        .filter((candidate) => candidate.documentId === input.block.documentId)
-        .sort((left, right) => left.orderKey.localeCompare(right.orderKey));
-      const targetIndex = documentBlocks.findIndex((candidate) => candidate.id === input.block.id);
-      const candidates = [await candidate(hasher, {
-        id: `target-${input.block.id}`,
-        sourceRef: `block:${input.block.id}#${input.from}-${input.to}`,
-        tier: "L0_TARGET",
-        authority: "user_confirmed",
-        renderMode: "verbatim",
-        reasonCodes: ["USER_TARGET"],
-        content: targetText,
-        mandatory: true,
-        selectedByUser: true,
-        signals: { relevance: 1, structuralProximity: 1, freshness: 1 },
-      })];
-      for (const [offset, reason] of [[-1, "PREVIOUS_BLOCK"], [1, "NEXT_BLOCK"]]) {
-        const block = documentBlocks[targetIndex + offset];
-        if (!block?.plainText) continue;
-        candidates.push(await candidate(hasher, {
-          id: `local-${block.id}`,
-          sourceRef: `block:${block.id}`,
-          tier: "L1_LOCAL",
-          authority: "source_derived",
-          renderMode: "verbatim",
-          reasonCodes: [reason],
-          content: block.plainText,
-          signals: { relevance: 0.75, structuralProximity: 1, freshness: 1 },
-        }));
+      if (typeof input.loadOperationContext !== "function") {
+        throw new TypeError("Host operation context collector is required");
       }
-      const prefix = input.block.plainText.slice(Math.max(0, input.from - 2_000), input.from);
-      const suffix = input.block.plainText.slice(input.to, Math.min(input.block.plainText.length, input.to + 2_000));
-      for (const [part, label] of [[prefix, "PREFIX"], [suffix, "SUFFIX"]]) {
-        if (!part) continue;
-        candidates.push(await candidate(hasher, {
-          id: `local-${input.block.id}-${label.toLowerCase()}`,
-          sourceRef: `block:${input.block.id}#${label.toLowerCase()}`,
-          tier: "L1_LOCAL",
-          authority: "source_derived",
-          renderMode: "verbatim",
-          reasonCodes: [`TARGET_${label}`],
-          content: part,
-          signals: { relevance: 0.9, structuralProximity: 1, freshness: 1 },
-        }));
-      }
-      candidates.push(await candidate(hasher, {
-        id: `structure-${input.block.documentId}`,
-        sourceRef: `document:${input.block.documentId}`,
-        tier: "L2_STRUCTURAL",
-        authority: "source_derived",
-        renderMode: "summary",
-        reasonCodes: ["DOCUMENT_STRUCTURE"],
-        content: `项目：${input.projectTitle}\n文档：${document?.title ?? "未命名"}\n文档类型：${document?.kind ?? "document"}`,
-        signals: { relevance: 0.8, structuralProximity: 1, freshness: 1 },
-      }));
-      const hostBinding = {
+      const hostContext = await input.loadOperationContext({
         schemaVersion: 1,
         baseCommitId: input.workspace.headCommitId,
         targetBlockId: input.block.id,
         targetBlockRevision: input.block.revision,
         targetBlockHash: input.block.contentHash,
-      };
-      const [summaryContext, knowledgeContext] = await Promise.all([
-        input.loadSummaryContext?.(hostBinding) ?? [],
-        input.loadKnowledgeContext?.(hostBinding) ?? [],
-      ]);
-      for (const summary of summaryContext) {
-        validateHostContextCandidate(summary, "summary", input.workspace.headCommitId);
+        from: input.from,
+        to: input.to,
+      });
+      if (!Array.isArray(hostContext) || hostContext.length === 0) {
+        throw new TypeError("Host operation context is empty or malformed");
+      }
+      const expectedTargetRef = `block:${input.block.id}@r${input.block.revision}#${input.from}-${input.to}`;
+      const targetItems = hostContext.filter((item) => item?.tier === "L0_TARGET");
+      const ids = new Set(hostContext.map((item) => item?.id));
+      const sourceRefs = new Set(hostContext.map((item) => item?.sourceRef));
+      if (targetItems.length !== 1
+        || targetItems[0].sourceRef !== expectedTargetRef
+        || targetItems[0].content !== input.block.plainText.slice(input.from, input.to)
+        || ids.size !== hostContext.length
+        || sourceRefs.size !== hostContext.length) {
+        throw new TypeError("Host operation context target or identity set is malformed");
+      }
+      const candidates = [];
+      for (const item of hostContext) {
+        validateHostOperationContext(item, input.workspace.headCommitId);
         const normalized = await candidate(hasher, {
-          id: summary.id,
-          sourceRef: summary.sourceRef,
-          tier: summary.tier,
-          authority: summary.authority,
-          renderMode: summary.renderMode,
-          reasonCodes: summary.reasonCodes,
-          content: summary.content,
-          status: summary.status,
-          sensitivity: summary.sensitivity,
-          signals: {
-            relevance: summary.tier === "L2_STRUCTURAL" ? 0.9 : 0.65,
-            structuralProximity: summary.tier === "L2_STRUCTURAL" ? 0.9 : 0.35,
-            freshness: 1,
-          },
+          id: item.id,
+          sourceRef: item.sourceRef,
+          tier: item.tier,
+          status: item.status,
+          authority: item.authority,
+          sensitivity: item.sensitivity,
+          renderMode: item.renderMode,
+          reasonCodes: item.reasonCodes,
+          content: item.content,
+          mandatory: item.mandatory,
+          selectedByUser: item.selectedByUser,
+          signals: item.signals,
         });
-        if (normalized.sourceHash !== summary.sourceHash) {
+        if (normalized.sourceHash !== item.sourceHash) {
           throw new Error("Host context content hash does not match its payload");
         }
         candidates.push(normalized);
-      }
-      for (const knowledge of knowledgeContext) {
-        validateHostContextCandidate(knowledge, "knowledge", input.workspace.headCommitId);
-        const normalized = await candidate(hasher, {
-          id: knowledge.id,
-          sourceRef: knowledge.sourceRef,
-          tier: knowledge.tier,
-          authority: knowledge.authority,
-          renderMode: knowledge.renderMode,
-          reasonCodes: knowledge.reasonCodes,
-          content: knowledge.content,
-          status: knowledge.status,
-          sensitivity: knowledge.sensitivity,
-          selectedByUser: knowledge.authority === "user_confirmed",
-          signals: { relevance: 0.92, structuralProximity: 0.5, freshness: 1 },
-        });
-        if (normalized.sourceHash !== knowledge.sourceHash) {
-          throw new Error("Host context content hash does not match its payload");
-        }
-        candidates.push(normalized);
-      }
-      for (const sample of input.styleSamples ?? []) {
-        candidates.push(await candidate(hasher, {
-          id: `style-${sample.id}`,
-          sourceRef: `style:${sample.id}`,
-          tier: "L4_STYLE_GLOBAL",
-          authority: "user_confirmed",
-          renderMode: "verbatim",
-          reasonCodes: ["PINNED_STYLE_SAMPLE"],
-          content: sample.content,
-          status: sample.status,
-          sensitivity: sample.sensitivity,
-          selectedByUser: sample.status === "canonical",
-          signals: { relevance: 0.8, structuralProximity: 0.25, freshness: 1 },
-        }));
       }
       return candidates;
     },
   };
 }
 
-function validateHostContextCandidate(item, kind, expectedCommitId) {
+function validateHostOperationContext(item, expectedCommitId) {
   const allowed = (value, values) => typeof value === "string" && values.includes(value);
-  const summary = kind === "summary";
   const shapeValid = item
     && typeof item.id === "string"
     && item.id
@@ -561,30 +480,35 @@ function validateHostContextCandidate(item, kind, expectedCommitId) {
     && item.sourceRef
     && /^sha256:[0-9a-f]{64}$/.test(item.sourceHash)
     && item.sourceCommitId === expectedCommitId
-    && allowed(item.tier, summary ? ["L2_STRUCTURAL", "L3_KNOWLEDGE"] : ["L3_KNOWLEDGE"])
-    && item.status === "canonical"
-    && allowed(
-      item.authority,
-      summary
-        ? ["source_derived", "model_inferred"]
-        : ["user_confirmed", "source_derived", "model_inferred", "external_untrusted"],
-    )
+    && allowed(item.tier, ["L0_TARGET", "L1_LOCAL", "L2_STRUCTURAL", "L3_KNOWLEDGE", "L4_STYLE_GLOBAL"])
+    && allowed(item.status, ["canonical", "draft", "disputed", "archived", "rejected", "deleted"])
+    && allowed(item.authority, ["user_confirmed", "source_derived", "model_inferred", "external_untrusted"])
     && allowed(item.sensitivity, ["public", "local", "local_sensitive", "never_send"])
-    && item.renderMode === (summary ? "summary" : "constraint")
+    && allowed(item.renderMode, ["verbatim", "summary", "constraint"])
     && Array.isArray(item.reasonCodes)
     && item.reasonCodes.length
     && item.reasonCodes.every((reason) => typeof reason === "string" && reason.length > 0)
     && typeof item.content === "string"
-    && item.content
-    && Number.isInteger(item.revision)
-    && item.revision >= 0
-    && typeof item.generatedAt === "string"
-    && item.generatedAt.length > 0;
-  const sourceValid = summary
-    ? item?.sourceRef?.startsWith("summary:")
-    : item?.sourceRef?.startsWith("knowledge:");
-  if (!shapeValid || !sourceValid) {
-    throw new TypeError(`Host ${kind} context is malformed`);
+    && (item.content.length > 0 || item.tier === "L0_TARGET")
+    && typeof item.mandatory === "boolean"
+    && typeof item.selectedByUser === "boolean"
+    && item.signals
+    && ["relevance", "structuralProximity", "freshness", "risk"].every((key) => (
+      typeof item.signals[key] === "number"
+      && Number.isFinite(item.signals[key])
+      && item.signals[key] >= 0
+      && item.signals[key] <= 1
+    ));
+  const sourceValid = ["block:", "document:", "summary:", "knowledge:", "style:"]
+    .some((prefix) => item?.sourceRef?.startsWith(prefix));
+  const targetValid = item?.tier === "L0_TARGET"
+    ? (item.mandatory
+      && item.selectedByUser
+      && item.status === "canonical"
+      && item.authority === "user_confirmed")
+    : !item?.mandatory;
+  if (!shapeValid || !sourceValid || !targetValid) {
+    throw new TypeError("Host operation context is malformed");
   }
 }
 

@@ -24,6 +24,11 @@ description = "Allows the bundled editor to maintain project facts and constrain
 commands.allow = ["list_knowledge_items", "create_knowledge_item", "set_knowledge_item_status", "get_knowledge_context"]
 
 [[permission]]
+identifier = "allow-operation-context"
+description = "Allows the bundled editor to collect current target-bound Context candidates from authoritative document, structure, summary, knowledge and style sources."
+commands.allow = ["get_operation_context"]
+
+[[permission]]
 identifier = "allow-workspace-write"
 description = "Allows the bundled editor to create a chapter, save a block through optimistic concurrency and create audit commits."
 commands.allow = ["create_document", "save_block", "apply_reviewed_proposal"]

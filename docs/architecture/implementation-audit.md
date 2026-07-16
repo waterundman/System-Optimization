@@ -13,7 +13,7 @@
 | FR-02 自动保存、操作前提交、AI 接受提交、版本恢复 | 完成 | `workspace_commands`、快照/Commit DAG、操作前 `flushAll`、`ai_accept` 原子事务 | 继续补充真实崩溃故障注入，但主验收闭环已存在 |
 | FR-03 五种内置操作 | 完成 | 桌面续写/润色/压缩/扩写/批评，Operation Profile、严格产物解析 | 多 Provider contract 与浏览器完整流程已覆盖 |
 | FR-04 选区菜单、右键、快捷键、命令面板 | 部分 | 编辑器工具栏与选区/光标目标 | 缺右键菜单、键盘快捷键、命令面板；自动触发目前未启用 |
-| FR-05 Context 编译、预算、来源展示、敏感预检 | 部分 | Kernel Context Compiler、发送确认、`never_send`、Host summary source | 局部正文与风格仍由 WebView 组装；完整 Packet hash/资格策略尚未全部下沉 Host |
+| FR-05 Context 编译、预算、来源展示、敏感预检 | 部分 | Kernel Context Compiler、发送确认、`never_send`；统一 Host 命令已目标绑定地提供正文/结构/摘要/知识/风格并由页面复算哈希 | 最终 Packet 仍在 WebView 编译；Host 模型 capability 尚未持有并复算完整已确认 Packet |
 | FR-06 流式、取消、超时、有限重试、结构化校验 | 部分 | Rust 固定端点流式传输、取消/超时、严格 JSON 输出 | 缺显式有限重试策略、幂等重试 UI 与重试审计 |
 | FR-07 差异、逐项/整段接受拒绝、保留候选、冲突 | 部分 | 中文分层 diff、逐 hunk 决策、原子应用、冲突拒绝、不可变候选审计 | 缺“全部接受/全部拒绝”的批量交互和候选分支入口 |
 | FR-08 事实、约束、风格、摘要及 canonical 状态 | 完成 | schema v6 事实/约束库、authority/sensitivity/severity、canonical/archived/rejected、目标绑定 L3 Context；风格样本与分层摘要 | 自动事实抽取属于后续增强，不是 MVP 必需项 |
@@ -39,7 +39,7 @@
 
 ## 当前执行顺序
 
-1. `P0 / FR-05`：继续把正文/结构/风格 Context 资格与 Packet 复算下沉 Host。
+1. `P0 / FR-05`：把已确认 Context Packet 的不可变载荷与复算结果纳入一次性 Host 模型 capability。
 2. `P0 / FR-04 + FR-07`：右键、快捷键、命令面板，以及全部接受/拒绝交互。
 3. `P0 / FR-06`：有限重试、幂等审计和重试 UI。
 4. `P0 / FR-09`：在固定端点安全原则下设计通用 OpenAI-compatible 配置与白名单策略。

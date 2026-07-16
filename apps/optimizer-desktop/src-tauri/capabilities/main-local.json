@@ -9,6 +9,7 @@
     "allow-workspace-read",
     "allow-style-library",
     "allow-knowledge-library",
+    "allow-operation-context",
     "allow-workspace-write",
     "allow-document-lifecycle",
     "allow-summary-status-read",

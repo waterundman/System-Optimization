@@ -5,6 +5,7 @@ use std::path::{Component, Path, PathBuf};
 mod model_gateway;
 mod model_transport;
 mod operation_commands;
+mod operation_context;
 mod project_package;
 mod recent_projects;
 mod secrets;
@@ -21,6 +22,9 @@ pub use operation_commands::{
     ArtifactAudit, ContextPacketAudit, FailureAudit, LifecycleEventAudit, ModelUsageAudit,
     OperationAuditResponse, OperationCommandError, OperationCommandHost, PersistOperationResponse,
     PersistReviewResponse, ReviewAudit, ReviewEventAudit, RunAudit,
+};
+pub use operation_context::{
+    OperationContextCandidate, OperationContextSignals, OperationContextSpec,
 };
 pub use project_package::{
     ExportMarkdownResponse, NewProjectSpec, OpenedProject, ProjectInfo, ProjectPackageError,

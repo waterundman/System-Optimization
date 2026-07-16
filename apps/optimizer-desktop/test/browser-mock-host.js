@@ -86,6 +86,18 @@
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
     return `sha256:${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
   }
+  async function operationContextCandidate(input) {
+    return {
+      status: "canonical",
+      sensitivity: "local_sensitive",
+      mandatory: false,
+      selectedByUser: false,
+      signals: { relevance: 0.8, structuralProximity: 0.5, freshness: 1, risk: 0 },
+      ...input,
+      sourceHash: await contentHash(input.content),
+      sourceCommitId: workspace.headCommitId,
+    };
+  }
   function documentMutationResponse(reason) {
     summariesReady = false;
     const previousHeadCommitId = workspace.headCommitId;
@@ -219,6 +231,99 @@
             generatedAt: item.updatedAt,
           };
         }));
+    }
+    if (command === "get_operation_context") {
+      if (args.input.baseCommitId !== workspace.headCommitId || args.input.from > args.input.to) {
+        throw { code: "INVALID_OPERATION_CONTEXT", message: "Context binding changed" };
+      }
+      const target = workspace.blocks.find((item) => item.id === args.input.targetBlockId);
+      if (!target || target.revision !== args.input.targetBlockRevision || target.contentHash !== args.input.targetBlockHash) {
+        throw { code: "INVALID_OPERATION_CONTEXT", message: "Target changed" };
+      }
+      const document = workspace.documents.find((item) => item.id === target.documentId);
+      const payloads = [
+        operationContextCandidate({
+          id: `target-${target.id}-r${target.revision}`,
+          sourceRef: `block:${target.id}@r${target.revision}#${args.input.from}-${args.input.to}`,
+          tier: "L0_TARGET",
+          authority: "user_confirmed",
+          renderMode: "verbatim",
+          reasonCodes: ["USER_TARGET"],
+          content: target.plainText.slice(args.input.from, args.input.to),
+          mandatory: true,
+          selectedByUser: true,
+          signals: { relevance: 1, structuralProximity: 1, freshness: 1, risk: 0 },
+        }),
+        ...(args.input.from > 0 ? [operationContextCandidate({
+          id: `local-${target.id}-prefix-r${target.revision}`,
+          sourceRef: `block:${target.id}@r${target.revision}#prefix`,
+          tier: "L1_LOCAL",
+          authority: "source_derived",
+          renderMode: "verbatim",
+          reasonCodes: ["TARGET_PREFIX"],
+          content: target.plainText.slice(Math.max(0, args.input.from - 2_000), args.input.from),
+          signals: { relevance: 0.9, structuralProximity: 1, freshness: 1, risk: 0 },
+        })] : []),
+        ...(args.input.to < target.plainText.length ? [operationContextCandidate({
+          id: `local-${target.id}-suffix-r${target.revision}`,
+          sourceRef: `block:${target.id}@r${target.revision}#suffix`,
+          tier: "L1_LOCAL",
+          authority: "source_derived",
+          renderMode: "verbatim",
+          reasonCodes: ["TARGET_SUFFIX"],
+          content: target.plainText.slice(args.input.to, args.input.to + 2_000),
+          signals: { relevance: 0.9, structuralProximity: 1, freshness: 1, risk: 0 },
+        })] : []),
+        operationContextCandidate({
+          id: `structure-${document.id}-r${document.revision}`,
+          sourceRef: `document:${document.id}@r${document.revision}`,
+          tier: "L2_STRUCTURAL",
+          authority: "source_derived",
+          renderMode: "summary",
+          reasonCodes: ["DOCUMENT_STRUCTURE"],
+          content: `项目：${session.project.title}\n文档：${document.title}\n文档类型：${document.kind}`,
+          signals: { relevance: 0.8, structuralProximity: 1, freshness: 1, risk: 0 },
+        }),
+      ];
+      const summaries = await invoke("get_summary_context", { input: args.input });
+      for (const summary of summaries) {
+        payloads.push(operationContextCandidate({
+          ...summary,
+          mandatory: false,
+          selectedByUser: false,
+          signals: {
+            relevance: summary.tier === "L2_STRUCTURAL" ? 0.9 : 0.65,
+            structuralProximity: summary.tier === "L2_STRUCTURAL" ? 0.9 : 0.35,
+            freshness: 1,
+            risk: 0,
+          },
+        }));
+      }
+      const knowledge = await invoke("get_knowledge_context", { input: args.input });
+      for (const item of knowledge) {
+        payloads.push(operationContextCandidate({
+          ...item,
+          mandatory: false,
+          selectedByUser: item.authority === "user_confirmed",
+          signals: { relevance: 0.92, structuralProximity: 0.5, freshness: 1, risk: 0 },
+        }));
+      }
+      for (const style of styleSamples) {
+        payloads.push(operationContextCandidate({
+          id: `style-${style.id}-r${style.revision}`,
+          sourceRef: `style:${style.id}@r${style.revision}`,
+          tier: "L4_STYLE_GLOBAL",
+          status: style.status,
+          authority: "user_confirmed",
+          sensitivity: style.sensitivity,
+          renderMode: "verbatim",
+          reasonCodes: ["PINNED_STYLE_SAMPLE"],
+          content: style.content,
+          selectedByUser: style.status === "canonical",
+          signals: { relevance: 0.8, structuralProximity: 0.25, freshness: 1, risk: 0 },
+        }));
+      }
+      return Promise.all(payloads);
     }
     if (command === "create_document") {
       const index = workspace.documents.length + 1;

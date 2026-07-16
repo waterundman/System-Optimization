@@ -24,6 +24,7 @@ pub const REGISTERED_COMMANDS: &[&str] = &[
     "create_knowledge_item",
     "set_knowledge_item_status",
     "get_knowledge_context",
+    "get_operation_context",
     "save_block",
     "apply_reviewed_proposal",
     "get_version_history",

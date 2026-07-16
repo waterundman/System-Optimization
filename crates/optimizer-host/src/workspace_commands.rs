@@ -340,6 +340,7 @@ pub enum WorkspaceCommandError {
     DocumentValidation(String),
     StyleValidation(String),
     KnowledgeValidation(String),
+    ContextValidation(String),
     NoChanges,
     StoredContent {
         block_id: String,
@@ -357,6 +358,7 @@ impl WorkspaceCommandError {
             Self::DocumentValidation(_) => "INVALID_DOCUMENT",
             Self::StyleValidation(_) => "INVALID_STYLE_SAMPLE",
             Self::KnowledgeValidation(_) => "INVALID_KNOWLEDGE_ITEM",
+            Self::ContextValidation(_) => "INVALID_OPERATION_CONTEXT",
             Self::NoChanges => "NO_CHANGES",
             Self::StoredContent { .. } => "PROJECT_CONTENT_INVALID",
             Self::Json(_) => "BLOCK_CONTENT_INVALID",
@@ -378,6 +380,7 @@ impl WorkspaceCommandError {
             Self::DocumentValidation(message) => message.clone(),
             Self::StyleValidation(message) => message.clone(),
             Self::KnowledgeValidation(message) => message.clone(),
+            Self::ContextValidation(message) => message.clone(),
             Self::NoChanges => "Block content has not changed".into(),
             Self::StoredContent { block_id, .. } => {
                 format!("Stored content is invalid for block {block_id}")
@@ -408,6 +411,7 @@ impl std::error::Error for WorkspaceCommandError {
             | Self::DocumentValidation(_)
             | Self::StyleValidation(_)
             | Self::KnowledgeValidation(_)
+            | Self::ContextValidation(_)
             | Self::NoChanges
             | Self::Clock => None,
         }
@@ -1826,7 +1830,12 @@ fn workspace_document(record: DocumentRecord) -> WorkspaceDocument {
 }
 
 fn style_sample(record: StyleSampleRecord) -> Result<StyleSample, WorkspaceCommandError> {
-    if !matches!(record.status.as_str(), "canonical" | "archived")
+    if record.id.trim().is_empty()
+        || record.title.trim().is_empty()
+        || record.content.trim().is_empty()
+        || record.revision < 0
+        || record.content_hash != sha256(record.content.as_bytes())
+        || !matches!(record.status.as_str(), "canonical" | "archived")
         || !matches!(
             record.sensitivity.as_str(),
             "local_sensitive" | "never_send"

@@ -28,7 +28,7 @@ test("builds fixed host configurations for cloud and local providers", () => {
   assert.equal(settings.ollama.defaultModel, "qwen3:8b");
 });
 
-test("rejects tampered host summary context before authorization", async () => {
+test("rejects tampered unified host operation context before authorization", async () => {
   const providerSettings = defaultProviderSettings().deepseek;
   providerSettings.enabled = true;
   providerSettings.credentialExists = true;
@@ -72,26 +72,37 @@ test("rejects tampered host summary context before authorization", async () => {
       createChannel: () => ({ onmessage: null }),
       providerSettings,
       workspace,
-      projectTitle: "测试项目",
       block,
       from: 0,
       to: block.plainText.length,
       operationType: "polish",
-      loadSummaryContext: async () => [{
-        id: "summary-tampered",
-        sourceRef: "summary:project:project-tampered@commit-tampered",
-        sourceHash: `sha256:${"f".repeat(64)}`,
-        sourceCommitId: "commit-tampered",
-        tier: "L3_KNOWLEDGE",
-        status: "canonical",
-        authority: "source_derived",
-        sensitivity: "local_sensitive",
-        renderMode: "summary",
-        reasonCodes: ["PROJECT_SUMMARY"],
-        content: "已被篡改的摘要",
-        revision: 0,
-        generatedAt: "2026-07-16T00:00:00Z",
-      }],
+      loadOperationContext: async () => [
+        hostContextCandidate({
+          id: "target-tampered",
+          sourceRef: "block:block-tampered@r0#0-4",
+          sourceCommitId: "commit-tampered",
+          tier: "L0_TARGET",
+          authority: "user_confirmed",
+          renderMode: "verbatim",
+          reasonCode: "USER_TARGET",
+          content: "目标正文",
+          mandatory: true,
+          selectedByUser: true,
+          relevance: 1,
+          structuralProximity: 1,
+        }),
+        hostContextCandidate({
+          id: "summary-tampered",
+          sourceRef: "summary:project:project-tampered@commit-tampered",
+          sourceCommitId: "commit-tampered",
+          sourceHash: `sha256:${"f".repeat(64)}`,
+          tier: "L3_KNOWLEDGE",
+          authority: "source_derived",
+          renderMode: "summary",
+          reasonCode: "PROJECT_SUMMARY",
+          content: "已被篡改的摘要",
+        }),
+      ],
     }),
   );
   assert.deepEqual(hostCalls, ["persist_operation_bundle"]);
@@ -193,73 +204,92 @@ test("runs Context Compiler to host stream to persisted patch proposal without p
     createChannel: () => ({ onmessage: null }),
     providerSettings,
     workspace,
-    projectTitle: "测试项目",
     block,
     from: 0,
     to: 0,
     operationType: "continue_scene",
-    styleSamples: [
-      {
-        id: "style-canonical",
-        title: "短句",
-        content: "雨很轻。灯还亮着。",
-        status: "canonical",
-        sensitivity: "local_sensitive",
-      },
-      {
-        id: "style-archived",
-        title: "废弃样本",
-        content: "不应被重新召回。",
-        status: "archived",
-        sensitivity: "local_sensitive",
-      },
-      {
-        id: "style-local-only",
-        title: "仅本地",
-        content: "远程调用不可发送。",
-        status: "canonical",
-        sensitivity: "never_send",
-      },
-    ],
-    loadSummaryContext: async (binding) => {
-      hostCalls.push("get_summary_context");
+    loadOperationContext: async (binding) => {
+      hostCalls.push("get_operation_context");
       assert.equal(binding.baseCommitId, workspace.headCommitId);
       assert.equal(binding.targetBlockId, block.id);
-      const content = "项目摘要：这是宿主生成并绑定到当前 Commit 的摘要。";
-      return [{
-        id: "summary-project-1",
-        sourceRef: "summary:project:project-1@commit-1",
-        sourceHash: `sha256:${createHash("sha256").update(content).digest("hex")}`,
-        sourceCommitId: "commit-1",
-        tier: "L3_KNOWLEDGE",
-        status: "canonical",
-        authority: "source_derived",
-        sensitivity: "local_sensitive",
-        renderMode: "summary",
-        reasonCodes: ["PROJECT_SUMMARY"],
-        content,
-        revision: 0,
-        generatedAt: "2026-07-15T00:00:00Z",
-      }];
-    },
-    loadKnowledgeContext: async (binding) => {
-      hostCalls.push("get_knowledge_context");
-      assert.equal(binding.baseCommitId, workspace.headCommitId);
       assert.equal(binding.targetBlockHash, block.contentHash);
+      assert.equal(binding.from, 0);
+      assert.equal(binding.to, 0);
       return [
-        hostKnowledgeCandidate({
+        hostContextCandidate({
+          id: "target-block-1",
+          sourceRef: "block:block-1@r0#0-0",
+          tier: "L0_TARGET",
+          authority: "user_confirmed",
+          renderMode: "verbatim",
+          reasonCode: "USER_TARGET",
+          content: "",
+          mandatory: true,
+          selectedByUser: true,
+          relevance: 1,
+          structuralProximity: 1,
+        }),
+        hostContextCandidate({
+          id: "summary-project-1",
+          sourceRef: "summary:project:project-1@commit-1",
+          tier: "L3_KNOWLEDGE",
+          authority: "source_derived",
+          renderMode: "summary",
+          reasonCode: "PROJECT_SUMMARY",
+          content: "项目摘要：这是宿主生成并绑定到当前 Commit 的摘要。",
+        }),
+        hostContextCandidate({
           id: "fact-1",
           sourceRef: "knowledge:fact:fact-1@r0",
+          tier: "L3_KNOWLEDGE",
+          authority: "user_confirmed",
+          renderMode: "constraint",
           content: "事实【主角视觉】：主角左眼失明",
           sensitivity: "local_sensitive",
           reasonCode: "CANONICAL_FACT",
+          selectedByUser: true,
         }),
-        hostKnowledgeCandidate({
+        hostContextCandidate({
           id: "constraint-1",
           sourceRef: "knowledge:constraint:constraint-1@r0",
+          tier: "L3_KNOWLEDGE",
+          authority: "user_confirmed",
+          renderMode: "constraint",
           content: "硬约束【禁止剧透】：本章不得揭示凶手身份",
           sensitivity: "never_send",
           reasonCode: "PROJECT_HARD_CONSTRAINT",
+          selectedByUser: true,
+        }),
+        hostContextCandidate({
+          id: "style-canonical",
+          sourceRef: "style:style-canonical@r0",
+          tier: "L4_STYLE_GLOBAL",
+          authority: "user_confirmed",
+          renderMode: "verbatim",
+          content: "雨很轻。灯还亮着。",
+          reasonCode: "PINNED_STYLE_SAMPLE",
+          selectedByUser: true,
+        }),
+        hostContextCandidate({
+          id: "style-archived",
+          sourceRef: "style:style-archived@r0",
+          tier: "L4_STYLE_GLOBAL",
+          status: "archived",
+          authority: "user_confirmed",
+          renderMode: "verbatim",
+          content: "不应被重新召回。",
+          reasonCode: "PINNED_STYLE_SAMPLE",
+        }),
+        hostContextCandidate({
+          id: "style-local-only",
+          sourceRef: "style:style-local-only@r0",
+          tier: "L4_STYLE_GLOBAL",
+          authority: "user_confirmed",
+          renderMode: "verbatim",
+          content: "远程调用不可发送。",
+          sensitivity: "never_send",
+          reasonCode: "PINNED_STYLE_SAMPLE",
+          selectedByUser: true,
         }),
       ];
     },
@@ -270,7 +300,7 @@ test("runs Context Compiler to host stream to persisted patch proposal without p
 
   assert.equal(confirmedContext.operationIntentId, execution.intent.id);
   assert.ok(confirmedContext.items.length >= 1);
-  assert.ok(confirmedContext.items.some((item) => item.sourceRef === "style:style-canonical"));
+  assert.ok(confirmedContext.items.some((item) => item.sourceRef === "style:style-canonical@r0"));
   assert.ok(confirmedContext.items.some((item) => item.sourceRef === "summary:project:project-1@commit-1"));
   assert.ok(confirmedContext.items.some((item) => item.sourceRef === "knowledge:fact:fact-1@r0"));
   assert.equal(
@@ -282,16 +312,15 @@ test("runs Context Compiler to host stream to persisted patch proposal without p
       .filter((item) => item.sourceRef.startsWith("style:"))
       .map((item) => [item.sourceRef, item.reason])),
     {
-      "style:style-archived": "INELIGIBLE_STATUS",
-      "style:style-local-only": "POLICY_DENIED",
+      "style:style-archived@r0": "INELIGIBLE_STATUS",
+      "style:style-local-only@r0": "POLICY_DENIED",
     },
   );
   assert.equal(execution.result.kind, "patch_proposal");
   assert.equal(execution.result.proposal.hunks.length, 1);
   assert.equal(execution.result.proposal.hunks[0].replacement, "你好，世界");
-  assert.deepEqual(hostCalls.slice(0, 4), [
-    "get_summary_context",
-    "get_knowledge_context",
+  assert.deepEqual(hostCalls.slice(0, 3), [
+    "get_operation_context",
     "authorize_model_request",
     "execute_authorized_model_stream",
   ]);
@@ -303,20 +332,37 @@ test("runs Context Compiler to host stream to persisted patch proposal without p
   assert.equal(persisted[0].includes("secret-never"), false);
 });
 
-function hostKnowledgeCandidate({ id, sourceRef, content, sensitivity, reasonCode }) {
+function hostContextCandidate({
+  id,
+  sourceRef,
+  sourceCommitId = "commit-1",
+  sourceHash,
+  tier,
+  status = "canonical",
+  authority,
+  sensitivity = "local_sensitive",
+  renderMode,
+  reasonCode,
+  content,
+  mandatory = false,
+  selectedByUser = false,
+  relevance = 0.8,
+  structuralProximity = 0.5,
+}) {
   return {
-    id: `knowledge-${id}-r0`,
+    id,
     sourceRef,
-    sourceHash: `sha256:${createHash("sha256").update(content).digest("hex")}`,
-    sourceCommitId: "commit-1",
-    tier: "L3_KNOWLEDGE",
-    status: "canonical",
-    authority: "user_confirmed",
+    sourceHash: sourceHash ?? `sha256:${createHash("sha256").update(content).digest("hex")}`,
+    sourceCommitId,
+    tier,
+    status,
+    authority,
     sensitivity,
-    renderMode: "constraint",
+    renderMode,
     reasonCodes: [reasonCode],
     content,
-    revision: 0,
-    generatedAt: "2026-07-16T00:00:00Z",
+    mandatory,
+    selectedByUser,
+    signals: { relevance, structuralProximity, freshness: 1, risk: 0 },
   };
 }
