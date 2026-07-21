@@ -17,6 +17,8 @@ export interface SuccessfulPersistenceInput {
   readonly result: OperationExecutionResult;
   readonly startedAt: string;
   readonly findingsArtifactId?: string;
+  readonly providerConfigurationId?: string;
+  readonly providerEndpointId?: string;
 }
 
 export interface FailedPersistenceInput {
@@ -24,12 +26,19 @@ export interface FailedPersistenceInput {
   readonly error: OperationExecutionError;
   readonly startedAt: string;
   readonly requestedModel?: string;
+  readonly providerConfigurationId?: string;
+  readonly providerEndpointId?: string;
 }
 
 export async function buildSuccessfulPersistenceBundle(
   input: SuccessfulPersistenceInput,
   hasher: ContentHasher,
 ): Promise<OperationPersistenceBundleV1> {
+  assertProviderProvenance(
+    input.result.providerId,
+    input.providerConfigurationId,
+    input.providerEndpointId,
+  );
   assertBinding(input.intent, input.result.contextPacket.operationIntentId, input.result.contextPacket.projectId, input.result.contextPacket.baseCommitId);
   assertHistory(input.result.history, "review");
   const updatedAt = lastOccurredAt(input.result.history);
@@ -50,6 +59,12 @@ export async function buildSuccessfulPersistenceBundle(
       projectId: input.intent.projectId,
       baseCommitId: input.intent.baseCommitId,
       providerId: input.result.providerId,
+      ...(input.providerConfigurationId !== undefined
+        ? { providerConfigurationId: input.providerConfigurationId }
+        : {}),
+      ...(input.providerEndpointId !== undefined
+        ? { providerEndpointId: input.providerEndpointId }
+        : {}),
       model: required("result.model", input.result.model),
       state: "review",
       responseId: required("result.responseId", input.result.responseId),
@@ -70,6 +85,11 @@ export async function buildSuccessfulPersistenceBundle(
 export function buildFailedPersistenceBundle(
   input: FailedPersistenceInput,
 ): OperationPersistenceBundleV1 {
+  assertProviderProvenance(
+    input.error.providerId,
+    input.providerConfigurationId,
+    input.providerEndpointId,
+  );
   assertHistory(input.error.history, input.error.state);
   if (input.error.contextPacket) {
     assertBinding(
@@ -89,6 +109,12 @@ export function buildFailedPersistenceBundle(
       projectId: input.intent.projectId,
       baseCommitId: input.intent.baseCommitId,
       providerId: input.error.providerId,
+      ...(input.providerConfigurationId !== undefined
+        ? { providerConfigurationId: input.providerConfigurationId }
+        : {}),
+      ...(input.providerEndpointId !== undefined
+        ? { providerEndpointId: input.providerEndpointId }
+        : {}),
       model: firstNonEmpty(input.error.model, input.requestedModel) ?? "unresolved",
       state: input.error.state,
       failure: {
@@ -197,6 +223,31 @@ function assertBinding(
     throw new OperationStageError(
       "CONTEXT_INVALID",
       "Persistence input is bound to a different operation, project or commit",
+    );
+  }
+}
+
+function assertProviderProvenance(
+  providerId: string,
+  configurationId: string | undefined,
+  endpointId: string | undefined,
+): void {
+  if (providerId === "openai_compatible") {
+    const endpoint = required("providerEndpointId", endpointId);
+    const configuration = required("providerConfigurationId", configurationId);
+    if (!/^endpoint-[a-f0-9]{32}$/.test(endpoint)) {
+      throw new OperationStageError("INTERNAL_FAILURE", "providerEndpointId is invalid");
+    }
+    if (configuration !== `provider-openai-compatible-${endpoint}`) {
+      throw new OperationStageError(
+        "INTERNAL_FAILURE",
+        "providerConfigurationId does not match providerEndpointId",
+      );
+    }
+  } else if (endpointId !== undefined) {
+    throw new OperationStageError(
+      "INTERNAL_FAILURE",
+      "providerEndpointId is only valid for openai_compatible",
     );
   }
 }

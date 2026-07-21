@@ -116,6 +116,41 @@ test("persists provider settings through credential references, never API keys",
     credentialRef: "secret://providers/ollama/default",
   }).ok, true);
 
+  const endpointId = `endpoint-${"a".repeat(32)}`;
+  const compatible = {
+    ...configuration,
+    id: `provider-openai-compatible-${endpointId}`,
+    providerId: "openai_compatible",
+    defaultModel: "acme-writer",
+    credentialRef: `secret://providers/openai-compatible/${endpointId}`,
+    openaiCompatible: {
+      endpointId,
+      endpointRevision: 1,
+      jsonObject: false,
+      streamUsage: false,
+      maxOutputTokenField: "max_tokens",
+    },
+  };
+  assert.equal(validateModelProviderConfiguration(compatible).ok, true);
+  const unboundCompatible = validateModelProviderConfiguration({
+    ...compatible,
+    openaiCompatible: undefined,
+  });
+  assert.equal(unboundCompatible.ok, false);
+  const capabilityInjection = validateModelProviderConfiguration({
+    ...compatible,
+    openaiCompatible: { ...compatible.openaiCompatible, baseUrl: "https://attacker.invalid" },
+  });
+  assert.equal(capabilityInjection.ok, false);
+  assert.equal(validateModelProviderConfiguration({
+    ...compatible,
+    id: "provider-forged",
+  }).ok, false);
+  assert.equal(validateModelProviderConfiguration({
+    ...compatible,
+    credentialRef: "secret://providers/openai-compatible/endpoint-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  }).ok, false);
+
   const leaked = validateModelProviderConfiguration({
     ...configuration,
     apiKey: "must-not-be-persisted",

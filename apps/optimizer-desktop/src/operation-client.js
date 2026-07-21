@@ -4,6 +4,7 @@ import {
 } from "./runtime/packages/kernel/src/index.js";
 import {
   ProviderError,
+  createOpenAICompatibleProfile,
   createQwenProfile,
   officialProviderProfiles,
 } from "./runtime/packages/model-gateway/src/index.js";
@@ -47,6 +48,11 @@ export const PROVIDER_PRESETS = Object.freeze({
     defaultModel: "qwen3:8b",
     credentialRequired: false,
   }),
+  openai_compatible: Object.freeze({
+    label: "OpenAI-compatible",
+    defaultModel: "",
+    credentialRequired: true,
+  }),
 });
 
 export function providerRequiresCredential(providerId) {
@@ -65,19 +71,26 @@ export function defaultProviderSettings() {
       qwenRegion: "china",
       qwenWorkspaceId: "",
       credentialExists: false,
+      trustedEndpoint: null,
+      trustedEndpointId: "",
     },
   ]));
 }
 
 export function providerConfiguration(settings, now = new Date().toISOString()) {
   const providerId = settings.providerId;
+  const trustedEndpoint = providerId === "openai_compatible"
+    ? validateTrustedEndpoint(settings.trustedEndpoint)
+    : null;
   const configuration = {
     schemaVersion: 1,
-    id: `provider-${providerId}-default`,
+    id: trustedEndpoint
+      ? `provider-openai-compatible-${trustedEndpoint.id}`
+      : `provider-${providerId}-default`,
     providerId,
     enabled: settings.enabled === true,
     defaultModel: String(settings.defaultModel ?? "").trim(),
-    credentialRef: credentialReference(providerId),
+    credentialRef: credentialReference(providerId, trustedEndpoint),
     defaultTimeoutMs: 60_000,
     maxRequestBytes: 16 * 1024 * 1024,
     updatedAt: now,
@@ -90,11 +103,23 @@ export function providerConfiguration(settings, now = new Date().toISOString()) 
         : {}),
     };
   }
+  if (trustedEndpoint) {
+    configuration.openaiCompatible = {
+      endpointId: trustedEndpoint.id,
+      endpointRevision: trustedEndpoint.revision,
+      jsonObject: trustedEndpoint.capabilities.jsonObject,
+      streamUsage: trustedEndpoint.capabilities.streamUsage,
+      maxOutputTokenField: trustedEndpoint.capabilities.maxOutputTokenField,
+    };
+  }
   return configuration;
 }
 
-export function credentialReference(providerId) {
+export function credentialReference(providerId, trustedEndpoint = null) {
   if (!(providerId in PROVIDER_PRESETS)) throw new TypeError("Unsupported provider");
+  if (providerId === "openai_compatible") {
+    return validateTrustedEndpoint(trustedEndpoint).credentialRef;
+  }
   return `secret://providers/${providerId}/default`;
 }
 
@@ -103,7 +128,7 @@ export async function runDesktopOperation(input) {
   const hasher = browserHasher();
   const ids = randomIds();
   const configuration = providerConfiguration(input.providerSettings, startedAt);
-  const profile = profileFor(configuration);
+  const profile = profileFor(configuration, input.providerSettings.trustedEndpoint);
   const intent = operationIntent(input, ids.next("intent"), startedAt);
   let confirmedPacket;
   const provider = new HostModelProvider({
@@ -193,6 +218,10 @@ export async function runDesktopOperation(input) {
       result,
       startedAt,
       findingsArtifactId: result.kind === "findings" ? ids.next("findings") : undefined,
+      providerConfigurationId: configuration.id,
+      ...(configuration.openaiCompatible
+        ? { providerEndpointId: configuration.openaiCompatible.endpointId }
+        : {}),
     }, hasher);
     await input.invokeHost("persist_operation_bundle", {
       input: serializeOperationPersistenceBundle(bundle),
@@ -206,6 +235,10 @@ export async function runDesktopOperation(input) {
           error,
           startedAt,
           requestedModel: configuration.defaultModel,
+          providerConfigurationId: configuration.id,
+          ...(configuration.openaiCompatible
+            ? { providerEndpointId: configuration.openaiCompatible.endpointId }
+            : {}),
         });
         await input.invokeHost("persist_operation_bundle", {
           input: serializeOperationPersistenceBundle(bundle),
@@ -465,14 +498,38 @@ class HostModelProvider {
   }
 }
 
-function profileFor(configuration) {
+function profileFor(configuration, trustedEndpoint = null) {
   if (configuration.providerId === "qwen") {
     return createQwenProfile({
       region: configuration.qwen.region,
       workspaceId: configuration.qwen.workspaceId,
     });
   }
+  if (configuration.providerId === "openai_compatible") {
+    return createOpenAICompatibleProfile(
+      validateTrustedEndpoint(trustedEndpoint),
+      configuration.defaultModel,
+    );
+  }
   return officialProviderProfiles[configuration.providerId];
+}
+
+function validateTrustedEndpoint(endpoint) {
+  if (!endpoint
+    || !/^endpoint-[a-f0-9]{32}$/.test(endpoint.id)
+    || endpoint.revision !== 1
+    || typeof endpoint.label !== "string"
+    || typeof endpoint.baseUrl !== "string"
+    || typeof endpoint.credentialRef !== "string"
+    || !endpoint.capabilities
+    || typeof endpoint.capabilities.jsonObject !== "boolean"
+    || typeof endpoint.capabilities.streamUsage !== "boolean"
+    || !["max_tokens", "max_completion_tokens"].includes(
+      endpoint.capabilities.maxOutputTokenField,
+    )) {
+    throw new TypeError("A Host-issued trusted OpenAI-compatible endpoint is required");
+  }
+  return endpoint;
 }
 
 function operationIntent(input, id, createdAt) {

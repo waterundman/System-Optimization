@@ -688,12 +688,21 @@ fn validate_model_prompt(
             "Context Packet output budget differs from the trusted operation",
         ));
     }
-    let expected_response_format =
-        if input.request.configuration.provider_id == ModelProviderId::Minimax {
-            ModelResponseFormat::Text
-        } else {
-            ModelResponseFormat::JsonObject
-        };
+    let json_object_supported = match input.request.configuration.provider_id {
+        ModelProviderId::Minimax => false,
+        ModelProviderId::OpenAICompatible => input
+            .request
+            .configuration
+            .openai_compatible
+            .as_ref()
+            .is_some_and(|configuration| configuration.json_object),
+        _ => true,
+    };
+    let expected_response_format = if json_object_supported {
+        ModelResponseFormat::JsonObject
+    } else {
+        ModelResponseFormat::Text
+    };
     if input.request.request.max_output_tokens != Some(expected_reserved_output as u32)
         || input.request.request.model.as_deref()
             != Some(input.request.configuration.default_model.as_str())

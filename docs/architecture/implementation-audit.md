@@ -1,7 +1,7 @@
 # Optimizer Text 工程基线完成度审计
 
 - 基线：`Optimizer_Kernel_文本优化器工程设计文档_v1.0.docx`
-- 审计日期：2026-07-16
+- 审计日期：2026-07-21
 - 审计目标：以设计文档中的 MVP MUST/SHOULD 和第 25 章验收清单为准，不以已有实现反向缩小范围
 - 状态定义：`完成` 表示当前代码和测试有直接证据；`部分` 表示主链已存在但验收项不完整；`缺失` 表示没有可运行实现
 
@@ -17,7 +17,7 @@
 | FR-06 流式、取消、超时、有限重试、结构化校验 | 完成 | Rust 固定端点流式传输、取消/超时、严格 JSON 输出；Runner 仅在响应开始前执行最多 3 次有界尝试，桌面默认 2 次且每次重新取得 Host capability；schema v8 原子保存不可变 attempt 审计，失败后可用精确 revision/hash/选区创建全新 Operation 重试 | 响应开始后禁止自动重试，显式重试不复用部分输出；Provider fallback 与费用策略单独设计 |
 | FR-07 差异、逐项/整段接受拒绝、保留候选、冲突 | 完成 | 中文分层 diff、逐 hunk 与全部接受/拒绝、atomic group 事件重放、逐 revision 审计、原子应用和冲突拒绝；候选中心从不可变 artifact/event 恢复跨会话审查；schema v7 以独立 Commit 与物化快照保存候选分支且不移动主 HEAD | 当前分支入口采用 exact-base 保护；冲突候选保持可审计但不自动 rebase，后续增强不能以静默覆盖替代 |
 | FR-08 事实、约束、风格、摘要及 canonical 状态 | 完成 | schema v6 事实/约束库、authority/sensitivity/severity、canonical/archived/rejected、目标绑定 L3 Context；风格样本与分层摘要 | 自动事实抽取属于后续增强，不是 MVP 必需项 |
-| FR-09 OpenAI-compatible 与 Ollama | 部分 | DeepSeek、Qwen、Kimi、MiniMax 固定官方端点；Ollama 固定回环与模型发现 | 缺通用 OpenAI-compatible 手工配置/能力探测；当前安全模型故意不接受任意 URL |
+| FR-09 OpenAI-compatible 与 Ollama | 完成 | DeepSeek、Qwen、Kimi、MiniMax 固定官方端点；Ollama 固定回环；Host 设备级可信端点注册表、逐字 HTTPS origin 确认、端点专属 Secret、保守能力声明、受限 `/models` 探测、禁代理/重定向与 schema v9 来源审计 | `/models` 只验证当时可达性与模型列表，不谎称自动证明 JSON/usage 等语义能力；通用端点不开放 HTTP、任意端口、私网 IP literal、自定义 CA 或系统代理 |
 | FR-10 日志、token/费用、模型、来源、反馈 | 部分 | Operation/Context/usage/lifecycle/Artifact/Review 本地审计 | 缺费用换算、接受率/二次编辑率聚合、用户反馈与诊断导出 |
 | FR-11 备份、迁移备份、完整性与恢复向导 | 部分 | 迁移前在线备份、快照 checksum、Store invariant | 缺用户可见项目备份和损坏恢复向导、恢复演练入口 |
 | FR-12 停顿/段落补全 | 缺失（MAY） | 默认不启用，符合非目标 | P1 实验项，不阻塞 MVP MUST |
@@ -28,7 +28,7 @@
 |---|---|---|
 | 事务与静默覆盖保护 | 完成 | Block/Commit/Review/Operation 原子事务、乐观并发、快照恢复与浏览器回归 |
 | Kernel 隔离 | 完成 | 架构检查阻止 Kernel 依赖 UI/Tauri/SQLite/Provider SDK |
-| 密钥隔离 | 完成（Windows） | Credential Manager、opaque ref、WebView 无明文读取、日志脱敏测试；其他桌面平台尚未实现 |
+| 密钥隔离 | 完成（Windows） | Credential Manager、内置固定槽位与可信端点专属 opaque ref、WebView 无明文读取、日志脱敏测试；其他桌面平台尚未实现 |
 | 离线编辑/版本/导出/本地摘要 | 完成 | 所有本地能力无 npm 运行时依赖；摘要默认零网络 |
 | 可访问性 | 部分 | 语义按钮/aria-label、右键菜单方向键、命令面板搜索/Enter/Escape 与全局快捷键；缺焦点陷阱和屏幕阅读器完整验收 |
 | 国际化 | 部分 | Unicode/语言标签/中文 diff；界面字符串尚未资源化 |
@@ -39,9 +39,8 @@
 
 ## 当前执行顺序
 
-1. `P0 / FR-09`：在固定端点安全原则下设计通用 OpenAI-compatible 配置、白名单与能力探测策略。
-2. `P1 / FR-10`：费用换算、接受率/二次编辑率聚合、反馈与安全诊断导出。
-3. `P1`：JSON 导出、项目备份/恢复向导、性能基准、可访问性和国际化。
-4. `M5`：插件/Obsidian contract、安装签名、SBOM、依赖审计与更新。
+1. `P1 / FR-10`：费用换算、接受率/二次编辑率聚合、反馈与安全诊断导出。
+2. `P1`：JSON 导出、项目备份/恢复向导、性能基准、可访问性和国际化。
+3. `M5`：插件/Obsidian contract、安装签名、SBOM、依赖审计与更新。
 
 每一轮实现后必须更新本文件状态与直接证据；只有所有 MVP MUST 和第 25 章工程验收均有可复核证据时，才可以声明完整目标完成。Beta 用户指标需要真实外部数据，不能用测试替代。

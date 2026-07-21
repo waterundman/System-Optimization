@@ -118,7 +118,53 @@ export const ollamaProfile: ProviderProfile = freezeProfile({
   verifiedAt: "2026-07-15",
 });
 
-export const officialProviderProfiles: Readonly<Record<ProviderProfile["id"], ProviderProfile>> = Object.freeze({
+export interface TrustedOpenAICompatibleEndpointProfileInput {
+  readonly id: string;
+  readonly label: string;
+  readonly baseUrl: string;
+  readonly updatedAt: string;
+  readonly capabilities: {
+    readonly jsonObject: boolean;
+    readonly streamUsage: boolean;
+    readonly maxOutputTokenField: "max_tokens" | "max_completion_tokens";
+  };
+}
+
+export function createOpenAICompatibleProfile(
+  endpoint: TrustedOpenAICompatibleEndpointProfileInput,
+  defaultModel: string,
+): ProviderProfile {
+  if (!/^endpoint-[a-f0-9]{32}$/.test(endpoint.id)) {
+    throw new ProviderError({
+      kind: "configuration",
+      providerId: "openai_compatible",
+      message: "OpenAI-compatible endpoint ID is not Host-issued",
+    });
+  }
+  return freezeProfile({
+    id: "openai_compatible",
+    label: endpoint.label,
+    dialect: "openai_compatible",
+    locality: "remote",
+    baseUrl: endpoint.baseUrl,
+    authentication: "bearer",
+    defaultModel: defaultModel.trim(),
+    knownModels: [],
+    maxOutputTokenField: endpoint.capabilities.maxOutputTokenField,
+    streamContentMode: "delta",
+    capabilities: {
+      streaming: true,
+      reasoning: false,
+      jsonObject: endpoint.capabilities.jsonObject,
+      toolCalls: false,
+      usageInStream: endpoint.capabilities.streamUsage,
+    },
+    documentationUrl: endpoint.baseUrl,
+    verifiedAt: endpoint.updatedAt.slice(0, 10),
+  });
+}
+
+export const officialProviderProfiles: Readonly<Record<Exclude<ProviderProfile["id"], "openai_compatible">, ProviderProfile>> = Object.freeze({
   deepseek: deepSeekProfile,
   qwen: qwenProfile,
   kimi: kimiProfile,

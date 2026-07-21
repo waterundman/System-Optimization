@@ -46,6 +46,25 @@ await page.getByRole("checkbox", { name: "启用此供应商" }).check();
 await page.getByRole("button", { name: "保存模型设置" }).click();
 await page.getByText(/请求只会发往固定回环端点/).waitFor();
 await page.screenshot({ path: resolve(screenshotDirectory, "ollama-settings.png"), fullPage: true });
+await page.getByRole("button", { name: "OpenAI-compatible" }).click();
+await page.getByLabel("名称").fill("团队模型网关");
+await page.getByLabel("HTTPS 主机名").fill("api.acme.ai");
+await page.getByLabel("Base path").fill("/openai/v1");
+await page.getByLabel("再次输入确认 Origin").fill("https://api.acme.ai");
+await page.getByRole("button", { name: "确认并信任端点" }).click();
+await page.getByText("实际目标：", { exact: true }).waitFor();
+assert.equal(
+  await page.locator(".compatible-settings-form code").textContent(),
+  "https://api.acme.ai/openai/v1/chat/completions",
+);
+await page.getByLabel("默认模型").fill("writer-small");
+await page.getByLabel("API Key").fill("visual-compatible-key");
+await page.getByRole("checkbox", { name: "启用此端点" }).check();
+await page.getByRole("button", { name: "保存端点设置" }).click();
+await page.getByText(/请求目标仍由 Host 端点 ID 解析/).waitFor();
+await page.getByRole("button", { name: "探测模型列表" }).click();
+await page.getByText(/端点可达，返回 2 个模型 ID/).waitFor();
+await page.screenshot({ path: resolve(screenshotDirectory, "compatible-settings.png"), fullPage: true });
 await page.getByRole("button", { name: "DeepSeek" }).click();
 await page.getByRole("button", { name: "收起模型" }).click();
 
@@ -161,7 +180,7 @@ page.once("dialog", (dialog) => dialog.accept("AI 候选：车站续写"));
 await page.getByRole("button", { name: "保存为分支" }).click();
 await page.getByText(/当前正文与主分支未改变/).waitFor();
 await page.getByText("雨停了。", { exact: true }).waitFor();
-await page.getByText("AI 候选：车站续写").waitFor();
+await page.getByText("AI 候选：车站续写", { exact: true }).waitFor();
 await page.screenshot({ path: resolve(screenshotDirectory, "candidate-branch.png"), fullPage: true });
 await page.getByRole("button", { name: "应用已接受修改" }).click();
 await page.getByText("雨停了。她推开车站的门。").waitFor();
@@ -171,6 +190,20 @@ await page.screenshot({ path: resolve(screenshotDirectory, "applied.png"), fullP
 await page.setViewportSize({ width: 960, height: 700 });
 assert.equal(await page.getByRole("button", { name: "关闭项目" }).isVisible(), true);
 await page.screenshot({ path: resolve(screenshotDirectory, "minimum-width.png"), fullPage: true });
+
+const createPage = await browser.newPage({ viewport: { width: 1100, height: 760 } });
+createPage.on("pageerror", (error) => errors.push(error.message));
+createPage.on("console", (message) => {
+  if (message.type() === "error") errors.push(message.text());
+});
+await createPage.addInitScript({ path: resolve(testDirectory, "browser-mock-host.js") });
+await createPage.goto("http://127.0.0.1:4173/?recentWelcome=1", { waitUntil: "networkidle" });
+await createPage.getByLabel("作品名称").fill("表单快照作品");
+await createPage.getByLabel("保存到").fill("W:\\写作");
+await createPage.getByLabel("项目包名称").fill("form-snapshot");
+await createPage.getByRole("button", { name: "创建并进入" }).click();
+await createPage.getByText("表单快照作品", { exact: true }).waitFor();
+await createPage.close();
 
 assert.deepEqual(errors, []);
 await browser.close();

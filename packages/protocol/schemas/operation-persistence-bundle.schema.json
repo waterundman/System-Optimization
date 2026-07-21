@@ -19,7 +19,9 @@
         "operationIntentId": { "type": "string", "minLength": 1 },
         "projectId": { "type": "string", "minLength": 1 },
         "baseCommitId": { "type": "string", "minLength": 1 },
-        "providerId": { "enum": ["deepseek", "qwen", "kimi", "minimax", "ollama"] },
+        "providerId": { "enum": ["deepseek", "qwen", "kimi", "minimax", "ollama", "openai_compatible"] },
+        "providerConfigurationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "providerEndpointId": { "type": "string", "pattern": "^endpoint-[a-f0-9]{32}$" },
         "model": { "type": "string", "minLength": 1 },
         "state": { "enum": ["review", "failed", "cancelled"] },
         "responseId": { "type": "string", "minLength": 1 },
@@ -48,7 +50,22 @@
         },
         "startedAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
-      }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "providerId": { "const": "openai_compatible" } } },
+          "then": {
+            "required": ["providerConfigurationId", "providerEndpointId"],
+            "properties": {
+              "providerConfigurationId": {
+                "type": "string",
+                "pattern": "^provider-openai-compatible-endpoint-[a-f0-9]{32}$"
+              }
+            }
+          },
+          "else": { "not": { "required": ["providerEndpointId"] } }
+        }
+      ]
     },
     "contextPacket": {
       "type": "object",

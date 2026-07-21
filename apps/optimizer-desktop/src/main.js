@@ -55,6 +55,8 @@ const state = {
   selectedProviderId: "deepseek",
   providerSettings: loadProviderSettings(),
   ollamaDiscovery: null,
+  trustedModelEndpoints: [],
+  compatibleDiscovery: null,
   versionHistory: null,
   reviewCandidates: [],
   candidateBusy: null,
@@ -140,6 +142,9 @@ function loadProviderSettings() {
           : defaults[providerId].defaultModel,
         qwenRegion: typeof value.qwenRegion === "string" ? value.qwenRegion : "china",
         qwenWorkspaceId: typeof value.qwenWorkspaceId === "string" ? value.qwenWorkspaceId : "",
+        trustedEndpointId: typeof value.trustedEndpointId === "string"
+          ? value.trustedEndpointId
+          : "",
       };
     }
   } catch {
@@ -156,6 +161,7 @@ function persistProviderSettings() {
       defaultModel: value.defaultModel,
       qwenRegion: value.qwenRegion,
       qwenWorkspaceId: value.qwenWorkspaceId,
+      trustedEndpointId: value.trustedEndpointId || "",
     },
   ]));
   localStorage.setItem(PROVIDER_SETTINGS_KEY, JSON.stringify(safe));
@@ -164,9 +170,13 @@ function persistProviderSettings() {
 async function refreshProviderSecretStatus() {
   const entries = await Promise.all(Object.keys(PROVIDER_PRESETS).map(async (providerId) => {
     if (!providerRequiresCredential(providerId)) return [providerId, false];
+    const endpoint = providerId === "openai_compatible"
+      ? state.providerSettings[providerId].trustedEndpoint
+      : null;
+    if (providerId === "openai_compatible" && !endpoint) return [providerId, false];
     try {
       const status = await invokeHost("has_provider_secret", {
-        reference: credentialReference(providerId),
+        reference: credentialReference(providerId, endpoint),
       });
       return [providerId, status.exists === true];
     } catch {
@@ -181,8 +191,30 @@ async function refreshProviderSecretStatus() {
   }
 }
 
+async function refreshTrustedModelEndpoints() {
+  const endpoints = await invokeHost("list_trusted_model_endpoints");
+  state.trustedModelEndpoints = Array.isArray(endpoints)
+    ? endpoints.filter((endpoint) => endpoint
+      && /^endpoint-[a-f0-9]{32}$/.test(endpoint.id)
+      && endpoint.revision === 1
+      && typeof endpoint.baseUrl === "string"
+      && typeof endpoint.credentialRef === "string")
+    : [];
+  const settings = state.providerSettings.openai_compatible;
+  const trustedEndpoint = state.trustedModelEndpoints.find(
+    (endpoint) => endpoint.id === settings.trustedEndpointId,
+  ) ?? null;
+  state.providerSettings.openai_compatible = {
+    ...settings,
+    trustedEndpoint,
+    trustedEndpointId: trustedEndpoint?.id ?? "",
+    enabled: trustedEndpoint ? settings.enabled : false,
+  };
+}
+
 async function bootstrap() {
   try {
+    await refreshTrustedModelEndpoints();
     state.session = await invokeHost("get_project_session");
     if (state.session.isOpen) await loadWorkspace();
     else {
@@ -338,17 +370,16 @@ function formValue(form, name) {
 async function createProject(event) {
   event.preventDefault();
   const form = event.currentTarget;
+  const input = {
+    schemaVersion: 1,
+    parentDirectory: formValue(form, "parentDirectory"),
+    folderName: formValue(form, "folderName"),
+    title: formValue(form, "title"),
+    language: formValue(form, "language"),
+  };
   setFormBusy(form, true);
   try {
-    state.session = await invokeHost("create_project", {
-      input: {
-        schemaVersion: 1,
-        parentDirectory: formValue(form, "parentDirectory"),
-        folderName: formValue(form, "folderName"),
-        title: formValue(form, "title"),
-        language: formValue(form, "language"),
-      },
-    });
+    state.session = await invokeHost("create_project", { input });
     setNotice(null, null);
     await loadWorkspace();
   } catch (error) {
@@ -362,11 +393,13 @@ async function createProject(event) {
 async function openProject(event) {
   event.preventDefault();
   const form = event.currentTarget;
+  const input = {
+    schemaVersion: 1,
+    projectDirectory: formValue(form, "projectDirectory"),
+  };
   setFormBusy(form, true);
   try {
-    state.session = await invokeHost("open_project", {
-      input: { schemaVersion: 1, projectDirectory: formValue(form, "projectDirectory") },
-    });
+    state.session = await invokeHost("open_project", { input });
     setNotice(null, null);
     await loadWorkspace();
   } catch (error) {
@@ -398,6 +431,7 @@ async function loadWorkspace() {
   state.summaryInvalidations = summaryInvalidations;
   state.reviewCandidates = reviewCandidates;
   state.selectedDocumentId = selectInitialDocument(state.workspace, preferred);
+  await refreshTrustedModelEndpoints();
   await refreshProviderSecretStatus();
   renderWorkspace();
   scheduleSummaryRefresh();
@@ -2179,6 +2213,10 @@ function providerDrawer() {
       )),
     ),
   ]);
+  if (providerId === "openai_compatible") {
+    drawer.append(compatibleProviderPanel());
+    return drawer;
+  }
   const form = element("form", { className: "provider-form" }, [
     element("div", { className: `credential-status${!credentialRequired || settings.credentialExists ? " connected" : ""}` }, [
       element("span", { className: "status-dot" }),
@@ -2213,6 +2251,128 @@ function providerDrawer() {
   form.addEventListener("submit", saveProviderSettings);
   drawer.append(form);
   return drawer;
+}
+
+function compatibleProviderPanel() {
+  const settings = state.providerSettings.openai_compatible;
+  const endpoint = settings.trustedEndpoint;
+  const endpointSelect = element("select", { name: "trustedEndpointId" }, [
+    element("option", { value: "", text: "选择已信任端点" }),
+    ...state.trustedModelEndpoints.map((candidate) => element("option", {
+      value: candidate.id,
+      text: `${candidate.label} · ${candidate.baseUrl}`,
+    })),
+  ]);
+  endpointSelect.value = endpoint?.id ?? "";
+  endpointSelect.addEventListener("change", async () => {
+    const trustedEndpoint = state.trustedModelEndpoints.find(
+      (candidate) => candidate.id === endpointSelect.value,
+    ) ?? null;
+    state.providerSettings.openai_compatible = {
+      ...state.providerSettings.openai_compatible,
+      trustedEndpoint,
+      trustedEndpointId: trustedEndpoint?.id ?? "",
+      enabled: false,
+      credentialExists: false,
+    };
+    state.compatibleDiscovery = null;
+    persistProviderSettings();
+    await refreshProviderSecretStatus();
+    renderWorkspace();
+  });
+  const panel = element("div", { className: "provider-compatible-panel" }, [
+    element("label", { className: "field" }, [
+      element("span", { text: "宿主信任端点" }),
+      endpointSelect,
+    ]),
+  ]);
+  if (endpoint) panel.append(compatibleEndpointSettingsForm(settings, endpoint));
+  else panel.append(element("p", {
+    className: "form-hint",
+    text: "先在下方登记并明确确认一个公共 HTTPS Origin。模型请求不会接受页面临时传入的 URL。",
+  }));
+  panel.append(compatibleEndpointRegistrationForm());
+  return panel;
+}
+
+function compatibleEndpointSettingsForm(settings, endpoint) {
+  const discovery = state.compatibleDiscovery;
+  const models = discovery?.endpointId === endpoint.id && discovery.state === "success"
+    ? discovery.models
+    : [];
+  const modelInput = element("input", {
+    name: "defaultModel",
+    value: settings.defaultModel,
+    placeholder: "例如 gpt-4o-mini 或服务商模型 ID",
+    attrs: { list: "compatible-model-list", autocomplete: "off" },
+  });
+  const status = discovery?.endpointId !== endpoint.id
+    ? "尚未探测；探测只调用 GET /models，不会发送项目正文。"
+    : discovery.state === "loading"
+      ? "正在执行有界模型列表探测…"
+      : discovery.state === "success"
+        ? `端点可达，返回 ${models.length} 个模型 ID；这不代表 JSON/reasoning 能力已验证。`
+        : discovery.message;
+  const form = element("form", { className: "provider-form compatible-settings-form" }, [
+    element("div", { className: `credential-status${settings.credentialExists ? " connected" : ""}` }, [
+      element("span", { className: "status-dot" }),
+      element("strong", {
+        text: settings.credentialExists ? "端点凭据已存入系统保险库" : "尚未保存此端点的凭据",
+      }),
+    ]),
+    element("p", { className: "form-hint" }, [
+      element("span", { text: "实际目标：" }),
+      element("code", { text: `${endpoint.baseUrl}/chat/completions` }),
+    ]),
+    checkboxField("启用此端点", "enabled", settings.enabled),
+    element("label", { className: "field" }, [element("span", { text: "默认模型" }), modelInput]),
+    element("datalist", { attrs: { id: "compatible-model-list" } },
+      models.map((model) => element("option", { value: model.id }))),
+    passwordField("API Key", "apiKey", settings.credentialExists ? "留空则保持现有凭据" : "只写入系统凭据库"),
+    button(
+      discovery?.endpointId === endpoint.id && discovery.state === "loading"
+        ? "探测中…"
+        : "探测模型列表",
+      "quiet-button",
+      probeCompatibleModels,
+      { disabled: discovery?.endpointId === endpoint.id && discovery.state === "loading" },
+    ),
+    element("p", { className: "form-hint", text: status, attrs: { role: "status" } }),
+    element("button", { className: "primary-button", text: "保存端点设置", type: "submit" }),
+    settings.credentialExists
+      ? button("删除已保存凭据", "quiet-button provider-delete", deleteProviderCredential)
+      : null,
+    button("移除信任端点", "quiet-button provider-delete", removeCompatibleEndpoint),
+  ]);
+  form.addEventListener("submit", saveCompatibleProviderSettings);
+  return form;
+}
+
+function compatibleEndpointRegistrationForm() {
+  const maxField = element("select", { name: "maxOutputTokenField" }, [
+    element("option", { value: "max_tokens", text: "max_tokens（默认）" }),
+    element("option", { value: "max_completion_tokens", text: "max_completion_tokens" }),
+  ]);
+  const form = element("form", { className: "provider-form compatible-register-form" }, [
+    element("h3", { text: "登记新的可信端点" }),
+    labeledInput("名称", "label", "例如：团队模型网关", true, ""),
+    labeledInput("HTTPS 主机名", "hostname", "api.vendor.com（不含协议和端口）", true, ""),
+    labeledInput("Base path", "basePath", "/v1", true, "/v1"),
+    labeledInput("再次输入确认 Origin", "confirmedOrigin", "https:" + "//api.vendor.com", true, ""),
+    checkboxField("服务声明支持 response_format=json_object", "jsonObject", false),
+    checkboxField("服务声明支持 stream_options.include_usage", "streamUsage", false),
+    element("label", { className: "field" }, [
+      element("span", { text: "输出 token 字段" }),
+      maxField,
+    ]),
+    element("p", {
+      className: "form-hint",
+      text: "确认后 Host 只允许该公共 HTTPS Origin（443）、安全 base path 和独立凭据槽；禁止重定向并绕过系统代理。能力选项是人工声明，/models 探测不会验证它们。",
+    }),
+    element("button", { className: "primary-button", text: "确认并信任端点", type: "submit" }),
+  ]);
+  form.addEventListener("submit", registerCompatibleEndpoint);
+  return form;
 }
 
 function checkboxField(label, name, checked) {
@@ -2295,31 +2455,173 @@ async function probeOllamaModels(event) {
   renderWorkspace();
 }
 
+async function registerCompatibleEndpoint(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const input = {
+    schemaVersion: 1,
+    label: formValue(form, "label"),
+    hostname: formValue(form, "hostname"),
+    basePath: formValue(form, "basePath"),
+    confirmedOrigin: formValue(form, "confirmedOrigin"),
+    capabilities: {
+      jsonObject: form.elements.namedItem("jsonObject").checked,
+      streamUsage: form.elements.namedItem("streamUsage").checked,
+      maxOutputTokenField: formValue(form, "maxOutputTokenField"),
+    },
+  };
+  setFormBusy(form, true);
+  try {
+    const endpoint = await invokeHost("register_trusted_model_endpoint", {
+      input,
+    });
+    await refreshTrustedModelEndpoints();
+    state.providerSettings.openai_compatible = {
+      ...state.providerSettings.openai_compatible,
+      trustedEndpointId: endpoint.id,
+      trustedEndpoint: state.trustedModelEndpoints.find((item) => item.id === endpoint.id) ?? null,
+      enabled: false,
+      credentialExists: false,
+    };
+    persistProviderSettings();
+    setNotice("success", `${endpoint.label} 已登记；凭据槽与 ${endpoint.baseUrl} 已由宿主绑定。`);
+  } catch (error) {
+    setNotice("error", normalizeHostError(error).message);
+  } finally {
+    setFormBusy(form, false);
+    renderWorkspace();
+  }
+}
+
+async function saveCompatibleProviderSettings(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const previous = state.providerSettings.openai_compatible;
+  const endpoint = previous.trustedEndpoint;
+  if (!endpoint) return;
+  const apiKey = formValue(form, "apiKey");
+  const enabled = form.elements.namedItem("enabled").checked;
+  const defaultModel = formValue(form, "defaultModel");
+  setFormBusy(form, true);
+  try {
+    if (!defaultModel) {
+      throw { code: "INVALID_MODEL_REQUEST", message: "请填写默认模型 ID。" };
+    }
+    if (enabled && !apiKey && !previous.credentialExists) {
+      throw { code: "PROVIDER_CREDENTIAL_MISSING", message: "启用端点前请先填写 API Key。" };
+    }
+    if (apiKey) {
+      await invokeHost("store_provider_secret", {
+        reference: credentialReference("openai_compatible", endpoint),
+        secret: apiKey,
+      });
+    }
+    state.providerSettings.openai_compatible = {
+      ...previous,
+      enabled,
+      defaultModel,
+      credentialExists: apiKey ? true : previous.credentialExists,
+    };
+    persistProviderSettings();
+    await refreshProviderSecretStatus();
+    setNotice("success", `${endpoint.label} 设置已保存；请求目标仍由 Host 端点 ID 解析。`);
+  } catch (error) {
+    setNotice("error", normalizeHostError(error).message);
+  } finally {
+    setFormBusy(form, false);
+    renderWorkspace();
+  }
+}
+
+async function probeCompatibleModels(event) {
+  const endpoint = state.providerSettings.openai_compatible.trustedEndpoint;
+  if (!endpoint) return;
+  const form = event.currentTarget.closest("form");
+  state.providerSettings.openai_compatible = {
+    ...state.providerSettings.openai_compatible,
+    defaultModel: formValue(form, "defaultModel"),
+  };
+  state.compatibleDiscovery = { state: "loading", endpointId: endpoint.id, models: [] };
+  renderWorkspace();
+  try {
+    const response = await invokeHost("list_openai_compatible_models", {
+      input: { schemaVersion: 1, endpointId: endpoint.id },
+    });
+    if (response.endpointId !== endpoint.id) {
+      throw { code: "PROVIDER_PROTOCOL", message: "模型探测响应与所选端点不匹配。" };
+    }
+    const models = Array.isArray(response.models)
+      ? response.models.filter((model) => model && typeof model.id === "string")
+      : [];
+    state.compatibleDiscovery = {
+      state: "success",
+      endpointId: endpoint.id,
+      models,
+    };
+  } catch (error) {
+    state.compatibleDiscovery = {
+      state: "error",
+      endpointId: endpoint.id,
+      models: [],
+      message: `探测失败：${normalizeHostError(error).message}`,
+    };
+  }
+  renderWorkspace();
+}
+
+async function removeCompatibleEndpoint() {
+  const endpoint = state.providerSettings.openai_compatible.trustedEndpoint;
+  if (!endpoint) return;
+  if (!window.confirm(`移除对 ${endpoint.baseUrl} 的信任，并删除它的独立凭据？`)) return;
+  try {
+    await invokeHost("remove_trusted_model_endpoint", {
+      input: { schemaVersion: 1, endpointId: endpoint.id },
+    });
+    state.providerSettings.openai_compatible = {
+      ...state.providerSettings.openai_compatible,
+      enabled: false,
+      trustedEndpoint: null,
+      trustedEndpointId: "",
+      credentialExists: false,
+    };
+    state.compatibleDiscovery = null;
+    await refreshTrustedModelEndpoints();
+    persistProviderSettings();
+    setNotice("success", `${endpoint.label} 的信任记录与凭据已移除。`);
+  } catch (error) {
+    setNotice("error", normalizeHostError(error).message);
+  }
+  renderWorkspace();
+}
+
 async function saveProviderSettings(event) {
   event.preventDefault();
   const form = event.currentTarget;
   const providerId = state.selectedProviderId;
+  const previous = state.providerSettings[providerId];
+  const credentialRequired = providerRequiresCredential(providerId);
+  const apiKey = credentialRequired ? formValue(form, "apiKey") : "";
+  const enabled = form.elements.namedItem("enabled").checked;
+  const defaultModel = formValue(form, "defaultModel");
+  const qwenRegion = providerId === "qwen" ? formValue(form, "qwenRegion") : "china";
+  const qwenWorkspaceId = providerId === "qwen" ? formValue(form, "qwenWorkspaceId") : "";
   setFormBusy(form, true);
   try {
-    const previous = state.providerSettings[providerId];
-    const credentialRequired = providerRequiresCredential(providerId);
-    const apiKey = credentialRequired ? formValue(form, "apiKey") : "";
     if (apiKey) {
       await invokeHost("store_provider_secret", {
         reference: credentialReference(providerId),
         secret: apiKey,
       });
     }
-    const enabled = form.elements.namedItem("enabled").checked;
     if (enabled && credentialRequired && !apiKey && !previous.credentialExists) {
       throw { code: "PROVIDER_CREDENTIAL_MISSING", message: "启用供应商前请先填写 API Key。" };
     }
     state.providerSettings[providerId] = {
       ...previous,
       enabled,
-      defaultModel: formValue(form, "defaultModel"),
-      qwenRegion: providerId === "qwen" ? formValue(form, "qwenRegion") : "china",
-      qwenWorkspaceId: providerId === "qwen" ? formValue(form, "qwenWorkspaceId") : "",
+      defaultModel,
+      qwenRegion,
+      qwenWorkspaceId,
       credentialExists: apiKey ? true : previous.credentialExists,
     };
     persistProviderSettings();
@@ -2342,7 +2644,12 @@ async function deleteProviderCredential() {
   const providerId = state.selectedProviderId;
   if (!providerRequiresCredential(providerId)) return;
   try {
-    await invokeHost("delete_provider_secret", { reference: credentialReference(providerId) });
+    const endpoint = providerId === "openai_compatible"
+      ? state.providerSettings.openai_compatible.trustedEndpoint
+      : null;
+    await invokeHost("delete_provider_secret", {
+      reference: credentialReference(providerId, endpoint),
+    });
     state.providerSettings[providerId] = {
       ...state.providerSettings[providerId],
       enabled: false,

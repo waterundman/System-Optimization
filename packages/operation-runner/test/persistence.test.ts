@@ -129,6 +129,38 @@ test("maps a successful patch result into a deterministic persistence bundle", a
   assert.equal(bundle.attempts?.[0]?.outcome, "succeeded");
   assert.equal(serializeOperationPersistenceBundle(bundle), serializeOperationPersistenceBundle(bundle));
   assert.equal(serializeOperationPersistenceBundle(bundle).includes("apiKey"), false);
+
+  const endpointId = `endpoint-${"a".repeat(32)}`;
+  const compatibleResult: OperationExecutionResult = {
+    ...result,
+    providerId: "openai_compatible",
+  };
+  const compatible = await buildSuccessfulPersistenceBundle({
+    intent,
+    result: compatibleResult,
+    startedAt: at,
+    providerConfigurationId: `provider-openai-compatible-${endpointId}`,
+    providerEndpointId: endpointId,
+  }, new Sha256Hasher());
+  assert.equal(compatible.run.providerEndpointId, endpointId);
+  await assert.rejects(
+    buildSuccessfulPersistenceBundle({
+      intent,
+      result: compatibleResult,
+      startedAt: at,
+    }, new Sha256Hasher()),
+    /providerEndpointId must not be empty/,
+  );
+  await assert.rejects(
+    buildSuccessfulPersistenceBundle({
+      intent,
+      result: compatibleResult,
+      startedAt: at,
+      providerConfigurationId: "provider-forged",
+      providerEndpointId: endpointId,
+    }, new Sha256Hasher()),
+    /providerConfigurationId does not match providerEndpointId/,
+  );
 });
 
 test("maps failed execution metadata and retry safety without fabricating an artifact", () => {

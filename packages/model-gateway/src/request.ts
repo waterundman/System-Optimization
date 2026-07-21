@@ -24,14 +24,19 @@ export function buildChatRequest(
     messages: request.messages.map(serializeMessage),
     stream,
   };
-  if (stream) body.stream_options = { include_usage: true };
+  if (stream && profile.capabilities.usageInStream) {
+    body.stream_options = { include_usage: true };
+  }
   if (request.maxOutputTokens !== undefined) {
     body[profile.maxOutputTokenField] = request.maxOutputTokens;
   }
   if (request.temperature !== undefined) body.temperature = request.temperature;
   if (request.topP !== undefined) body.top_p = request.topP;
   if (request.stop !== undefined) body.stop = request.stop;
-  if (request.responseFormat !== undefined) {
+  if (
+    request.responseFormat !== undefined
+    && !(profile.dialect === "openai_compatible" && request.responseFormat === "text")
+  ) {
     body.response_format = { type: request.responseFormat };
   }
   if (request.tools !== undefined) body.tools = request.tools;
@@ -108,6 +113,8 @@ function applyReasoningDialect(
     }
     return;
   }
+
+  if (profile.dialect === "openai_compatible") return;
 
   if (reasoning.mode !== "adaptive") {
     body.thinking = { type: reasoning.mode };
@@ -201,6 +208,18 @@ function validateRequest(profile: ProviderProfile, request: ModelRequest): void 
   }
   if (request.reasoning !== undefined && !profile.capabilities.reasoning) {
     throw invalidRequest(profile, `${profile.label} has no reasoning capability`);
+  }
+  if (
+    profile.id === "openai_compatible"
+    && (
+      request.toolChoice !== undefined
+      || request.messages.some((message) => message.role === "tool"
+        || message.toolCallId !== undefined
+        || message.toolCalls !== undefined
+        || message.reasoningContent !== undefined)
+    )
+  ) {
+    throw invalidRequest(profile, `${profile.label} has no declared reasoning or tool-call capability`);
   }
   if (request.tools !== undefined) {
     if (!profile.capabilities.toolCalls) {

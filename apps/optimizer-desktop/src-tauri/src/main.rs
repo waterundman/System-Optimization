@@ -28,6 +28,18 @@ fn main() {
                         recent_projects_path.display()
                     ))
                 })?;
+            let trusted_endpoints_path = app
+                .path()
+                .app_local_data_dir()?
+                .join("trusted-model-endpoints.json");
+            app.state::<optimizer_desktop::DesktopState>()
+                .configure_trusted_model_endpoints(&trusted_endpoints_path)
+                .map_err(|error| {
+                    io::Error::other(format!(
+                        "failed to configure trusted model endpoints at {}: {error}",
+                        trusted_endpoints_path.display()
+                    ))
+                })?;
             let window_config = app
                 .config()
                 .app

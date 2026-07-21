@@ -89,6 +89,11 @@ description = "Allows write, presence check and deletion of provider secrets wit
 commands.allow = ["store_provider_secret", "has_provider_secret", "delete_provider_secret"]
 
 [[permission]]
+identifier = "allow-trusted-model-endpoints"
+description = "Allows the bundled settings UI to list, explicitly trust and remove Host-owned public HTTPS OpenAI-compatible endpoints, and run a bounded models probe against one registered endpoint."
+commands.allow = ["list_trusted_model_endpoints", "register_trusted_model_endpoint", "remove_trusted_model_endpoint", "list_openai_compatible_models"]
+
+[[permission]]
 identifier = "allow-model-execution"
-description = "Allows the bundled editor to authorize and consume one short-lived fixed-endpoint model request, cancel active or pending requests and list fixed-loopback Ollama models."
+description = "Allows the bundled editor to authorize and consume one short-lived Host-resolved model request, cancel active or pending requests and list fixed-loopback Ollama models."
 commands.allow = ["authorize_model_request", "execute_authorized_model_stream", "cancel_model_request", "list_ollama_models"]

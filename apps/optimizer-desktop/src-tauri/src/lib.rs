@@ -10,15 +10,17 @@ use optimizer_host::{
     ExportMarkdownResponse, KnowledgeContextCandidate, KnowledgeContextSpec, KnowledgeItem,
     ModelAuthorizationScope, ModelExecutionHost, ModelExecutionRequest, ModelExecutionSummary,
     ModelGatewayError, ModelProviderId, ModelRequestAuthorization, ModelStreamEvent,
-    NewProjectSpec, OllamaModelList, OpenedProject, OperationAuditResponse, OperationCommandError,
-    OperationContextCandidate, OperationContextSpec, PersistOperationResponse,
-    PersistReviewResponse, ProjectInfo, ProjectPackageError, ProjectWorkspace, RecentProject,
-    RecentProjectError, RecentProjectRegistry, RefreshSummariesSpec, RenameDocumentSpec,
-    ReorderDocumentSpec, RestoreCheckpointResponse, RestoreCheckpointSpec, ReviewCandidateDetail,
+    NewProjectSpec, OllamaModelList, OpenAICompatibleModelList, OpenedProject,
+    OperationAuditResponse, OperationCommandError, OperationContextCandidate, OperationContextSpec,
+    PersistOperationResponse, PersistReviewResponse, ProjectInfo, ProjectPackageError,
+    ProjectWorkspace, RecentProject, RecentProjectError, RecentProjectRegistry,
+    RefreshSummariesSpec, RegisterTrustedModelEndpoint, RenameDocumentSpec, ReorderDocumentSpec,
+    RestoreCheckpointResponse, RestoreCheckpointSpec, ReviewCandidateDetail,
     ReviewCandidateSummary, SaveBlockResponse, SaveBlockSpec, SecretReference, SecretStore,
     SecretStoreError, SecretValue, SetDocumentArchivedSpec, SetKnowledgeItemStatusSpec,
     SetStyleSampleStatusSpec, StyleSample, SummaryContextCandidate, SummaryContextSpec,
-    SummaryInvalidation, SummaryRefreshReport, VersionHistory, WorkspaceCommandError,
+    SummaryInvalidation, SummaryRefreshReport, TrustedModelEndpoint, TrustedModelEndpointError,
+    TrustedModelEndpointRegistry, VersionHistory, WorkspaceCommandError,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Runtime, State, ipc::Channel};
@@ -31,19 +33,34 @@ pub use command_manifest::REGISTERED_COMMANDS;
 pub struct DesktopState {
     session: Arc<Mutex<Option<OpenedProject>>>,
     recent_projects: Arc<Mutex<RecentProjectRegistry>>,
+    trusted_endpoints: Arc<Mutex<TrustedModelEndpointRegistry>>,
     secrets: Arc<dyn SecretStore>,
     models: ModelExecutionHost,
 }
 
 impl DesktopState {
     pub fn new(secrets: Arc<dyn SecretStore>) -> Self {
-        let models = ModelExecutionHost::new(secrets.clone());
+        let trusted_endpoints = Arc::new(Mutex::new(TrustedModelEndpointRegistry::memory()));
+        let models =
+            ModelExecutionHost::with_trusted_endpoints(secrets.clone(), trusted_endpoints.clone());
         Self {
             session: Arc::new(Mutex::new(None)),
             recent_projects: Arc::new(Mutex::new(RecentProjectRegistry::memory())),
+            trusted_endpoints,
             secrets,
             models,
         }
+    }
+
+    pub fn configure_trusted_model_endpoints(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<(), TrustedModelEndpointError> {
+        let registry = TrustedModelEndpointRegistry::open(path)?;
+        *self.trusted_endpoints.lock().map_err(|_| {
+            TrustedModelEndpointError::InvalidRegistry("registry lock is poisoned")
+        })? = registry;
+        Ok(())
     }
 
     pub fn configure_recent_projects(
@@ -503,12 +520,52 @@ impl DesktopState {
             .map_err(CommandError::from)
     }
 
+    pub fn list_trusted_model_endpoints(&self) -> CommandResult<Vec<TrustedModelEndpoint>> {
+        Ok(self.trusted_model_endpoint_registry()?.list())
+    }
+
+    pub fn register_trusted_model_endpoint(
+        &self,
+        input: RegisterTrustedModelEndpoint,
+    ) -> CommandResult<TrustedModelEndpoint> {
+        self.trusted_model_endpoint_registry()?
+            .register(input)
+            .map_err(CommandError::from)
+    }
+
+    pub fn remove_trusted_model_endpoint(
+        &self,
+        input: TrustedModelEndpointRequest,
+    ) -> CommandResult<TrustedModelEndpointMutationResponse> {
+        input.validate()?;
+        let endpoint = self
+            .trusted_model_endpoint_registry()?
+            .get(&input.endpoint_id)
+            .map_err(CommandError::from)?;
+        let secret_reference =
+            SecretReference::parse(endpoint.credential_ref.clone()).map_err(CommandError::from)?;
+        let credential_deleted = self
+            .secrets
+            .delete(&secret_reference)
+            .map_err(CommandError::from)?;
+        self.trusted_model_endpoint_registry()?
+            .remove(&input.endpoint_id)
+            .map_err(CommandError::from)?;
+        Ok(TrustedModelEndpointMutationResponse {
+            schema_version: 1,
+            endpoint_id: input.endpoint_id,
+            removed: true,
+            credential_deleted,
+        })
+    }
+
     pub fn store_provider_secret(
         &self,
         reference: String,
         secret: String,
     ) -> CommandResult<SecretMutationResponse> {
         let reference = SecretReference::parse(reference).map_err(CommandError::from)?;
+        self.validate_provider_secret_reference(&reference)?;
         let secret = SecretValue::new(secret).map_err(CommandError::from)?;
         self.secrets
             .put(&reference, secret)
@@ -523,6 +580,7 @@ impl DesktopState {
 
     pub fn has_provider_secret(&self, reference: String) -> CommandResult<SecretStatusResponse> {
         let reference = SecretReference::parse(reference).map_err(CommandError::from)?;
+        self.validate_provider_secret_reference(&reference)?;
         let exists = self
             .secrets
             .contains(&reference)
@@ -539,6 +597,7 @@ impl DesktopState {
         reference: String,
     ) -> CommandResult<SecretMutationResponse> {
         let reference = SecretReference::parse(reference).map_err(CommandError::from)?;
+        self.validate_provider_secret_reference(&reference)?;
         let changed = self
             .secrets
             .delete(&reference)
@@ -627,6 +686,16 @@ impl DesktopState {
         self.models.list_ollama_models().map_err(CommandError::from)
     }
 
+    pub fn list_openai_compatible_models(
+        &self,
+        input: TrustedModelEndpointRequest,
+    ) -> CommandResult<OpenAICompatibleModelList> {
+        input.validate()?;
+        self.models
+            .list_openai_compatible_models(&input.endpoint_id)
+            .map_err(CommandError::from)
+    }
+
     fn project_session(&self) -> CommandResult<MutexGuard<'_, Option<OpenedProject>>> {
         self.session
             .lock()
@@ -637,6 +706,34 @@ impl DesktopState {
         self.recent_projects
             .lock()
             .map_err(|_| CommandError::state_unavailable())
+    }
+
+    fn trusted_model_endpoint_registry(
+        &self,
+    ) -> CommandResult<MutexGuard<'_, TrustedModelEndpointRegistry>> {
+        self.trusted_endpoints
+            .lock()
+            .map_err(|_| CommandError::state_unavailable())
+    }
+
+    fn validate_provider_secret_reference(&self, reference: &SecretReference) -> CommandResult<()> {
+        let fixed = matches!(
+            reference.as_str(),
+            "secret://providers/deepseek/default"
+                | "secret://providers/qwen/default"
+                | "secret://providers/kimi/default"
+                | "secret://providers/minimax/default"
+        );
+        let trusted = self
+            .trusted_model_endpoint_registry()?
+            .contains_credential_reference(reference.as_str());
+        if !fixed && !trusted {
+            return Err(CommandError::basic(
+                "PROVIDER_SECRET_REFERENCE_FORBIDDEN",
+                "Provider credential reference is not bound to a built-in or trusted endpoint",
+            ));
+        }
+        Ok(())
     }
 
     fn record_recent_project(&self, info: &ProjectInfo) {
@@ -771,6 +868,12 @@ impl From<ProjectPackageError> for CommandError {
 
 impl From<RecentProjectError> for CommandError {
     fn from(error: RecentProjectError) -> Self {
+        Self::basic(error.code(), error.public_message())
+    }
+}
+
+impl From<TrustedModelEndpointError> for CommandError {
+    fn from(error: TrustedModelEndpointError) -> Self {
         Self::basic(error.code(), error.public_message())
     }
 }
@@ -1555,6 +1658,44 @@ pub struct SecretMutationResponse {
     pub exists: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TrustedModelEndpointRequest {
+    pub schema_version: u32,
+    pub endpoint_id: String,
+}
+
+impl TrustedModelEndpointRequest {
+    fn validate(&self) -> CommandResult<()> {
+        if self.schema_version != 1 {
+            return Err(CommandError::unsupported_request_schema(
+                self.schema_version,
+            ));
+        }
+        if !self.endpoint_id.starts_with("endpoint-")
+            || self.endpoint_id.len() != "endpoint-".len() + 32
+            || !self.endpoint_id["endpoint-".len()..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(CommandError::basic(
+                "INVALID_TRUSTED_MODEL_ENDPOINT",
+                "endpointId must be a Host-issued endpoint ID",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustedModelEndpointMutationResponse {
+    pub schema_version: u32,
+    pub endpoint_id: String,
+    pub removed: bool,
+    pub credential_deleted: bool,
+}
+
 pub fn attach<R: Runtime>(builder: tauri::Builder<R>, state: DesktopState) -> tauri::Builder<R> {
     builder
         .manage(state)
@@ -1596,6 +1737,9 @@ pub fn attach<R: Runtime>(builder: tauri::Builder<R>, state: DesktopState) -> ta
             persist_operation_bundle,
             append_review_event,
             get_operation_audit,
+            list_trusted_model_endpoints,
+            register_trusted_model_endpoint,
+            remove_trusted_model_endpoint,
             store_provider_secret,
             has_provider_secret,
             delete_provider_secret,
@@ -1603,6 +1747,7 @@ pub fn attach<R: Runtime>(builder: tauri::Builder<R>, state: DesktopState) -> ta
             execute_authorized_model_stream,
             cancel_model_request,
             list_ollama_models,
+            list_openai_compatible_models,
         ])
 }
 
@@ -1878,6 +2023,35 @@ async fn get_operation_audit(
 }
 
 #[tauri::command]
+async fn list_trusted_model_endpoints(
+    state: State<'_, DesktopState>,
+) -> CommandResult<Vec<TrustedModelEndpoint>> {
+    spawn_host_task(state, DesktopState::list_trusted_model_endpoints).await
+}
+
+#[tauri::command]
+async fn register_trusted_model_endpoint(
+    input: RegisterTrustedModelEndpoint,
+    state: State<'_, DesktopState>,
+) -> CommandResult<TrustedModelEndpoint> {
+    spawn_host_task(state, move |state| {
+        state.register_trusted_model_endpoint(input)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn remove_trusted_model_endpoint(
+    input: TrustedModelEndpointRequest,
+    state: State<'_, DesktopState>,
+) -> CommandResult<TrustedModelEndpointMutationResponse> {
+    spawn_host_task(state, move |state| {
+        state.remove_trusted_model_endpoint(input)
+    })
+    .await
+}
+
+#[tauri::command]
 async fn store_provider_secret(
     reference: String,
     secret: String,
@@ -1940,6 +2114,17 @@ async fn cancel_model_request(
 #[tauri::command]
 async fn list_ollama_models(state: State<'_, DesktopState>) -> CommandResult<OllamaModelList> {
     spawn_host_task(state, DesktopState::list_ollama_models).await
+}
+
+#[tauri::command]
+async fn list_openai_compatible_models(
+    input: TrustedModelEndpointRequest,
+    state: State<'_, DesktopState>,
+) -> CommandResult<OpenAICompatibleModelList> {
+    spawn_host_task(state, move |state| {
+        state.list_openai_compatible_models(input)
+    })
+    .await
 }
 
 async fn spawn_host_task<T, F>(state: State<'_, DesktopState>, task: F) -> CommandResult<T>
@@ -2868,6 +3053,53 @@ mod tests {
     }
 
     #[test]
+    fn trusted_endpoint_commands_bind_secret_slots_and_remove_both_records() {
+        let (state, store, _) = state();
+        assert_eq!(
+            state
+                .store_provider_secret(
+                    "secret://providers/arbitrary/default".into(),
+                    "must-not-be-stored".into(),
+                )
+                .unwrap_err()
+                .code,
+            "PROVIDER_SECRET_REFERENCE_FORBIDDEN"
+        );
+        let endpoint = state
+            .register_trusted_model_endpoint(RegisterTrustedModelEndpoint {
+                schema_version: 1,
+                label: "Acme Gateway".into(),
+                hostname: "api.acme.ai".into(),
+                base_path: "/v1".into(),
+                confirmed_origin: "https://api.acme.ai".into(),
+                capabilities: Default::default(),
+            })
+            .unwrap();
+        let endpoints = state.list_trusted_model_endpoints().unwrap();
+        assert_eq!(endpoints.as_slice(), std::slice::from_ref(&endpoint));
+        state
+            .store_provider_secret(endpoint.credential_ref.clone(), "endpoint-key".into())
+            .unwrap();
+        assert!(
+            state
+                .has_provider_secret(endpoint.credential_ref.clone())
+                .unwrap()
+                .exists
+        );
+        let removed = state
+            .remove_trusted_model_endpoint(TrustedModelEndpointRequest {
+                schema_version: 1,
+                endpoint_id: endpoint.id.clone(),
+            })
+            .unwrap();
+        assert!(removed.removed);
+        assert!(removed.credential_deleted);
+        assert!(state.list_trusted_model_endpoints().unwrap().is_empty());
+        let reference = SecretReference::parse(endpoint.credential_ref).unwrap();
+        assert!(!store.contains(&reference).unwrap());
+    }
+
+    #[test]
     fn model_execution_requires_a_project_and_reports_safe_provider_details() {
         let (state, _, parent) = state();
         let request: ModelExecutionRequest = serde_json::from_value(json!({
@@ -3204,6 +3436,7 @@ mod tests {
                 "allow-review-candidate-read",
                 "allow-review-candidate-branch",
                 "allow-provider-secret-manage",
+                "allow-trusted-model-endpoints",
                 "allow-model-execution"
             ])
         );

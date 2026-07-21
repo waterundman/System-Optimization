@@ -9,8 +9,8 @@ WebView 只允许：
 - 原子写入 Operation bundle；
 - 写入 Patch review 事件；
 - 读取 Operation 审计；
-- 写入、检查和删除 provider secret。
-- 通过一次性、短期、绑定当前项目 HEAD/完整 Context Packet/受控 Prompt/目标 Block 的 Rust capability，执行 DeepSeek、Qwen、Kimi、MiniMax 固定 HTTPS 端点，以及 Ollama 固定回环端点的流式请求与取消。
+- 登记、列出和删除 Host 可信 OpenAI-compatible HTTPS 端点，并写入、检查和删除与内置或可信端点精确绑定的 provider secret；
+- 通过一次性、短期、绑定当前项目 HEAD/完整 Context Packet/受控 Prompt/目标 Block 的 Rust capability，执行 DeepSeek、Qwen、Kimi、MiniMax 固定 HTTPS 端点、Host 登记的通用 OpenAI-compatible 端点，以及 Ollama 固定回环端点的流式请求与取消。
 - 复用 Kernel/Operation Runner/Patch Engine 完成 AI 操作、Findings、逐 hunk 与全部接受/拒绝审查；批量 decision 仍逐 revision 写入 Host 审计。
 - 对响应开始前的临时 Provider 错误执行最多两次有界尝试，每次生成新 request ID 并重新申请一次性 Host capability；耗尽后可把原 Block revision/hash/UTF-16 选区绑定到全新的 Operation 显式重试。
 - 列出并按需重新加载持久审查候选；候选详情由 Host 校验不可变 Proposal、hash 和全部 review event 后返回，页面不能提交自造 decision。
@@ -19,7 +19,7 @@ WebView 只允许：
 - 读取文档树并用版本基线保存 Block；
 - 建立检查点、浏览版本元数据并恢复为新 Commit。
 
-WebView 不存在“读取 secret 明文”命令。云端模型请求由 Rust 信任边界解析 `credentialRef` 并执行，API Key 不会返回 JavaScript。
+WebView 不存在“读取 secret 明文”命令。云端模型请求由 Rust 信任边界解析 `credentialRef` 并执行，API Key 不会返回 JavaScript。Secret IPC 只接受四个内置云端固定槽位或当前可信端点的专属槽位，不能利用页面提交的 opaque 字符串创建任意凭据命名空间。
 
 WebView 也不存在原始 `execute_model_stream` 命令。用户确认 Context 后，`authorize_model_request` 会重新读取当前 HEAD 的全部候选，复算 Packet stable hash、token、评分、预算和 `never_send` 等策略，并验证实际 system/user Prompt 逐项等于确认 Packet；通过后才返回最多 120 秒有效且只可消费一次的 capability。该 capability 在 Host 内持有完整不可变 Packet，但调试输出只暴露 ID/hash/字节数；`execute_authorized_model_stream` 只接收 capability ID。项目变化、取消或关闭会使授权失效。
 
@@ -32,6 +32,10 @@ WebView 也不存在原始 `execute_model_stream` 命令。用户确认 Context 
 Ollama 是无凭据的显式本地 Provider：宿主只连接 `127.0.0.1:11434/v1/chat/completions` 并禁用系统代理，不接受页面提交的地址。模型需由用户预先在 Ollama 中拉取；运行失败不会自动把本地 Context Packet 发往云端。
 
 用户可在 Provider 抽屉显式执行一次本地模型检测。`list_ollama_models` 仍在 Rust 内固定请求 `/v1/models`，限制响应体并校验 model ID；WebView 只获得安全的建议列表，不能提交探测 URL。
+
+通用 OpenAI-compatible Provider 使用应用本地数据目录中的 Host 注册表，而不是项目文件或 `localStorage` 中的 URL。登记时用户填写公共 ASCII DNS hostname 和安全 base path，并逐字确认规范化的 `https://hostname`；Host 固定 443 端口，拒绝 IP literal、单标签/保留域名、路径转义、query、fragment 和凭据片段，然后生成 endpoint ID 与专属 Secret reference。页面运行请求只携带 endpoint ID 和 Host 返回的能力快照；Host 在授权及执行时重新按 ID 解析并比对。
+
+通用端点默认不启用 `json_object` 或流式 usage，输出 token 字段默认为 `max_tokens`，reasoning/tool calls 始终按未知能力关闭。用户可在建立信任时显式声明前三项兼容差异。模型列表探测固定请求该记录的 `/models`，限制为 3 秒和 1 MiB、使用端点自己的凭据且不发送项目内容；它只表示当时可达且列表可解析。通用模型请求禁用系统代理和 HTTP 重定向，自定义 CA、HTTP、任意端口和私网 IP literal 不在当前支持范围内。
 
 ## 项目会话
 

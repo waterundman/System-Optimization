@@ -11,6 +11,7 @@ mod project_package;
 mod recent_projects;
 mod secrets;
 mod summary_worker;
+mod trusted_model_endpoints;
 mod workspace_commands;
 
 pub use confirmed_context::ConfirmedContextPacket;
@@ -18,7 +19,8 @@ pub use model_gateway::{
     CancelModelRequestResponse, ModelAuthorizationScope, ModelExecutionHost, ModelExecutionRequest,
     ModelExecutionSummary, ModelGatewayError, ModelProviderConfiguration, ModelProviderId,
     ModelRequestAuthorization, ModelStreamEvent, ModelTransport, NativeModelTransport,
-    OllamaModelInfo, OllamaModelList,
+    OllamaModelInfo, OllamaModelList, OpenAICompatibleModelList,
+    OpenAICompatibleProviderConfiguration,
 };
 pub use operation_commands::{
     ArtifactAudit, ContextPacketAudit, FailureAudit, LifecycleEventAudit, ModelUsageAudit,
@@ -38,6 +40,10 @@ pub use secrets::WindowsCredentialStore;
 pub use secrets::{MemorySecretStore, SecretReference, SecretStore, SecretStoreError, SecretValue};
 pub use summary_worker::{
     RefreshSummariesSpec, SummaryContextCandidate, SummaryContextSpec, SummaryRefreshReport,
+};
+pub use trusted_model_endpoints::{
+    OpenAICompatibleMaxOutputTokenField, RegisterTrustedModelEndpoint, TrustedModelEndpoint,
+    TrustedModelEndpointCapabilities, TrustedModelEndpointError, TrustedModelEndpointRegistry,
 };
 pub use workspace_commands::{
     ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, ArchivedDocument,

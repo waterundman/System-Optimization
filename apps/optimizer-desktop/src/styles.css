@@ -292,6 +292,10 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .provider-tab { padding: 8px; border: 1px solid #d8d1c5; border-radius: 8px; color: #655f55; background: #fffdf8; font-size: 11px; }
 .provider-tab.active { color: #214f3b; border-color: #9db9a7; background: var(--accent-soft); font-weight: 750; }
 .provider-form { padding-top: 4px; }
+.provider-compatible-panel { display: grid; gap: 16px; }
+.compatible-register-form { margin-top: 2px; padding-top: 18px; border-top: 1px solid #d8d1c5; }
+.compatible-register-form h3 { margin: 0 0 14px; color: #4f4b44; font-size: 13px; }
+.compatible-settings-form code { overflow-wrap: anywhere; }
 .credential-status { margin: 0 0 16px; padding: 10px; display: flex; align-items: center; gap: 8px; border: 1px solid #dec8b2; border-radius: 9px; color: #805725; background: #fff3df; font-size: 11px; }
 .credential-status.connected { color: #285c45; border-color: #b9d2c1; background: #e6f1e9; }
 .status-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: currentColor; }

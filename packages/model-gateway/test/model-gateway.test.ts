@@ -5,6 +5,7 @@ import {
   ModelProviderRouter,
   ProviderError,
   buildChatRequest,
+  createOpenAICompatibleProfile,
   createQwenProfile,
   deepSeekProfile,
   kimiProfile,
@@ -91,6 +92,60 @@ test("pins Ollama to the local OpenAI-compatible endpoint without credentials", 
   assert.equal(completion.content, "本地结果");
   assert.equal(completion.reasoningContent, "本地推理");
   assert.equal(calls[0]?.headers.Authorization, undefined);
+});
+
+test("builds a conservative profile only from a Host-issued trusted endpoint", () => {
+  const profile = createOpenAICompatibleProfile({
+    id: `endpoint-${"a".repeat(32)}`,
+    label: "Acme Gateway",
+    baseUrl: "https://api.acme.ai/openai/v1",
+    updatedAt: "2026-07-21T00:00:00Z",
+    capabilities: {
+      jsonObject: false,
+      streamUsage: false,
+      maxOutputTokenField: "max_completion_tokens",
+    },
+  }, "acme-writer");
+  const built = buildChatRequest(profile, {
+    ...basicRequest,
+    responseFormat: "text",
+  }, true);
+  assert.equal(profile.id, "openai_compatible");
+  assert.equal(profile.locality, "remote");
+  assert.equal(built.url, "https://api.acme.ai/openai/v1/chat/completions");
+  assert.equal(built.body.max_completion_tokens, 512);
+  assert.equal("stream_options" in built.body, false);
+  assert.equal("response_format" in built.body, false);
+  assert.equal("thinking" in built.body, false);
+  assert.equal("reasoning_effort" in built.body, false);
+  assert.throws(
+    () => buildChatRequest(profile, {
+      ...basicRequest,
+      reasoning: { mode: "enabled", effort: "high" },
+      responseFormat: "text",
+    }, true),
+    (error: unknown) => error instanceof ProviderError && error.kind === "invalid_request",
+  );
+  assert.throws(
+    () => buildChatRequest(profile, { ...basicRequest, toolChoice: "none" }, true),
+    (error: unknown) => error instanceof ProviderError && error.kind === "invalid_request",
+  );
+  assert.throws(
+    () => createOpenAICompatibleProfile({
+      ...{
+        id: "attacker-selected",
+        label: "Bad",
+        baseUrl: "https://attacker.example.net/v1",
+        updatedAt: "2026-07-21T00:00:00Z",
+        capabilities: {
+          jsonObject: false,
+          streamUsage: false,
+          maxOutputTokenField: "max_tokens" as const,
+        },
+      },
+    }, "model"),
+    (error: unknown) => error instanceof ProviderError && error.kind === "configuration",
+  );
 });
 
 test("maps DeepSeek reasoning and output parameters to its official dialect", () => {

@@ -36,6 +36,7 @@ const modelProviderIds = new Set<ModelProviderId>([
   "kimi",
   "minimax",
   "ollama",
+  "openai_compatible",
 ]);
 const qwenRegions = new Set<QwenDeploymentRegion>([
   "china",
@@ -206,6 +207,7 @@ export function validateModelProviderConfiguration(
     "defaultModel",
     "credentialRef",
     "qwen",
+    "openaiCompatible",
     "defaultTimeoutMs",
     "maxRequestBytes",
     "updatedAt",
@@ -262,6 +264,70 @@ export function validateModelProviderConfiguration(
         }
       }
     }
+  }
+  if (input.openaiCompatible !== undefined) {
+    if (input.providerId !== "openai_compatible") {
+      issues.push({ path: "$.openaiCompatible", message: "is only valid for the openai_compatible provider" });
+    } else if (!isRecord(input.openaiCompatible)) {
+      issues.push({ path: "$.openaiCompatible", message: "must be an object" });
+    } else {
+      const compatible = input.openaiCompatible;
+      if (
+        typeof compatible.endpointId !== "string"
+        || !/^endpoint-[a-f0-9]{32}$/.test(compatible.endpointId)
+      ) {
+        issues.push({ path: "$.openaiCompatible.endpointId", message: "must be a Host-issued endpoint ID" });
+      } else {
+        if (input.id !== `provider-openai-compatible-${compatible.endpointId}`) {
+          issues.push({
+            path: "$.id",
+            message: "must be derived from the Host-issued endpoint ID",
+          });
+        }
+        if (
+          input.credentialRef
+          !== `secret://providers/openai-compatible/${compatible.endpointId}`
+        ) {
+          issues.push({
+            path: "$.credentialRef",
+            message: "must match the Host-issued endpoint credential slot",
+          });
+        }
+      }
+      if (compatible.endpointRevision !== 1) {
+        issues.push({ path: "$.openaiCompatible.endpointRevision", message: "must equal 1" });
+      }
+      for (const field of ["jsonObject", "streamUsage"] as const) {
+        if (typeof compatible[field] !== "boolean") {
+          issues.push({ path: `$.openaiCompatible.${field}`, message: "must be a boolean" });
+        }
+      }
+      if (!new Set(["max_tokens", "max_completion_tokens"]).has(
+        compatible.maxOutputTokenField as string,
+      )) {
+        issues.push({
+          path: "$.openaiCompatible.maxOutputTokenField",
+          message: "must be max_tokens or max_completion_tokens",
+        });
+      }
+      const allowed = new Set([
+        "endpointId",
+        "endpointRevision",
+        "jsonObject",
+        "streamUsage",
+        "maxOutputTokenField",
+      ]);
+      for (const field of Object.keys(compatible)) {
+        if (!allowed.has(field)) {
+          issues.push({ path: `$.openaiCompatible.${field}`, message: "is not allowed" });
+        }
+      }
+    }
+  } else if (input.providerId === "openai_compatible") {
+    issues.push({
+      path: "$.openaiCompatible",
+      message: "is required for the openai_compatible provider",
+    });
   }
   return issues.length
     ? { ok: false, issues }

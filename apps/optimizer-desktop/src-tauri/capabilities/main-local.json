@@ -22,6 +22,7 @@
     "allow-review-candidate-read",
     "allow-review-candidate-branch",
     "allow-provider-secret-manage",
+    "allow-trusted-model-endpoints",
     "allow-model-execution"
   ]
 }

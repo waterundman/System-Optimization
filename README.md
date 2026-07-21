@@ -9,13 +9,13 @@
 - `@optimizer/protocol`：OperationIntent、ContextPacket、PatchProposal、EventEnvelope、ModelProviderConfiguration 类型与 JSON Schema。
 - `@optimizer/kernel`：操作状态机、端口接口、确定性 Context Compiler、预算与隐私过滤。
 - `kernel-lab`：无需第三方依赖即可运行的上下文编译示例。
-- `optimizer-host`：Rust 宿主路径边界、原子 `.optimizer` 项目包、严格 JSON 命令适配、宿主最近项目注册表、Operation/Review 持久化、审计读取、Secret Store、一次性模型 capability，以及四个云端 Provider 和固定回环 Ollama 的原生流式执行。
-- `optimizer-desktop`：Tauri 2 桌面入口、宿主验证的最近项目、单项目 Session、文档树、版本化自动保存、冲突草稿、检查点/恢复、模型设置、流式 AI 操作、有界自动重试、取消、显式重新尝试与 Patch/Findings 审查界面。
-- `optimizer-store`：SQLite 3.51.3、Block/Commit/快照、Operation/Artifact/Review 审计日志、FTS5、迁移前在线备份、分层摘要队列、schema v6 的事实/约束资产、schema v7 的不可变候选分支映射，以及 schema v8 的不可变模型尝试审计。
+- `optimizer-host`：Rust 宿主路径边界、原子 `.optimizer` 项目包、严格 JSON 命令适配、宿主最近项目与可信模型端点注册表、Operation/Review 持久化、审计读取、Secret Store、一次性模型 capability，以及四个固定云端 Provider、可信 OpenAI-compatible HTTPS 端点和固定回环 Ollama 的原生流式执行。
+- `optimizer-desktop`：Tauri 2 桌面入口、宿主验证的最近项目、单项目 Session、文档树、版本化自动保存、冲突草稿、检查点/恢复、模型与可信端点设置、流式 AI 操作、有界自动重试、取消、显式重新尝试与 Patch/Findings 审查界面。
+- `optimizer-store`：SQLite 3.51.3、Block/Commit/快照、Operation/Artifact/Review 审计日志、FTS5、迁移前在线备份、分层摘要队列、schema v6 的事实/约束资产、schema v7 的不可变候选分支映射、schema v8 的不可变模型尝试审计，以及 schema v9 的通用 Provider 配置/端点来源审计。
 - 项目风格库：独立保存、归档和恢复固定样本；canonical 样本以 L4 Context 参与操作，`never_send` 对远程模型强制排除并允许本地 Ollama 使用。
 - `@optimizer/editor-bridge`：稳定 Block ID、UTF-16 选区映射、乐观并发编辑事务与 Tiptap 快照适配。
 - `@optimizer/patch-engine`：中文分层 diff、PatchProposal v2、逐 hunk 审查、原子决策与冲突检测。
-- `@optimizer/model-gateway`：DeepSeek、Qwen、Kimi、MiniMax 与本地 Ollama，支持流式输出、取消、超时与统一错误。
+- `@optimizer/model-gateway`：DeepSeek、Qwen、Kimi、MiniMax、Host 签发的 OpenAI-compatible Profile 与本地 Ollama，支持流式输出、取消、超时与统一错误。
 - `@optimizer/operation-runner`：ContextPacket → Provider → 响应前有界重试 → 严格输出校验 → PatchProposal/Findings，并生成带逐次尝试审计的版本化 Store bundle。
 - 确定性 `optimizer-json+zstd` 快照编码、SHA-256 完整性校验与“恢复为新 Commit”。
 - 版本化树形章节生命周期与结构恢复：顶层/子章节创建、同级移动、缩进、移出、重命名、子树软归档和逐层恢复均形成 Commit；项目根哈希 v2 绑定 parent/order 等章节元数据与活动 Block，检查点可恢复整棵章节树。
@@ -58,10 +58,10 @@ scripts/               工程约束检查
 
 ## 下一步
 
-1. 在固定端点安全原则下设计通用 OpenAI-compatible 配置、目标白名单与能力探测。
+1. 增加费用换算、接受率/二次编辑率聚合、用户反馈与安全诊断导出。
 2. Ollama 缺失模型拉取指引、版本兼容提示与可选上下文窗口配置。
 3. 依赖源可用后将正文输入适配器替换为 Tiptap，并提供行内 decoration 审查。
-4. 显式成本策略下的 Provider fallback、费用换算与请求上限。
+4. 显式成本策略下的 Provider fallback 与请求上限；不得把通用端点失败静默回退到另一个目标。
 5. 在显式费用/隐私同意下，为摘要 worker 增加可插拔云端/本地模型生成器、失败隔离与质量评估；内置提取生成器保留为零费用回退。
 
 ## 最新迭代：可运行桌面工作区
@@ -78,6 +78,8 @@ scripts/               工程约束检查
 ## 最新迭代：宿主模型执行与 AI 审查闭环
 
 - DeepSeek、Qwen、Kimi、MiniMax 通过 Rust WinHTTP 固定官方端点执行；Qwen 支持区域/workspace，四家 reasoning、token 与流式差异统一为同一事件协议。
+- 用户可登记最多 32 个通用 OpenAI-compatible HTTPS 端点。Host 规范化公共 DNS hostname/base path，并要求逐字确认 origin；页面只保存 Host 生成的 endpoint ID，不能在模型请求中提交 URL、Header 或任意 Secret 引用。
+- 每个通用端点拥有独立 Credential Manager 槽位和保守能力声明；`/models` 探测限制为 3 秒/1 MiB且不发送项目内容，只用于当时的可达性与模型列表检查。通用调用禁用系统代理与重定向，未知的 JSON/usage/reasoning/tool 能力默认不发送。
 - Ollama 通过固定 `127.0.0.1:11434/v1/chat/completions` 执行，无需凭据并禁用系统代理；界面和项目内容都不能改写目标地址，且不会失败后隐式回退云端。
 - 模型设置可按需探测固定 `/v1/models`，只把经过 Rust 校验和排序的本地模型 ID 返回界面，不开放通用 GET 或 WebView 网络权限。
 - API Key 只在 Rust 中从系统 Secret Store 解析，WebView 只能管理 opaque `credentialRef` 的写入、存在性和删除。
@@ -88,7 +90,7 @@ scripts/               工程约束检查
 - 用户可维护带 authority、敏感级别和硬/软强度的项目事实与约束；只有 canonical 且绑定当前 HEAD/目标 Block 的条目会进入 L3 Context，`never_send` 不会发往云端模型。
 - AI 主链通过单个 Host Operation Context 命令读取目标、局部正文、结构、摘要、知识和风格；WebView 只做严格 DTO/哈希复核与 Kernel 预算编译，不再自行决定来源资格；模型授权前 Host 会独立复算最终 Packet，并验证真正出站的 Prompt 与用户确认内容逐项一致。
 - Context Compiler、Operation Runner 与 Patch Engine 复用仓库同一份实现；模型输出经过严格 JSON 校验后生成不可变 PatchProposal 或 Findings。
-- 暂时性错误只会在 Provider `start` 之前按硬上限自动重试；桌面默认最多两次且每次重新申请一次性 Host capability。每次尝试进入 schema v8 不可变审计，耗尽后用户可基于原 Block revision/hash/选区显式创建新的 Operation，陈旧目标不会联网。
+- 暂时性错误只会在 Provider `start` 之前按硬上限自动重试；桌面默认最多两次且每次重新申请一次性 Host capability。每次尝试进入 schema v8 不可变审计；schema v9 另保存通用 Provider 的配置与 endpoint ID 来源。耗尽后用户可基于原 Block revision/hash/选区显式创建新的 Operation，陈旧目标不会联网。
 - 任何云端模型请求发出前都会展示实际编译后的 Context Packet、来源、层级、必需标记、排除项和估算 token；用户确认前不会调用模型宿主命令。
 - 每个 hunk 可接受或拒绝，也可全部接受/拒绝；批量动作按 review revision 逐步审计并尊重 atomic group，最终应用在一个 SQLite transaction 内同时创建 `ai_accept` Commit、编辑日志、Review apply 事件和 Operation accepted 状态。
 - 候选中心从不可变 Patch Proposal 与 review event 恢复跨会话审查；ready 候选可保存为独立 branch/Commit/snapshot，严格绑定 operation base 且不移动主 HEAD、不改变当前正文，也不把候选快照混入用户检查点列表。

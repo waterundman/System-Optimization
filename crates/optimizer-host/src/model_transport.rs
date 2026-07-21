@@ -40,9 +40,11 @@ mod windows {
     use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, GetLastError};
     use windows_sys::Win32::Networking::WinHttp::{
         WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_FLAG_SECURE,
+        WINHTTP_OPTION_REDIRECT_POLICY, WINHTTP_OPTION_REDIRECT_POLICY_NEVER,
         WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_RAW_HEADERS_CRLF, WINHTTP_QUERY_STATUS_CODE,
         WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders,
-        WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetTimeouts,
+        WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption,
+        WinHttpSetTimeouts,
     };
     use zeroize::Zeroize;
 
@@ -63,7 +65,7 @@ mod windows {
                 unsafe {
                     WinHttpOpen(
                         agent.as_ptr(),
-                        if request.use_tls() {
+                        if request.use_system_proxy() {
                             WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY
                         } else {
                             WINHTTP_ACCESS_TYPE_NO_PROXY
@@ -116,6 +118,20 @@ mod windows {
             }
             cancellation.install_native_request(request_handle, request.provider_id())?;
             let _request_registration = RequestRegistration(cancellation);
+            let redirect_policy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+            ensure_bool(
+                unsafe {
+                    WinHttpSetOption(
+                        request_handle,
+                        WINHTTP_OPTION_REDIRECT_POLICY,
+                        (&raw const redirect_policy).cast(),
+                        std::mem::size_of_val(&redirect_policy) as u32,
+                    )
+                },
+                "disable provider redirects",
+                request,
+                cancellation,
+            )?;
 
             let mut headers = Vec::new();
             if let Some(secret) = secret {

@@ -2,7 +2,7 @@ use rusqlite::{Connection, TransactionBehavior};
 
 use crate::error::{StoreError, StoreResult};
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 8;
+pub const CURRENT_SCHEMA_VERSION: i64 = 9;
 
 pub(crate) const MIGRATION_1: &str = r#"
 CREATE TABLE schema_migration (
@@ -641,6 +641,114 @@ END;
 UPDATE project SET schema_version = 8 WHERE schema_version < 8;
 "#;
 
+const MIGRATION_9: &str = r#"
+PRAGMA defer_foreign_keys = ON;
+
+CREATE TABLE operation_run_v9 (
+  id TEXT PRIMARY KEY,
+  operation_intent_id TEXT NOT NULL,
+  project_id TEXT NOT NULL REFERENCES project(id),
+  base_commit_id TEXT NOT NULL REFERENCES commit_node(id),
+  provider_id TEXT NOT NULL CHECK(provider_id IN (
+    'deepseek', 'qwen', 'kimi', 'minimax', 'ollama', 'openai_compatible'
+  )),
+  provider_configuration_id TEXT,
+  provider_endpoint_id TEXT,
+  model TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN (
+    'draft', 'compiling', 'preflight', 'queued', 'streaming', 'validating',
+    'review', 'accepted', 'rejected', 'conflicted', 'failed', 'cancelled'
+  )),
+  context_packet_id TEXT UNIQUE REFERENCES context_packet_record(id),
+  response_id TEXT,
+  finish_reason TEXT,
+  input_tokens INTEGER CHECK(input_tokens IS NULL OR input_tokens >= 0),
+  output_tokens INTEGER CHECK(output_tokens IS NULL OR output_tokens >= 0),
+  total_tokens INTEGER CHECK(total_tokens IS NULL OR total_tokens >= 0),
+  cached_input_tokens INTEGER CHECK(cached_input_tokens IS NULL OR cached_input_tokens >= 0),
+  reasoning_tokens INTEGER CHECK(reasoning_tokens IS NULL OR reasoning_tokens >= 0),
+  failure_code TEXT,
+  failure_message TEXT,
+  failure_retriable INTEGER CHECK(failure_retriable IS NULL OR failure_retriable IN (0, 1)),
+  started_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK(
+    (provider_id = 'openai_compatible'
+      AND provider_configuration_id IS NOT NULL
+      AND provider_endpoint_id IS NOT NULL
+      AND provider_configuration_id = 'provider-openai-compatible-' || provider_endpoint_id
+      AND length(provider_endpoint_id) = 41
+      AND provider_endpoint_id GLOB 'endpoint-*'
+      AND substr(provider_endpoint_id, 10) NOT GLOB '*[^a-f0-9]*')
+    OR (provider_id <> 'openai_compatible' AND provider_endpoint_id IS NULL)
+  ),
+  CHECK(
+    (input_tokens IS NULL AND output_tokens IS NULL AND total_tokens IS NULL)
+    OR (input_tokens IS NOT NULL AND output_tokens IS NOT NULL AND total_tokens IS NOT NULL
+        AND total_tokens >= input_tokens + output_tokens)
+  ),
+  CHECK(
+    (failure_code IS NULL AND failure_message IS NULL AND failure_retriable IS NULL)
+    OR (failure_code IS NOT NULL AND failure_message IS NOT NULL AND failure_retriable IS NOT NULL)
+  )
+) STRICT;
+
+INSERT INTO operation_run_v9 (
+  id, operation_intent_id, project_id, base_commit_id, provider_id,
+  provider_configuration_id, provider_endpoint_id, model, state,
+  context_packet_id, response_id, finish_reason, input_tokens, output_tokens,
+  total_tokens, cached_input_tokens, reasoning_tokens, failure_code, failure_message,
+  failure_retriable, started_at, updated_at
+)
+SELECT
+  id, operation_intent_id, project_id, base_commit_id, provider_id,
+  NULL, NULL, model, state,
+  context_packet_id, response_id, finish_reason, input_tokens, output_tokens,
+  total_tokens, cached_input_tokens, reasoning_tokens, failure_code, failure_message,
+  failure_retriable, started_at, updated_at
+FROM operation_run;
+
+DROP TABLE operation_run;
+ALTER TABLE operation_run_v9 RENAME TO operation_run;
+
+CREATE INDEX operation_run_project_started_idx
+  ON operation_run(project_id, started_at, id);
+
+CREATE TRIGGER operation_run_no_delete BEFORE DELETE ON operation_run BEGIN
+  SELECT RAISE(ABORT, 'immutable:operation_run');
+END;
+CREATE TRIGGER operation_run_guard BEFORE UPDATE ON operation_run
+WHEN new.id IS NOT old.id
+  OR new.operation_intent_id IS NOT old.operation_intent_id
+  OR new.project_id IS NOT old.project_id
+  OR new.base_commit_id IS NOT old.base_commit_id
+  OR new.provider_id IS NOT old.provider_id
+  OR new.provider_configuration_id IS NOT old.provider_configuration_id
+  OR new.provider_endpoint_id IS NOT old.provider_endpoint_id
+  OR new.model IS NOT old.model
+  OR new.context_packet_id IS NOT old.context_packet_id
+  OR new.response_id IS NOT old.response_id
+  OR new.finish_reason IS NOT old.finish_reason
+  OR new.input_tokens IS NOT old.input_tokens
+  OR new.output_tokens IS NOT old.output_tokens
+  OR new.total_tokens IS NOT old.total_tokens
+  OR new.cached_input_tokens IS NOT old.cached_input_tokens
+  OR new.reasoning_tokens IS NOT old.reasoning_tokens
+  OR new.failure_code IS NOT old.failure_code
+  OR new.failure_message IS NOT old.failure_message
+  OR new.failure_retriable IS NOT old.failure_retriable
+  OR new.started_at IS NOT old.started_at
+  OR NOT (
+    (old.state = 'review' AND new.state IN ('accepted', 'rejected', 'conflicted'))
+    OR (old.state = 'conflicted' AND new.state IN ('review', 'rejected'))
+  )
+BEGIN
+  SELECT RAISE(ABORT, 'invalid:operation_run_transition');
+END;
+
+UPDATE project SET schema_version = 9 WHERE schema_version < 9;
+"#;
+
 pub fn migrate(connection: &mut Connection) -> StoreResult<()> {
     let current: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if current > CURRENT_SCHEMA_VERSION {
@@ -775,6 +883,24 @@ pub fn migrate(connection: &mut Connection) -> StoreResult<()> {
             )?;
             transaction.pragma_update(None, "user_version", 8)?;
         }
+        if current < 9 {
+            transaction.execute_batch(MIGRATION_9)?;
+            let violations: i64 = transaction.query_row(
+                "SELECT COUNT(*) FROM pragma_foreign_key_check",
+                [],
+                |row| row.get(0),
+            )?;
+            if violations != 0 {
+                return Err(StoreError::Validation(format!(
+                    "schema migration produced {violations} foreign-key violation(s)"
+                )));
+            }
+            transaction.execute(
+                "INSERT INTO schema_migration(version, applied_at) VALUES (9, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                [],
+            )?;
+            transaction.pragma_update(None, "user_version", 9)?;
+        }
         transaction.commit()?;
         Ok(())
     })();
@@ -794,7 +920,10 @@ pub fn migrate(connection: &mut Connection) -> StoreResult<()> {
 mod tests {
     use rusqlite::Connection;
 
-    use super::{CURRENT_SCHEMA_VERSION, MIGRATION_1, MIGRATION_2, MIGRATION_3, migrate};
+    use super::{
+        CURRENT_SCHEMA_VERSION, MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5,
+        MIGRATION_6, MIGRATION_7, MIGRATION_8, migrate,
+    };
 
     #[test]
     fn upgrades_a_version_one_database_and_remains_idempotent() {
@@ -1005,5 +1134,79 @@ mod tests {
                 .to_string()
                 .contains("immutable:operation_run")
         );
+    }
+
+    #[test]
+    fn upgrades_version_eight_without_losing_attempt_audit_rows() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", true)
+            .unwrap();
+        connection
+            .execute_batch(&format!(
+                "{MIGRATION_1}\n{MIGRATION_2}\n{MIGRATION_3}\n{MIGRATION_4}\n{MIGRATION_5}\n{MIGRATION_6}\n{MIGRATION_7}\n{MIGRATION_8}"
+            ))
+            .unwrap();
+        connection
+            .execute_batch(
+                r#"
+                INSERT INTO project(
+                  id, title, language, schema_version, revision, created_at, updated_at
+                ) VALUES (
+                  'project-v8', 'Project', 'zh-CN', 8, 0,
+                  '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z'
+                );
+                INSERT INTO commit_node(
+                  id, project_id, root_hash, reason, actor_type, created_at
+                ) VALUES (
+                  'commit-v8', 'project-v8', 'root-hash', 'seed', 'human',
+                  '2026-07-21T00:00:00Z'
+                );
+                UPDATE project SET head_commit_id = 'commit-v8' WHERE id = 'project-v8';
+                INSERT INTO operation_run(
+                  id, operation_intent_id, project_id, base_commit_id, provider_id,
+                  model, state, failure_code, failure_message, failure_retriable,
+                  started_at, updated_at
+                ) VALUES (
+                  'run-v8', 'intent-v8', 'project-v8', 'commit-v8', 'deepseek',
+                  'deepseek-v4-flash', 'failed', 'PROVIDER_RATE_LIMIT', 'rate limited', 1,
+                  '2026-07-21T00:00:01Z', '2026-07-21T00:00:02Z'
+                );
+                INSERT INTO operation_attempt(
+                  run_id, sequence, started_at, finished_at, outcome, response_started,
+                  failure_code, failure_kind, http_status, retriable, retry_delay_ms
+                ) VALUES (
+                  'run-v8', 1, '2026-07-21T00:00:01Z', '2026-07-21T00:00:02Z',
+                  'failed', 0, 'PROVIDER_RATE_LIMIT', 'rate_limit', 429, 1, 800
+                );
+                "#,
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 8).unwrap();
+
+        migrate(&mut connection).unwrap();
+
+        let attempt: (String, i64, String) = connection
+            .query_row(
+                "SELECT run_id, sequence, failure_kind FROM operation_attempt WHERE run_id = 'run-v8'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(attempt, ("run-v8".into(), 1, "rate_limit".into()));
+        let provenance: (Option<String>, Option<String>) = connection
+            .query_row(
+                "SELECT provider_configuration_id, provider_endpoint_id FROM operation_run WHERE id = 'run-v8'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(provenance, (None, None));
+        let violations: i64 = connection
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(violations, 0);
     }
 }

@@ -70,7 +70,7 @@
       title: "雾港来信",
       language: "zh-CN",
       directory: "W:\\写作\\雾港来信.optimizer",
-        databaseSchemaVersion: 8,
+        databaseSchemaVersion: 9,
       headCommitId: workspace.headCommitId,
       revision: 0,
       createdAt: "2026-07-15T00:00:00Z",
@@ -85,6 +85,13 @@
   let reviewSession = null;
   let candidateBranch = null;
   let summariesReady = false;
+  const trustedModelEndpoints = [];
+  const providerSecrets = new Set([
+    "secret://providers/deepseek/default",
+    "secret://providers/qwen/default",
+    "secret://providers/kimi/default",
+    "secret://providers/minimax/default",
+  ]);
   async function contentHash(value) {
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
     return `sha256:${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
@@ -140,6 +147,21 @@
   }
   async function invoke(command, args = {}) {
     if (command === "get_project_session") return structuredClone(session);
+    if (command === "create_project") {
+      if (
+        args.input.title !== "表单快照作品"
+        || args.input.parentDirectory !== "W:\\写作"
+        || args.input.folderName !== "form-snapshot"
+        || args.input.language !== "zh-CN"
+      ) {
+        throw { code: "INVALID_CREATE_INPUT", message: "Create form values were not snapshotted" };
+      }
+      session.isOpen = true;
+      session.project.title = args.input.title;
+      session.project.language = args.input.language;
+      session.project.directory = `${args.input.parentDirectory}\\${args.input.folderName}.optimizer`;
+      return structuredClone(session);
+    }
     if (command === "list_recent_projects") {
       return [{
         schemaVersion: 1,
@@ -549,13 +571,56 @@
       });
       return structuredClone(item);
     }
+    if (command === "list_trusted_model_endpoints") {
+      return structuredClone(trustedModelEndpoints);
+    }
+    if (command === "register_trusted_model_endpoint") {
+      const endpointId = `endpoint-${"b".repeat(32)}`;
+      const basePath = args.input.basePath === "/"
+        ? ""
+        : args.input.basePath.replace(/\/+$/, "");
+      const endpoint = {
+        schemaVersion: 1,
+        id: endpointId,
+        label: args.input.label,
+        hostname: args.input.hostname.toLowerCase(),
+        basePath: basePath || "/",
+        baseUrl: `https://${args.input.hostname.toLowerCase()}${basePath}`,
+        credentialRef: `secret://providers/openai-compatible/${endpointId}`,
+        capabilities: structuredClone(args.input.capabilities),
+        revision: 1,
+        createdAt: "2026-07-21T00:00:00Z",
+        updatedAt: "2026-07-21T00:00:00Z",
+      };
+      trustedModelEndpoints.push(endpoint);
+      return structuredClone(endpoint);
+    }
+    if (command === "remove_trusted_model_endpoint") {
+      const index = trustedModelEndpoints.findIndex(
+        (endpoint) => endpoint.id === args.input.endpointId,
+      );
+      const [removed] = index >= 0 ? trustedModelEndpoints.splice(index, 1) : [];
+      if (removed) providerSecrets.delete(removed.credentialRef);
+      return {
+        schemaVersion: 1,
+        endpointId: args.input.endpointId,
+        removed: Boolean(removed),
+        credentialDeleted: Boolean(removed),
+      };
+    }
     if (command === "has_provider_secret") {
-      return { schemaVersion: 1, reference: args.reference, exists: true };
+      return {
+        schemaVersion: 1,
+        reference: args.reference,
+        exists: providerSecrets.has(args.reference),
+      };
     }
     if (command === "store_provider_secret") {
+      providerSecrets.add(args.reference);
       return { schemaVersion: 1, reference: args.reference, changed: true, exists: true };
     }
     if (command === "delete_provider_secret") {
+      providerSecrets.delete(args.reference);
       return { schemaVersion: 1, reference: args.reference, changed: true, exists: false };
     }
     if (command === "list_ollama_models") {
@@ -565,6 +630,20 @@
         models: [
           { id: "qwen3:8b", created: 2, ownedBy: "library" },
           { id: "llama3.2", created: 1, ownedBy: "library" },
+        ],
+      };
+    }
+    if (command === "list_openai_compatible_models") {
+      const endpoint = trustedModelEndpoints.find(
+        (candidate) => candidate.id === args.input.endpointId,
+      );
+      return {
+        schemaVersion: 1,
+        endpointId: endpoint.id,
+        endpoint: endpoint.baseUrl,
+        models: [
+          { id: "writer-small", created: 2, ownedBy: "acme" },
+          { id: "writer-large", created: 1, ownedBy: "acme" },
         ],
       };
     }

@@ -11,7 +11,13 @@ export type ContextPacketId = Brand<string, "ContextPacketId">;
 export type PatchProposalId = Brand<string, "PatchProposalId">;
 export type EventId = Brand<string, "EventId">;
 export type CredentialRef = Brand<string, "CredentialRef">;
-export type ModelProviderId = "deepseek" | "qwen" | "kimi" | "minimax" | "ollama";
+export type ModelProviderId =
+  | "deepseek"
+  | "qwen"
+  | "kimi"
+  | "minimax"
+  | "ollama"
+  | "openai_compatible";
 export type QwenDeploymentRegion = "china" | "singapore" | "us" | "germany" | "japan";
 
 export type OperationType =
@@ -190,6 +196,13 @@ export interface ModelProviderConfiguration {
     readonly region: QwenDeploymentRegion;
     readonly workspaceId?: string;
   };
+  readonly openaiCompatible?: {
+    readonly endpointId: string;
+    readonly endpointRevision: 1;
+    readonly jsonObject: boolean;
+    readonly streamUsage: boolean;
+    readonly maxOutputTokenField: "max_tokens" | "max_completion_tokens";
+  };
   readonly defaultTimeoutMs: number;
   readonly maxRequestBytes: number;
   readonly updatedAt: string;
@@ -237,6 +250,8 @@ export interface OperationPersistenceBundleV1 {
     readonly projectId: ProjectId;
     readonly baseCommitId: CommitId;
     readonly providerId: ModelProviderId;
+    readonly providerConfigurationId?: string;
+    readonly providerEndpointId?: string;
     readonly model: string;
     readonly state: Extract<OperationState, "review" | "failed" | "cancelled">;
     readonly responseId?: string;

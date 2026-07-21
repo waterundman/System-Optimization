@@ -110,22 +110,63 @@ test("plans auditable batch review decisions without duplicating atomic groups",
   assert.throws(() => planDesktopReviewDecisions(proposal, session, "pending"), TypeError);
 });
 
-test("builds fixed host configurations for cloud and local providers", () => {
+test("builds Host-bound configurations for built-in and trusted providers", () => {
   const settings = defaultProviderSettings();
-  assert.deepEqual(Object.keys(settings), ["deepseek", "qwen", "kimi", "minimax", "ollama"]);
+  assert.deepEqual(Object.keys(settings), [
+    "deepseek",
+    "qwen",
+    "kimi",
+    "minimax",
+    "ollama",
+    "openai_compatible",
+  ]);
+  const endpoint = {
+    schemaVersion: 1,
+    id: `endpoint-${"a".repeat(32)}`,
+    label: "Acme Gateway",
+    hostname: "api.acme.ai",
+    basePath: "/v1",
+    baseUrl: "https://api.acme.ai/v1",
+    credentialRef: `secret://providers/openai-compatible/endpoint-${"a".repeat(32)}`,
+    capabilities: {
+      jsonObject: false,
+      streamUsage: false,
+      maxOutputTokenField: "max_tokens",
+    },
+    revision: 1,
+    createdAt: "2026-07-21T00:00:00Z",
+    updatedAt: "2026-07-21T00:00:00Z",
+  };
   for (const providerId of Object.keys(settings)) {
     settings[providerId].enabled = true;
+    if (providerId === "openai_compatible") {
+      settings[providerId].trustedEndpoint = endpoint;
+      settings[providerId].trustedEndpointId = endpoint.id;
+      settings[providerId].defaultModel = "acme-writer";
+    }
     const configuration = providerConfiguration(
       settings[providerId],
       "2026-07-15T00:00:00.000Z",
     );
     assert.equal(configuration.providerId, providerId);
-    assert.equal(configuration.credentialRef, credentialReference(providerId));
+    assert.equal(
+      configuration.credentialRef,
+      credentialReference(providerId, providerId === "openai_compatible" ? endpoint : null),
+    );
     assert.equal("apiKey" in configuration, false);
+    if (providerId === "openai_compatible") {
+      assert.equal(configuration.openaiCompatible.endpointId, endpoint.id);
+      assert.equal("baseUrl" in configuration.openaiCompatible, false);
+    }
   }
   assert.equal(providerRequiresCredential("deepseek"), true);
   assert.equal(providerRequiresCredential("ollama"), false);
+  assert.equal(providerRequiresCredential("openai_compatible"), true);
   assert.equal(settings.ollama.defaultModel, "qwen3:8b");
+  assert.throws(
+    () => providerConfiguration({ ...settings.openai_compatible, trustedEndpoint: null }),
+    TypeError,
+  );
 });
 
 test("rejects tampered unified host operation context before authorization", async () => {

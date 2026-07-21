@@ -15,8 +15,9 @@ Rust 宿主安全边界与跨语言命令适配层。
 - TypeScript 与 Rust 读取同一份 Operation 持久化夹具，避免边界字段漂移；
 - `SecretStore` 只接受 `secret://` 引用；`SecretValue` Debug 固定脱敏并在释放时清零；
 - Windows 使用 Credential Manager Generic Credential，Secret 不写入 SQLite、配置文件或日志。
-- `ModelExecutionHost` 通过固定官方 HTTPS 端点支持 DeepSeek、Qwen、Kimi、MiniMax，统一流事件、用量、取消、超时和安全错误；公开错误消息、远端 code 与 request ID 都会限长并对当前凭据精确脱敏；
-- Windows 原生传输使用 WinHTTP，活动 request handle 可由取消/超时关闭，Authorization 临时缓冲发送后清零；
+- `TrustedModelEndpointRegistry` 在宿主用户配置区保存最多 32 个经过 origin 确认的公共 HTTPS OpenAI-compatible 端点；ID、规范 URL、能力声明与专属 Secret reference 严格绑定并崩溃安全替换；
+- `ModelExecutionHost` 通过固定官方 HTTPS 端点支持 DeepSeek、Qwen、Kimi、MiniMax，并通过 Host endpoint ID 支持通用 OpenAI-compatible 服务，统一流事件、用量、取消、超时和安全错误；公开错误消息、远端 code 与 request ID 都会限长并对当前凭据精确脱敏；
+- Windows 原生传输使用 WinHTTP，活动 request handle 可由取消/超时关闭，Authorization 临时缓冲发送后清零，所有请求禁用重定向；通用远程端点和本地 Ollama 均禁用系统代理；
 - `apply_reviewed_proposal` 重验 Proposal hash、UTF-16 anchor、目标基线、hunk 与审查决策，并原子写入正文和 Operation/Review 终态。
 - `summary_worker` 按 Block、Document、Project 顺序消费当前项目队列，使用确定性本地提取生成器并记录 source hash/Commit/provider/model；目标绑定的 Context 读取只返回无失效项的当前章节、祖先和项目摘要。
 
@@ -29,6 +30,12 @@ Rust 宿主安全边界与跨语言命令适配层。
 ## 最近项目
 
 最近项目注册表不存入任一项目包，也不作为项目真实性来源。它采用固定 schema、256 KiB 上限、最多 12 项、同目录临时文件、旧文件备份与发布失败回滚。记录只包含项目 ID、标题、语言、绝对目录和最后打开时间；列表可标记缺失路径。快速打开从注册表解析目录后仍调用 `OpenedProject::open`，并再次比对登记项目 ID。WebView 不能修改目录映射；移除记录不删除项目文件。
+
+## 可信模型端点
+
+可信端点注册表同样位于应用本地数据目录，不属于项目内容。注册输入只接受 label、公共 ASCII DNS hostname、安全 base path、逐字确认的 HTTPS origin 和保守能力声明；Host 生成 `endpoint-{uuid}`、base URL 与 `secret://providers/openai-compatible/{endpointId}`。IP literal、保留/本地域名、任意端口、URL 凭据、转义、query、fragment 和路径穿越均被拒绝。
+
+通用请求不能携带目标 URL。授权和执行都会从共享注册表按 endpoint ID 重取记录，并要求 Provider 配置中的 credential reference 与能力快照完全一致。Chat 路径固定追加 `/chat/completions`；显式模型探测固定追加 `/models`，使用 3 秒超时和 1 MiB 上限且不发送项目内容。探测只验证当前可达性和模型列表格式，不自动升级 JSON、usage、reasoning 或 tool-call 能力。
 
 ## 工作区命令
 

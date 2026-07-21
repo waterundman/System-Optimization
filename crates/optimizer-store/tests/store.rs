@@ -111,6 +111,8 @@ fn operation_bundle(run_id: &str, packet_id: &str, proposal_id: &str) -> Persist
             project_id: "project-1".into(),
             base_commit_id: "commit-initial".into(),
             provider_id: "deepseek".into(),
+            provider_configuration_id: None,
+            provider_endpoint_id: None,
             model: "deepseek-v4-flash".into(),
             state: OperationState::Review,
             response_id: Some(format!("response-{run_id}")),
@@ -1209,6 +1211,50 @@ fn persists_operation_context_usage_events_and_patch_artifact_atomically() {
 }
 
 #[test]
+fn persists_openai_compatible_endpoint_provenance_and_rejects_unbound_runs() {
+    let temp = TempDatabase::new();
+    let mut store = open_seeded(&temp.database);
+    let endpoint_id = "endpoint-0123456789abcdef0123456789abcdef";
+    let configuration_id = "provider-openai-compatible-endpoint-0123456789abcdef0123456789abcdef";
+
+    let mut compatible = operation_bundle(
+        "run-compatible",
+        "context-compatible",
+        "proposal-compatible",
+    );
+    compatible.run.provider_id = "openai_compatible".into();
+    compatible.run.provider_configuration_id = Some(configuration_id.into());
+    compatible.run.provider_endpoint_id = Some(endpoint_id.into());
+    compatible.run.model = "acme-writer-v1".into();
+
+    let stored = store.persist_operation_bundle(&compatible).unwrap();
+    assert_eq!(
+        stored.provider_configuration_id.as_deref(),
+        Some(configuration_id)
+    );
+    assert_eq!(stored.provider_endpoint_id.as_deref(), Some(endpoint_id));
+
+    let mut unbound = operation_bundle("run-unbound", "context-unbound", "proposal-unbound");
+    unbound.run.provider_id = "openai_compatible".into();
+    unbound.run.model = "acme-writer-v1".into();
+    let error = store.persist_operation_bundle(&unbound).unwrap_err();
+    assert!(matches!(error, StoreError::Validation(_)));
+
+    let mut forged = operation_bundle("run-forged", "context-forged", "proposal-forged");
+    forged.run.provider_id = "openai_compatible".into();
+    forged.run.provider_configuration_id = Some("provider-forged".into());
+    forged.run.provider_endpoint_id = Some(endpoint_id.into());
+    forged.run.model = "acme-writer-v1".into();
+    let error = store.persist_operation_bundle(&forged).unwrap_err();
+    assert!(matches!(error, StoreError::Validation(_)));
+
+    let mut built_in = operation_bundle("run-built-in", "context-built-in", "proposal-built-in");
+    built_in.run.provider_endpoint_id = Some(endpoint_id.into());
+    let error = store.persist_operation_bundle(&built_in).unwrap_err();
+    assert!(matches!(error, StoreError::Validation(_)));
+}
+
+#[test]
 fn lists_persistent_review_candidates_and_creates_a_snapshot_backed_branch() {
     let temp = TempDatabase::new();
     let mut store = open_seeded(&temp.database);
@@ -1382,6 +1428,8 @@ fn persists_failed_runs_without_fabricating_context_or_artifacts() {
             project_id: "project-1".into(),
             base_commit_id: "commit-initial".into(),
             provider_id: "qwen".into(),
+            provider_configuration_id: None,
+            provider_endpoint_id: None,
             model: "qwen-plus".into(),
             state: OperationState::Failed,
             response_id: None,

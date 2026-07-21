@@ -51,13 +51,14 @@ impl OptimizerStore {
         let failure = bundle.run.failure.as_ref();
         transaction.execute(
             "INSERT INTO operation_run(
-               id, operation_intent_id, project_id, base_commit_id, provider_id, model, state,
+               id, operation_intent_id, project_id, base_commit_id, provider_id,
+               provider_configuration_id, provider_endpoint_id, model, state,
                context_packet_id, response_id, finish_reason,
                input_tokens, output_tokens, total_tokens, cached_input_tokens, reasoning_tokens,
                failure_code, failure_message, failure_retriable, started_at, updated_at
              ) VALUES (
                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-               ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20
+               ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
              )",
             params![
                 bundle.run.id,
@@ -65,6 +66,8 @@ impl OptimizerStore {
                 bundle.run.project_id,
                 bundle.run.base_commit_id,
                 bundle.run.provider_id,
+                bundle.run.provider_configuration_id,
+                bundle.run.provider_endpoint_id,
                 bundle.run.model,
                 bundle.run.state.as_str(),
                 bundle
@@ -161,7 +164,8 @@ impl OptimizerStore {
         let raw = self
             .connection
             .query_row(
-                "SELECT id, operation_intent_id, project_id, base_commit_id, provider_id, model,
+                "SELECT id, operation_intent_id, project_id, base_commit_id, provider_id,
+                        provider_configuration_id, provider_endpoint_id, model,
                         state, context_packet_id, response_id, finish_reason,
                         input_tokens, output_tokens, total_tokens, cached_input_tokens, reasoning_tokens,
                         failure_code, failure_message, failure_retriable, started_at, updated_at
@@ -811,6 +815,8 @@ struct RawOperationRun {
     project_id: String,
     base_commit_id: String,
     provider_id: String,
+    provider_configuration_id: Option<String>,
+    provider_endpoint_id: Option<String>,
     model: String,
     state: String,
     context_packet_id: Option<String>,
@@ -870,6 +876,8 @@ impl RawOperationRun {
             project_id: self.project_id,
             base_commit_id: self.base_commit_id,
             provider_id: self.provider_id,
+            provider_configuration_id: self.provider_configuration_id,
+            provider_endpoint_id: self.provider_endpoint_id,
             model: self.model,
             state: parse_operation_state(&self.state)?,
             context_packet_id: self.context_packet_id,
@@ -890,21 +898,23 @@ fn read_raw_operation_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawOperat
         project_id: row.get(2)?,
         base_commit_id: row.get(3)?,
         provider_id: row.get(4)?,
-        model: row.get(5)?,
-        state: row.get(6)?,
-        context_packet_id: row.get(7)?,
-        response_id: row.get(8)?,
-        finish_reason: row.get(9)?,
-        input_tokens: row.get(10)?,
-        output_tokens: row.get(11)?,
-        total_tokens: row.get(12)?,
-        cached_input_tokens: row.get(13)?,
-        reasoning_tokens: row.get(14)?,
-        failure_code: row.get(15)?,
-        failure_message: row.get(16)?,
-        failure_retriable: row.get(17)?,
-        started_at: row.get(18)?,
-        updated_at: row.get(19)?,
+        provider_configuration_id: row.get(5)?,
+        provider_endpoint_id: row.get(6)?,
+        model: row.get(7)?,
+        state: row.get(8)?,
+        context_packet_id: row.get(9)?,
+        response_id: row.get(10)?,
+        finish_reason: row.get(11)?,
+        input_tokens: row.get(12)?,
+        output_tokens: row.get(13)?,
+        total_tokens: row.get(14)?,
+        cached_input_tokens: row.get(15)?,
+        reasoning_tokens: row.get(16)?,
+        failure_code: row.get(17)?,
+        failure_message: row.get(18)?,
+        failure_retriable: row.get(19)?,
+        started_at: row.get(20)?,
+        updated_at: row.get(21)?,
     })
 }
 
@@ -924,9 +934,39 @@ fn validate_bundle(bundle: &PersistOperationBundle) -> StoreResult<()> {
     }
     if !matches!(
         run.provider_id.as_str(),
-        "deepseek" | "qwen" | "kimi" | "minimax" | "ollama"
+        "deepseek" | "qwen" | "kimi" | "minimax" | "ollama" | "openai_compatible"
     ) {
         return validation("run.provider_id is unsupported");
+    }
+    if run.provider_id == "openai_compatible" {
+        let configuration_id = run.provider_configuration_id.as_deref().ok_or_else(|| {
+            StoreError::Validation(
+                "openai_compatible run requires provider_configuration_id".into(),
+            )
+        })?;
+        let endpoint_id = run.provider_endpoint_id.as_deref().ok_or_else(|| {
+            StoreError::Validation("openai_compatible run requires provider_endpoint_id".into())
+        })?;
+        non_empty("run.provider_configuration_id", configuration_id)?;
+        if !endpoint_id.starts_with("endpoint-")
+            || endpoint_id.len() != "endpoint-".len() + 32
+            || !endpoint_id["endpoint-".len()..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return validation("run.provider_endpoint_id is invalid");
+        }
+        if configuration_id != format!("provider-openai-compatible-{endpoint_id}") {
+            return validation("run.provider_configuration_id does not match provider_endpoint_id");
+        }
+    } else if run.provider_endpoint_id.is_some() {
+        return validation("run.provider_endpoint_id is only valid for openai_compatible");
+    }
+    if let Some(configuration_id) = &run.provider_configuration_id {
+        non_empty("run.provider_configuration_id", configuration_id)?;
+        if configuration_id.len() > 256 {
+            return validation("run.provider_configuration_id exceeds 256 bytes");
+        }
     }
     if !matches!(
         run.state,

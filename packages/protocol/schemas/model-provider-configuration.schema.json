@@ -18,7 +18,7 @@
   "properties": {
     "schemaVersion": { "const": 1 },
     "id": { "type": "string", "minLength": 1 },
-    "providerId": { "enum": ["deepseek", "qwen", "kimi", "minimax", "ollama"] },
+    "providerId": { "enum": ["deepseek", "qwen", "kimi", "minimax", "ollama", "openai_compatible"] },
     "enabled": { "type": "boolean" },
     "defaultModel": { "type": "string", "minLength": 1 },
     "credentialRef": { "type": "string", "pattern": "^secret://[A-Za-z0-9._~/-]+$" },
@@ -31,6 +31,24 @@
         "workspaceId": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" }
       }
     },
+    "openaiCompatible": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "endpointId",
+        "endpointRevision",
+        "jsonObject",
+        "streamUsage",
+        "maxOutputTokenField"
+      ],
+      "properties": {
+        "endpointId": { "type": "string", "pattern": "^endpoint-[a-f0-9]{32}$" },
+        "endpointRevision": { "const": 1 },
+        "jsonObject": { "type": "boolean" },
+        "streamUsage": { "type": "boolean" },
+        "maxOutputTokenField": { "enum": ["max_tokens", "max_completion_tokens"] }
+      }
+    },
     "defaultTimeoutMs": { "type": "integer", "minimum": 1, "maximum": 3600000 },
     "maxRequestBytes": { "type": "integer", "minimum": 1, "maximum": 67108864 },
     "updatedAt": { "type": "string", "format": "date-time" }
@@ -40,6 +58,23 @@
       "if": { "properties": { "providerId": { "const": "qwen" } } },
       "then": {},
       "else": { "not": { "required": ["qwen"] } }
+    },
+    {
+      "if": { "properties": { "providerId": { "const": "openai_compatible" } } },
+      "then": {
+        "required": ["openaiCompatible"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^provider-openai-compatible-endpoint-[a-f0-9]{32}$"
+          },
+          "credentialRef": {
+            "type": "string",
+            "pattern": "^secret://providers/openai-compatible/endpoint-[a-f0-9]{32}$"
+          }
+        }
+      },
+      "else": { "not": { "required": ["openaiCompatible"] } }
     }
   ]
 }

@@ -13,7 +13,11 @@ use time::format_description::well_known::{Rfc2822, Rfc3339};
 use uuid::Uuid;
 
 use crate::confirmed_context::ConfirmedContextPacket;
-use crate::{SecretReference, SecretStore, SecretStoreError, SecretValue};
+use crate::{
+    OpenAICompatibleMaxOutputTokenField, SecretReference, SecretStore, SecretStoreError,
+    SecretValue, TrustedModelEndpoint, TrustedModelEndpointCapabilities,
+    TrustedModelEndpointRegistry,
+};
 
 const REQUEST_SCHEMA_VERSION: u32 = 1;
 const MAX_TIMEOUT_MS: u32 = 3_600_000;
@@ -22,8 +26,8 @@ const MAX_RESPONSE_BYTES: usize = 67_108_864;
 const MAX_ERROR_BYTES: usize = 65_536;
 const MAX_SSE_EVENT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
-const OLLAMA_DISCOVERY_TIMEOUT_MS: u32 = 3_000;
-const OLLAMA_DISCOVERY_MAX_BYTES: usize = 1024 * 1024;
+const MODEL_DISCOVERY_TIMEOUT_MS: u32 = 3_000;
+const MODEL_DISCOVERY_MAX_BYTES: usize = 1024 * 1024;
 const MODEL_AUTHORIZATION_TTL_SECONDS: i64 = 120;
 const MAX_PENDING_MODEL_AUTHORIZATIONS: usize = 32;
 const CONTROL_ACTIVE: u8 = 0;
@@ -39,6 +43,8 @@ pub enum ModelProviderId {
     Kimi,
     Minimax,
     Ollama,
+    #[serde(rename = "openai_compatible")]
+    OpenAICompatible,
 }
 
 impl ModelProviderId {
@@ -49,6 +55,7 @@ impl ModelProviderId {
             Self::Kimi => "kimi",
             Self::Minimax => "minimax",
             Self::Ollama => "ollama",
+            Self::OpenAICompatible => "openai_compatible",
         }
     }
 
@@ -59,6 +66,7 @@ impl ModelProviderId {
             Self::Kimi => "Kimi",
             Self::Minimax => "MiniMax",
             Self::Ollama => "Ollama",
+            Self::OpenAICompatible => "OpenAI-compatible",
         }
     }
 
@@ -95,6 +103,16 @@ pub struct QwenProviderConfiguration {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OpenAICompatibleProviderConfiguration {
+    pub endpoint_id: String,
+    pub endpoint_revision: u64,
+    pub json_object: bool,
+    pub stream_usage: bool,
+    pub max_output_token_field: OpenAICompatibleMaxOutputTokenField,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelProviderConfiguration {
     pub schema_version: u32,
     pub id: String,
@@ -103,6 +121,7 @@ pub struct ModelProviderConfiguration {
     pub default_model: String,
     pub credential_ref: String,
     pub qwen: Option<QwenProviderConfiguration>,
+    pub openai_compatible: Option<OpenAICompatibleProviderConfiguration>,
     pub default_timeout_ms: u32,
     pub max_request_bytes: u32,
     pub updated_at: String,
@@ -418,6 +437,15 @@ pub struct OllamaModelList {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct OpenAICompatibleModelList {
+    pub schema_version: u32,
+    pub endpoint_id: String,
+    pub endpoint: String,
+    pub models: Vec<OllamaModelInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CancelModelRequestResponse {
     pub schema_version: u32,
     pub request_id: String,
@@ -552,6 +580,7 @@ pub struct PreparedModelRequest {
     path: String,
     port: u16,
     use_tls: bool,
+    use_system_proxy: bool,
     method: ModelHttpMethod,
     body: Vec<u8>,
     timeout_ms: u32,
@@ -581,6 +610,10 @@ impl PreparedModelRequest {
 
     pub fn use_tls(&self) -> bool {
         self.use_tls
+    }
+
+    pub fn use_system_proxy(&self) -> bool {
+        self.use_system_proxy
     }
 
     pub fn method(&self) -> &'static str {
@@ -746,6 +779,7 @@ impl ModelCancellation {
 #[derive(Clone)]
 pub struct ModelExecutionHost {
     secrets: Arc<dyn SecretStore>,
+    trusted_endpoints: Arc<Mutex<TrustedModelEndpointRegistry>>,
     transport: Arc<dyn ModelTransport>,
     active: Arc<Mutex<HashMap<String, Arc<ModelCancellation>>>>,
     pending: Arc<Mutex<HashMap<String, PendingModelAuthorization>>>,
@@ -759,9 +793,21 @@ struct PendingModelAuthorization {
 
 impl ModelExecutionHost {
     pub fn new(secrets: Arc<dyn SecretStore>) -> Self {
-        Self::with_transport(
+        Self::with_transport_and_endpoints(
             secrets,
             Arc::new(super::model_transport::NativeModelTransport::new()),
+            Arc::new(Mutex::new(TrustedModelEndpointRegistry::memory())),
+        )
+    }
+
+    pub fn with_trusted_endpoints(
+        secrets: Arc<dyn SecretStore>,
+        trusted_endpoints: Arc<Mutex<TrustedModelEndpointRegistry>>,
+    ) -> Self {
+        Self::with_transport_and_endpoints(
+            secrets,
+            Arc::new(super::model_transport::NativeModelTransport::new()),
+            trusted_endpoints,
         )
     }
 
@@ -769,8 +815,21 @@ impl ModelExecutionHost {
         secrets: Arc<dyn SecretStore>,
         transport: Arc<dyn ModelTransport>,
     ) -> Self {
+        Self::with_transport_and_endpoints(
+            secrets,
+            transport,
+            Arc::new(Mutex::new(TrustedModelEndpointRegistry::memory())),
+        )
+    }
+
+    pub fn with_transport_and_endpoints(
+        secrets: Arc<dyn SecretStore>,
+        transport: Arc<dyn ModelTransport>,
+        trusted_endpoints: Arc<Mutex<TrustedModelEndpointRegistry>>,
+    ) -> Self {
         Self {
             secrets,
+            trusted_endpoints,
             transport,
             active: Arc::new(Mutex::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
@@ -782,7 +841,7 @@ impl ModelExecutionHost {
         input: ModelExecutionRequest,
         scope: ModelAuthorizationScope,
     ) -> Result<ModelRequestAuthorization, ModelGatewayError> {
-        let prepared = prepare_request(&input)?;
+        let prepared = self.prepare_request(&input)?;
         let provider_id = prepared.provider_id;
         let now = OffsetDateTime::now_utc();
         let expires_at = now + time::Duration::seconds(MODEL_AUTHORIZATION_TTL_SECONDS);
@@ -891,10 +950,11 @@ impl ModelExecutionHost {
             path: "/v1/models".into(),
             port: 11_434,
             use_tls: false,
+            use_system_proxy: false,
             method: ModelHttpMethod::Get,
             body: Vec::new(),
-            timeout_ms: OLLAMA_DISCOVERY_TIMEOUT_MS,
-            max_response_bytes: OLLAMA_DISCOVERY_MAX_BYTES,
+            timeout_ms: MODEL_DISCOVERY_TIMEOUT_MS,
+            max_response_bytes: MODEL_DISCOVERY_MAX_BYTES,
         };
         let control = ModelCancellation::new();
         let mut sink = CollectingResponseSink::new(prepared.max_response_bytes());
@@ -911,6 +971,54 @@ impl ModelExecutionHost {
             ));
         }
         parse_ollama_models(&body)
+    }
+
+    pub fn list_openai_compatible_models(
+        &self,
+        endpoint_id: &str,
+    ) -> Result<OpenAICompatibleModelList, ModelGatewayError> {
+        let endpoint = self.trusted_endpoint(endpoint_id)?;
+        let reference = SecretReference::parse(endpoint.credential_ref.clone())?;
+        let secret = self.secrets.resolve(&reference)?.ok_or_else(|| {
+            ModelGatewayError::new(
+                "PROVIDER_CREDENTIAL_MISSING",
+                format!("No credential is stored for {reference}"),
+            )
+            .for_provider(ModelProviderId::OpenAICompatible)
+        })?;
+        let prepared = PreparedModelRequest {
+            request_id: format!("openai-compatible-model-list-{endpoint_id}"),
+            provider_id: ModelProviderId::OpenAICompatible,
+            host: endpoint.hostname.clone(),
+            path: endpoint.models_path(),
+            port: 443,
+            use_tls: true,
+            use_system_proxy: false,
+            method: ModelHttpMethod::Get,
+            body: Vec::new(),
+            timeout_ms: MODEL_DISCOVERY_TIMEOUT_MS,
+            max_response_bytes: MODEL_DISCOVERY_MAX_BYTES,
+        };
+        let control = ModelCancellation::new();
+        let mut sink = CollectingResponseSink::new(prepared.max_response_bytes());
+        self.transport
+            .execute(&prepared, Some(&secret), &control, &mut sink)
+            .map_err(|error| error.for_provider(ModelProviderId::OpenAICompatible))?;
+        let (head, body) = sink.finish(ModelProviderId::OpenAICompatible)?;
+        if !(200..300).contains(&head.status) {
+            return Err(provider_http_error(
+                ModelProviderId::OpenAICompatible,
+                &head,
+                &body,
+                Some(secret.expose_secret()),
+            ));
+        }
+        Ok(OpenAICompatibleModelList {
+            schema_version: REQUEST_SCHEMA_VERSION,
+            endpoint_id: endpoint.id,
+            endpoint: endpoint.base_url,
+            models: parse_model_entries(&body, ModelProviderId::OpenAICompatible)?,
+        })
     }
 
     pub fn execute_stream<F>(
@@ -934,7 +1042,7 @@ impl ModelExecutionHost {
         F: FnMut(ModelStreamEvent) -> Result<(), ModelGatewayError>,
         R: FnOnce(),
     {
-        let prepared = prepare_request(&input)?;
+        let prepared = self.prepare_request(&input)?;
         let provider_id = prepared.provider_id;
         let secret = if provider_id == ModelProviderId::Ollama {
             None
@@ -998,6 +1106,47 @@ impl ModelExecutionHost {
         }
         transport_result.map_err(|error| error.for_provider(provider_id))?;
         sink.finish()
+    }
+
+    fn prepare_request(
+        &self,
+        input: &ModelExecutionRequest,
+    ) -> Result<PreparedModelRequest, ModelGatewayError> {
+        let endpoint = if input.configuration.provider_id == ModelProviderId::OpenAICompatible {
+            let compatible = input
+                .configuration
+                .openai_compatible
+                .as_ref()
+                .ok_or_else(|| {
+                    configuration_error(
+                        ModelProviderId::OpenAICompatible,
+                        "openaiCompatible configuration is required",
+                    )
+                })?;
+            Some(self.trusted_endpoint(&compatible.endpoint_id)?)
+        } else {
+            None
+        };
+        prepare_request(input, endpoint.as_ref())
+    }
+
+    fn trusted_endpoint(
+        &self,
+        endpoint_id: &str,
+    ) -> Result<TrustedModelEndpoint, ModelGatewayError> {
+        self.trusted_endpoints
+            .lock()
+            .map_err(|_| {
+                ModelGatewayError::new(
+                    "TRUSTED_MODEL_ENDPOINTS_UNAVAILABLE",
+                    "trusted model endpoint state is unavailable",
+                )
+            })?
+            .get(endpoint_id)
+            .map_err(|error| {
+                ModelGatewayError::new(error.code(), error.public_message())
+                    .for_provider(ModelProviderId::OpenAICompatible)
+            })
     }
 
     pub fn cancel(&self, request_id: impl Into<String>) -> CancelModelRequestResponse {
@@ -1066,6 +1215,7 @@ impl Drop for ActiveRequestGuard {
 
 fn prepare_request(
     input: &ModelExecutionRequest,
+    trusted_endpoint: Option<&TrustedModelEndpoint>,
 ) -> Result<PreparedModelRequest, ModelGatewayError> {
     if input.schema_version != REQUEST_SCHEMA_VERSION {
         return Err(ModelGatewayError::new(
@@ -1078,8 +1228,12 @@ fn prepare_request(
     }
     validate_request_id(&input.request_id)?;
     validate_configuration(&input.configuration)?;
-    validate_model_request(input.configuration.provider_id, &input.request)?;
-    let endpoint = provider_endpoint(&input.configuration)?;
+    validate_model_request(
+        input.configuration.provider_id,
+        input.configuration.openai_compatible.as_ref(),
+        &input.request,
+    )?;
+    let endpoint = provider_endpoint(&input.configuration, trusted_endpoint)?;
     let model = input
         .request
         .model
@@ -1093,7 +1247,12 @@ fn prepare_request(
             "model must contain 1-256 characters",
         ));
     }
-    let body = build_request_body(input.configuration.provider_id, model, &input.request)?;
+    let body = build_request_body(
+        input.configuration.provider_id,
+        input.configuration.openai_compatible.as_ref(),
+        model,
+        &input.request,
+    )?;
     let body = serde_json::to_vec(&body).map_err(|_| {
         invalid_request(
             input.configuration.provider_id,
@@ -1116,6 +1275,7 @@ fn prepare_request(
         path: endpoint.path,
         port: endpoint.port,
         use_tls: endpoint.use_tls,
+        use_system_proxy: endpoint.use_system_proxy,
         method: ModelHttpMethod::Post,
         body,
         timeout_ms: input.configuration.default_timeout_ms,
@@ -1196,11 +1356,30 @@ fn validate_configuration(
         ));
     }
     let credential_ref = SecretReference::parse(configuration.credential_ref.clone())?;
-    let expected_credential_ref = format!("secret://providers/{provider_id}/default");
+    let expected_credential_ref = if provider_id == ModelProviderId::OpenAICompatible {
+        let compatible = configuration.openai_compatible.as_ref().ok_or_else(|| {
+            configuration_error(
+                provider_id,
+                "openaiCompatible configuration is required for this provider",
+            )
+        })?;
+        if compatible.endpoint_revision != 1 || !safe_endpoint_id(&compatible.endpoint_id) {
+            return Err(configuration_error(
+                provider_id,
+                "openaiCompatible endpoint identity or revision is invalid",
+            ));
+        }
+        format!(
+            "secret://providers/openai-compatible/{}",
+            compatible.endpoint_id
+        )
+    } else {
+        format!("secret://providers/{provider_id}/default")
+    };
     if credential_ref.as_str() != expected_credential_ref {
         return Err(configuration_error(
             provider_id,
-            "credentialRef must match the provider's fixed default credential slot",
+            "credentialRef must match the Host-bound provider credential slot",
         ));
     }
     if !(1..=MAX_TIMEOUT_MS).contains(&configuration.default_timeout_ms) {
@@ -1219,6 +1398,13 @@ fn validate_configuration(
         return Err(configuration_error(
             provider_id,
             "qwen configuration is only valid for the Qwen provider",
+        ));
+    }
+    if provider_id != ModelProviderId::OpenAICompatible && configuration.openai_compatible.is_some()
+    {
+        return Err(configuration_error(
+            provider_id,
+            "openaiCompatible configuration is only valid for the openai_compatible provider",
         ));
     }
     if let Some(qwen) = &configuration.qwen {
@@ -1250,6 +1436,7 @@ fn validate_configuration(
 
 fn validate_model_request(
     provider_id: ModelProviderId,
+    openai_compatible: Option<&OpenAICompatibleProviderConfiguration>,
     request: &ModelRequest,
 ) -> Result<(), ModelGatewayError> {
     if request.messages.is_empty() {
@@ -1335,6 +1522,31 @@ fn validate_model_request(
             "MiniMax has no verified json_object capability",
         ));
     }
+    if provider_id == ModelProviderId::OpenAICompatible
+        && request.response_format == Some(ModelResponseFormat::JsonObject)
+        && openai_compatible.is_none_or(|configuration| !configuration.json_object)
+    {
+        return Err(invalid_request(
+            provider_id,
+            "the trusted endpoint has no declared json_object capability",
+        ));
+    }
+    if provider_id == ModelProviderId::OpenAICompatible
+        && (request.reasoning.is_some()
+            || request.tools.is_some()
+            || request.tool_choice.is_some()
+            || request.messages.iter().any(|message| {
+                message.role == ModelMessageRole::Tool
+                    || message.reasoning_content.is_some()
+                    || message.tool_call_id.is_some()
+                    || message.tool_calls.is_some()
+            }))
+    {
+        return Err(invalid_request(
+            provider_id,
+            "the trusted endpoint has no declared reasoning or tool-call capability",
+        ));
+    }
     if let Some(tools) = &request.tools {
         if tools.is_empty() || tools.len() > 128 {
             return Err(invalid_request(
@@ -1368,21 +1580,40 @@ fn valid_tool_name(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
+fn safe_endpoint_id(value: &str) -> bool {
+    value.starts_with("endpoint-")
+        && value.len() == "endpoint-".len() + 32
+        && value["endpoint-".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
 struct ProviderEndpoint {
     host: String,
     path: String,
     port: u16,
     use_tls: bool,
+    use_system_proxy: bool,
 }
 
 fn provider_endpoint(
     configuration: &ModelProviderConfiguration,
+    trusted_endpoint: Option<&TrustedModelEndpoint>,
 ) -> Result<ProviderEndpoint, ModelGatewayError> {
     let endpoint = match configuration.provider_id {
-        ModelProviderId::Deepseek => ("api.deepseek.com".to_string(), "/chat/completions"),
-        ModelProviderId::Kimi => ("api.moonshot.cn".to_string(), "/v1/chat/completions"),
-        ModelProviderId::Minimax => ("api.minimaxi.com".to_string(), "/v1/chat/completions"),
-        ModelProviderId::Ollama => ("127.0.0.1".to_string(), "/v1/chat/completions"),
+        ModelProviderId::Deepseek => (
+            "api.deepseek.com".to_string(),
+            "/chat/completions".to_string(),
+        ),
+        ModelProviderId::Kimi => (
+            "api.moonshot.cn".to_string(),
+            "/v1/chat/completions".to_string(),
+        ),
+        ModelProviderId::Minimax => (
+            "api.minimaxi.com".to_string(),
+            "/v1/chat/completions".to_string(),
+        ),
+        ModelProviderId::Ollama => ("127.0.0.1".to_string(), "/v1/chat/completions".to_string()),
         ModelProviderId::Qwen => {
             let default = QwenProviderConfiguration {
                 region: QwenDeploymentRegion::China,
@@ -1412,23 +1643,59 @@ fn provider_endpoint(
                     ));
                 }
             };
-            (host, "/compatible-mode/v1/chat/completions")
+            (host, "/compatible-mode/v1/chat/completions".to_string())
+        }
+        ModelProviderId::OpenAICompatible => {
+            let endpoint = trusted_endpoint.ok_or_else(|| {
+                configuration_error(
+                    ModelProviderId::OpenAICompatible,
+                    "trusted endpoint is not registered",
+                )
+            })?;
+            let compatible = configuration.openai_compatible.as_ref().ok_or_else(|| {
+                configuration_error(
+                    ModelProviderId::OpenAICompatible,
+                    "openaiCompatible configuration is required",
+                )
+            })?;
+            let expected_capabilities = TrustedModelEndpointCapabilities {
+                json_object: compatible.json_object,
+                stream_usage: compatible.stream_usage,
+                max_output_token_field: compatible.max_output_token_field,
+            };
+            if endpoint.id != compatible.endpoint_id
+                || endpoint.revision != compatible.endpoint_revision
+                || endpoint.credential_ref != configuration.credential_ref
+                || configuration.id != format!("provider-openai-compatible-{}", endpoint.id)
+                || endpoint.capabilities != expected_capabilities
+            {
+                return Err(configuration_error(
+                    ModelProviderId::OpenAICompatible,
+                    "provider configuration does not match the current trusted endpoint record",
+                ));
+            }
+            (endpoint.hostname.clone(), endpoint.chat_completions_path())
         }
     };
     Ok(ProviderEndpoint {
         host: endpoint.0,
-        path: endpoint.1.to_string(),
+        path: endpoint.1,
         port: if configuration.provider_id == ModelProviderId::Ollama {
             11_434
         } else {
             443
         },
         use_tls: configuration.provider_id != ModelProviderId::Ollama,
+        use_system_proxy: !matches!(
+            configuration.provider_id,
+            ModelProviderId::Ollama | ModelProviderId::OpenAICompatible
+        ),
     })
 }
 
 fn build_request_body(
     provider_id: ModelProviderId,
+    openai_compatible: Option<&OpenAICompatibleProviderConfiguration>,
     model: &str,
     request: &ModelRequest,
 ) -> Result<Value, ModelGatewayError> {
@@ -1453,14 +1720,21 @@ fn build_request_body(
         ("model".into(), Value::String(model.to_string())),
         ("messages".into(), Value::Array(messages)),
         ("stream".into(), Value::Bool(true)),
-        ("stream_options".into(), json!({ "include_usage": true })),
     ]);
+    if provider_id != ModelProviderId::OpenAICompatible
+        || openai_compatible.is_some_and(|configuration| configuration.stream_usage)
+    {
+        body.insert("stream_options".into(), json!({ "include_usage": true }));
+    }
     if let Some(maximum) = request.max_output_tokens {
         let field = match provider_id {
             ModelProviderId::Deepseek | ModelProviderId::Kimi | ModelProviderId::Ollama => {
                 "max_tokens"
             }
             ModelProviderId::Qwen | ModelProviderId::Minimax => "max_completion_tokens",
+            ModelProviderId::OpenAICompatible => openai_compatible
+                .map(|configuration| configuration.max_output_token_field.as_str())
+                .unwrap_or("max_tokens"),
         };
         body.insert(field.into(), Value::from(maximum));
     }
@@ -1476,7 +1750,10 @@ fn build_request_body(
             serde_json::to_value(stop).expect("stop is serializable"),
         );
     }
-    if let Some(format) = request.response_format {
+    if let Some(format) = request.response_format
+        && !(provider_id == ModelProviderId::OpenAICompatible
+            && format == ModelResponseFormat::Text)
+    {
         body.insert("response_format".into(), json!({ "type": format.as_str() }));
     }
     if let Some(tools) = &request.tools {
@@ -1595,6 +1872,7 @@ fn apply_reasoning_dialect(
                 body.insert("reasoning_effort".into(), Value::String(effort.into()));
             }
         }
+        ModelProviderId::OpenAICompatible => {}
         ModelProviderId::Minimax => unreachable!("handled above"),
     }
 }
@@ -1655,7 +1933,7 @@ impl ModelResponseSink for CollectingResponseSink {
         if self.body.len().saturating_add(chunk.len()) > self.maximum {
             return Err(ModelGatewayError::new(
                 "PROVIDER_PROTOCOL",
-                "Ollama model list exceeded the configured size limit",
+                "provider model list exceeded the configured size limit",
             ));
         }
         self.body.extend_from_slice(chunk);
@@ -1664,34 +1942,46 @@ impl ModelResponseSink for CollectingResponseSink {
 }
 
 fn parse_ollama_models(body: &[u8]) -> Result<OllamaModelList, ModelGatewayError> {
+    Ok(OllamaModelList {
+        schema_version: REQUEST_SCHEMA_VERSION,
+        endpoint: "127.0.0.1:11434/v1".into(),
+        models: parse_model_entries(body, ModelProviderId::Ollama)?,
+    })
+}
+
+fn parse_model_entries(
+    body: &[u8],
+    provider_id: ModelProviderId,
+) -> Result<Vec<OllamaModelInfo>, ModelGatewayError> {
+    let protocol_error = |message: String| {
+        ModelGatewayError::new("PROVIDER_PROTOCOL", message).for_provider(provider_id)
+    };
     let root: Value = serde_json::from_slice(body)
-        .map_err(|_| ollama_protocol_error("Ollama model list is not valid JSON"))?;
+        .map_err(|_| protocol_error("provider model list is not valid JSON".into()))?;
     let models = root
         .as_object()
         .and_then(|value| value.get("data"))
         .and_then(Value::as_array)
-        .ok_or_else(|| ollama_protocol_error("Ollama model list must contain a data array"))?;
+        .ok_or_else(|| protocol_error("provider model list must contain a data array".into()))?;
     if models.len() > 10_000 {
-        return Err(ollama_protocol_error(
-            "Ollama model list contains too many entries",
+        return Err(protocol_error(
+            "provider model list contains too many entries".into(),
         ));
     }
     let mut normalized = BTreeMap::new();
     for (index, value) in models.iter().enumerate() {
         let model = value
             .as_object()
-            .ok_or_else(|| ollama_protocol_error(format!("data[{index}] must be an object")))?;
+            .ok_or_else(|| protocol_error(format!("data[{index}] must be an object")))?;
         let id = model
             .get("id")
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control))
-            .ok_or_else(|| {
-                ollama_protocol_error(format!("data[{index}].id must be a safe model ID"))
-            })?
+            .ok_or_else(|| protocol_error(format!("data[{index}].id must be a safe model ID")))?
             .to_string();
         let created = match model.get("created") {
             Some(value) => Some(value.as_u64().ok_or_else(|| {
-                ollama_protocol_error(format!("data[{index}].created must be an integer"))
+                protocol_error(format!("data[{index}].created must be an integer"))
             })?),
             None => None,
         };
@@ -1701,9 +1991,7 @@ fn parse_ollama_models(body: &[u8]) -> Result<OllamaModelList, ModelGatewayError
                     .as_str()
                     .filter(|value| value.len() <= 128)
                     .ok_or_else(|| {
-                        ollama_protocol_error(format!(
-                            "data[{index}].owned_by must be a short string"
-                        ))
+                        protocol_error(format!("data[{index}].owned_by must be a short string"))
                     })?;
                 Some(value.to_string())
             }
@@ -1720,20 +2008,12 @@ fn parse_ollama_models(body: &[u8]) -> Result<OllamaModelList, ModelGatewayError
             )
             .is_some()
         {
-            return Err(ollama_protocol_error(
-                "Ollama model list contains duplicate IDs",
+            return Err(protocol_error(
+                "provider model list contains duplicate IDs".into(),
             ));
         }
     }
-    Ok(OllamaModelList {
-        schema_version: REQUEST_SCHEMA_VERSION,
-        endpoint: "127.0.0.1:11434/v1".into(),
-        models: normalized.into_values().collect(),
-    })
-}
-
-fn ollama_protocol_error(message: impl Into<String>) -> ModelGatewayError {
-    ModelGatewayError::new("PROVIDER_PROTOCOL", message).for_provider(ModelProviderId::Ollama)
+    Ok(normalized.into_values().collect())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2485,10 +2765,12 @@ mod tests {
                 ModelProviderId::Kimi => "kimi-k2.6",
                 ModelProviderId::Minimax => "MiniMax-M3",
                 ModelProviderId::Ollama => "qwen3:8b",
+                ModelProviderId::OpenAICompatible => "compatible-model",
             }
             .into(),
             credential_ref: format!("secret://providers/{provider_id}/default"),
             qwen: None,
+            openai_compatible: None,
             default_timeout_ms: 60_000,
             max_request_bytes: 16 * 1024 * 1024,
             updated_at: "2026-07-15T00:00:00Z".into(),
@@ -2551,6 +2833,50 @@ mod tests {
         }
     }
 
+    fn trusted_compatible_registry() -> (TrustedModelEndpointRegistry, TrustedModelEndpoint) {
+        let mut registry = TrustedModelEndpointRegistry::memory();
+        let endpoint = registry
+            .register(crate::RegisterTrustedModelEndpoint {
+                schema_version: 1,
+                label: "Acme Gateway".into(),
+                hostname: "api.acme.ai".into(),
+                base_path: "/openai/v1".into(),
+                confirmed_origin: "https://api.acme.ai".into(),
+                capabilities: TrustedModelEndpointCapabilities::default(),
+            })
+            .unwrap();
+        (registry, endpoint)
+    }
+
+    fn compatible_request(endpoint: &TrustedModelEndpoint) -> ModelExecutionRequest {
+        let mut request = model_request(ModelProviderId::OpenAICompatible);
+        request.configuration.id = format!("provider-openai-compatible-{}", endpoint.id);
+        request.configuration.credential_ref = endpoint.credential_ref.clone();
+        request.configuration.openai_compatible = Some(OpenAICompatibleProviderConfiguration {
+            endpoint_id: endpoint.id.clone(),
+            endpoint_revision: endpoint.revision,
+            json_object: endpoint.capabilities.json_object,
+            stream_usage: endpoint.capabilities.stream_usage,
+            max_output_token_field: endpoint.capabilities.max_output_token_field,
+        });
+        request.request.response_format = Some(ModelResponseFormat::Text);
+        request
+    }
+
+    fn host_with_compatible_endpoint(
+        registry: TrustedModelEndpointRegistry,
+        endpoint: &TrustedModelEndpoint,
+        transport: Arc<dyn ModelTransport>,
+    ) -> ModelExecutionHost {
+        let registry = Arc::new(Mutex::new(registry));
+        let secrets = Arc::new(MemorySecretStore::default());
+        let reference = SecretReference::parse(endpoint.credential_ref.clone()).unwrap();
+        secrets
+            .put(&reference, SecretValue::new("host-only-key").unwrap())
+            .unwrap();
+        ModelExecutionHost::with_transport_and_endpoints(secrets, transport, registry)
+    }
+
     #[test]
     fn builds_only_fixed_official_endpoints_and_provider_dialects() {
         let mut deepseek = model_request(ModelProviderId::Deepseek);
@@ -2560,7 +2886,7 @@ mod tests {
             preserve: None,
         });
         deepseek.request.response_format = Some(ModelResponseFormat::JsonObject);
-        let prepared = prepare_request(&deepseek).unwrap();
+        let prepared = prepare_request(&deepseek, None).unwrap();
         assert_eq!(prepared.host(), "api.deepseek.com");
         assert_eq!(prepared.path(), "/chat/completions");
         let body: Value = serde_json::from_slice(prepared.body()).unwrap();
@@ -2580,7 +2906,7 @@ mod tests {
             effort: None,
             preserve: Some(true),
         });
-        let prepared = prepare_request(&qwen).unwrap();
+        let prepared = prepare_request(&qwen, None).unwrap();
         assert_eq!(
             prepared.host(),
             "workspace_123.eu-central-1.maas.aliyuncs.com"
@@ -2597,7 +2923,7 @@ mod tests {
             effort: None,
             preserve: Some(true),
         });
-        let prepared = prepare_request(&kimi).unwrap();
+        let prepared = prepare_request(&kimi, None).unwrap();
         assert_eq!(prepared.host(), "api.moonshot.cn");
         assert_eq!(prepared.path(), "/v1/chat/completions");
         let body: Value = serde_json::from_slice(prepared.body()).unwrap();
@@ -2613,7 +2939,7 @@ mod tests {
             effort: None,
             preserve: None,
         });
-        let prepared = prepare_request(&minimax).unwrap();
+        let prepared = prepare_request(&minimax, None).unwrap();
         assert_eq!(prepared.host(), "api.minimaxi.com");
         let body: Value = serde_json::from_slice(prepared.body()).unwrap();
         assert_eq!(body["reasoning_split"], true);
@@ -2627,7 +2953,7 @@ mod tests {
             preserve: None,
         });
         ollama.request.response_format = Some(ModelResponseFormat::JsonObject);
-        let prepared = prepare_request(&ollama).unwrap();
+        let prepared = prepare_request(&ollama, None).unwrap();
         assert_eq!(prepared.host(), "127.0.0.1");
         assert_eq!(prepared.port(), 11_434);
         assert!(!prepared.use_tls());
@@ -2837,7 +3163,7 @@ mod tests {
             workspace_id: None,
         });
         assert_eq!(
-            prepare_request(&invalid).unwrap_err().code(),
+            prepare_request(&invalid, None).unwrap_err().code(),
             "PROVIDER_CONFIGURATION"
         );
     }
@@ -2872,6 +3198,115 @@ mod tests {
         assert_eq!(prepared.host(), "127.0.0.1");
         assert_eq!(prepared.port(), 11_434);
         assert!(!prepared.use_tls());
+    }
+
+    #[test]
+    fn compatible_execution_resolves_only_the_registered_endpoint_and_conservative_dialect() {
+        let frames = concat!(
+            "data: {\"id\":\"compatible-1\",\"model\":\"compatible-model\",",
+            "\"choices\":[{\"delta\":{\"content\":\"trusted result\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let transport = Arc::new(ScriptedTransport::sse(vec![frames.as_bytes().to_vec()]));
+        let (registry, endpoint) = trusted_compatible_registry();
+        let host = host_with_compatible_endpoint(registry, &endpoint, transport.clone());
+        let request = compatible_request(&endpoint);
+
+        let summary = host.execute_stream(request.clone(), |_| Ok(())).unwrap();
+
+        assert_eq!(summary.provider_id, ModelProviderId::OpenAICompatible);
+        assert_eq!(summary.content, "trusted result");
+        assert!(transport.saw_expected_secret.load(Ordering::Relaxed));
+        let prepared = transport.captured.lock().unwrap().clone().unwrap();
+        assert_eq!(prepared.host(), "api.acme.ai");
+        assert_eq!(prepared.path(), "/openai/v1/chat/completions");
+        assert_eq!(prepared.port(), 443);
+        assert!(prepared.use_tls());
+        assert!(!prepared.use_system_proxy());
+        let body: Value = serde_json::from_slice(prepared.body()).unwrap();
+        assert_eq!(body["max_tokens"], 512);
+        assert!(body.get("stream_options").is_none());
+        assert!(body.get("response_format").is_none());
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("reasoning_effort").is_none());
+
+        let mut unsupported = request.clone();
+        unsupported.request_id = "request-compatible-reasoning".into();
+        unsupported.request.reasoning = Some(ReasoningOptions {
+            mode: ReasoningMode::Enabled,
+            effort: Some(ReasoningEffort::High),
+            preserve: None,
+        });
+        assert_eq!(
+            host.execute_stream(unsupported, |_| Ok(()))
+                .unwrap_err()
+                .code(),
+            "INVALID_MODEL_REQUEST"
+        );
+
+        let mut tampered = request;
+        tampered.request_id = "request-compatible-tampered".into();
+        tampered
+            .configuration
+            .openai_compatible
+            .as_mut()
+            .unwrap()
+            .stream_usage = true;
+        assert_eq!(
+            host.execute_stream(tampered, |_| Ok(()))
+                .unwrap_err()
+                .code(),
+            "PROVIDER_CONFIGURATION"
+        );
+        assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
+
+        let mut forged_audit_identity = compatible_request(&endpoint);
+        forged_audit_identity.request_id = "request-compatible-forged-config".into();
+        forged_audit_identity.configuration.id = "provider-forged".into();
+        assert_eq!(
+            host.execute_stream(forged_audit_identity, |_| Ok(()))
+                .unwrap_err()
+                .code(),
+            "PROVIDER_CONFIGURATION"
+        );
+        assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn compatible_models_probe_is_bounded_and_bound_to_the_endpoint_secret() {
+        let transport = Arc::new(ScriptedTransport {
+            head: ModelHttpResponseHead {
+                status: 200,
+                headers: BTreeMap::from([("content-type".into(), "application/json".into())]),
+            },
+            chunks: vec![
+                br#"{"data":[{"id":"writer-z"},{"id":"writer-a","owned_by":"acme"}]}"#.to_vec(),
+            ],
+            calls: AtomicUsize::new(0),
+            saw_expected_secret: AtomicBool::new(false),
+            captured: Mutex::new(None),
+        });
+        let (registry, endpoint) = trusted_compatible_registry();
+        let host = host_with_compatible_endpoint(registry, &endpoint, transport.clone());
+
+        let response = host.list_openai_compatible_models(&endpoint.id).unwrap();
+
+        assert_eq!(response.endpoint_id, endpoint.id);
+        assert_eq!(response.endpoint, "https://api.acme.ai/openai/v1");
+        assert_eq!(
+            response
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["writer-a", "writer-z"]
+        );
+        assert!(transport.saw_expected_secret.load(Ordering::Relaxed));
+        let prepared = transport.captured.lock().unwrap().clone().unwrap();
+        assert_eq!(prepared.method(), "GET");
+        assert_eq!(prepared.path(), "/openai/v1/models");
+        assert!(prepared.body().is_empty());
+        assert!(!prepared.use_system_proxy());
     }
 
     #[test]

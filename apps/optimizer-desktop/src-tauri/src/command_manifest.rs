@@ -36,6 +36,9 @@ pub const REGISTERED_COMMANDS: &[&str] = &[
     "persist_operation_bundle",
     "append_review_event",
     "get_operation_audit",
+    "list_trusted_model_endpoints",
+    "register_trusted_model_endpoint",
+    "remove_trusted_model_endpoint",
     "store_provider_secret",
     "has_provider_secret",
     "delete_provider_secret",
@@ -43,4 +46,5 @@ pub const REGISTERED_COMMANDS: &[&str] = &[
     "execute_authorized_model_stream",
     "cancel_model_request",
     "list_ollama_models",
+    "list_openai_compatible_models",
 ];
