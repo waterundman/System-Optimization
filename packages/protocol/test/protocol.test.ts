@@ -26,6 +26,10 @@ const valid = {
   createdAt: "2026-07-14T00:00:00.000Z",
 };
 
+function constraintEntry(overrides: Readonly<Record<string, unknown>> = {}) {
+  return { severity: "hard", rule: "保持原文语言", ...overrides };
+}
+
 test("validates a supported OperationIntent", () => {
   const result = validateOperationIntent(valid);
   assert.equal(result.ok, true);
@@ -44,6 +48,77 @@ test("rejects an invalid target and output budget", () => {
       ["$.target.baseRevision", "$.output.maxTokens"],
     );
   }
+});
+
+test("validates operation constraints against the schema shape", () => {
+  const constraint = { severity: "hard", rule: "保持原文语言", sourceRef: "fact:style" };
+  assert.equal(validateOperationIntent({
+    ...valid,
+    constraints: [constraint, { severity: "soft", rule: "尽量精简" }],
+    userInstruction: "改写这段",
+  }).ok, true);
+
+  // Existing legal inputs (non-string or absent userInstruction) still pass.
+  assert.equal(validateOperationIntent({
+    ...valid,
+    constraints: [],
+    userInstruction: "",
+  }).ok, true);
+});
+
+test("rejects malformed constraints with per-item paths", () => {
+  const invalid = validateOperationIntent({
+    ...valid,
+    constraints: [
+      constraintEntry({ severity: "urgent", rule: "必须", sourceRef: "" }),
+      constraintEntry({ rule: "" }),
+      constraintEntry({ severity: "hard", rule: "ok", injected: true }),
+      null,
+    ],
+    userInstruction: "x".repeat(10_001),
+  });
+  assert.equal(invalid.ok, false);
+  if (!invalid.ok) {
+    assert.deepEqual(
+      invalid.issues.map((issue) => issue.path),
+      [
+        "$.constraints[0].severity",
+        "$.constraints[0].sourceRef",
+        "$.constraints[1].rule",
+        "$.constraints[2].injected",
+        "$.constraints[3]",
+        "$.userInstruction",
+      ],
+    );
+  }
+});
+
+test("rejects constraint overruns and user instruction length limits", () => {
+  const tooMany = validateOperationIntent({
+    ...valid,
+    constraints: Array.from({ length: 257 }, (_, index) => ({
+      severity: "hard",
+      rule: `rule-${index}`,
+    })),
+  });
+  assert.equal(tooMany.ok, false);
+  if (tooMany.ok) return;
+  assert.equal(
+    tooMany.issues.some((issue) => issue.path === "$.constraints"
+      && issue.message.includes("256")),
+    true,
+  );
+
+  const longRule = validateOperationIntent({
+    ...valid,
+    constraints: [{ severity: "hard", rule: "长".repeat(10_001) }],
+  });
+  assert.equal(longRule.ok, false);
+  if (longRule.ok) return;
+  assert.equal(
+    longRule.issues.some((issue) => issue.path === "$.constraints[0].rule"),
+    true,
+  );
 });
 
 test("validates immutable PatchProposal hunk baselines", () => {

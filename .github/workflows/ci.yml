@@ -20,3 +20,99 @@ jobs:
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --locked -- -D warnings
           cargo test --workspace --locked
+
+  audit:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Cargo audit
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          cargo audit 2>&1 | Tee-Object -FilePath cargo-audit.log
+          $advisories = Select-String -Path cargo-audit.log -Pattern 'RUSTSEC-\d{4}-\d{4}'
+          if ($advisories) {
+            foreach ($line in $advisories) {
+              Write-Host "::warning file=Cargo.lock::$($line.Line)"
+            }
+          } else {
+            Write-Host "::notice::Cargo audit completed with no advisories"
+          }
+      - name: NPM audit
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          npm.cmd audit --omit=dev 2>&1 | Tee-Object -FilePath npm-audit.log
+          $high = Select-String -Path npm-audit.log -Pattern '(high|critical)'
+          if ($high) {
+            foreach ($line in $high) {
+              Write-Host "::warning file=package.json::$($line.Line)"
+            }
+          } else {
+            Write-Host "::notice::npm audit completed with no high/critical vulnerabilities"
+          }
+      - name: Upload audit logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-logs
+          path: |
+            cargo-audit.log
+            npm-audit.log
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install frontend dependencies
+        run: npm.cmd install
+      - name: Build frontend
+        run: npm.cmd run desktop:build
+      - name: Cargo build release
+        run: cargo build --release
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Cargo audit (release gate)
+        run: cargo audit
+      - name: NPM audit (release gate)
+        run: npm.cmd audit --omit=dev --audit-level=high
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+      - name: Generate Rust SBOM
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path sbom | Out-Null
+          cargo cyclonedx -f json --output-directory sbom/
+          $rustSbom = Get-ChildItem sbom/*.cdx.json | Select-Object -First 1
+          if ($rustSbom) {
+            Copy-Item $rustSbom.FullName sbom/rust.cdx.json -Force
+          }
+      - name: Generate frontend SBOM
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path sbom | Out-Null
+          npm.cmd sbom --sbom-format cyclonedx --sbom-type application | Out-File -FilePath sbom/frontend.cdx.json -Encoding utf8
+      - name: Build and upload Tauri artifacts
+        uses: tauri-apps/tauri-action@v0
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Optimizer System ${{ github.ref_name }}'
+          releaseDraft: false
+          prerelease: false
+      - name: Upload SBOM to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload ${{ github.ref_name }} sbom/*.json

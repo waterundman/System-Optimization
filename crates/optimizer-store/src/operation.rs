@@ -3,10 +3,11 @@ use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use crate::error::{StoreError, StoreResult};
 use crate::model::{
     AppendReviewEvent, ContextPacketRecord, ModelUsageRecord, NewOperationLifecycleEvent,
-    OperationArtifactKind, OperationArtifactRecord, OperationAttemptRecord, OperationFailureRecord,
-    OperationLifecycleEventRecord, OperationRunRecord, OperationState, PersistOperationBundle,
+    OperationArtifactKind, OperationArtifactRecord, OperationAttemptRecord,
+    OperationFailureRecord, OperationInsightsRecord, OperationLifecycleEventRecord,
+    OperationRunRecord, OperationState, PayloadHashVariations, PersistOperationBundle,
     ReviewCandidateBranchRecord, ReviewCandidateSummaryRecord, ReviewDecision, ReviewEventKind,
-    ReviewEventRecord, ReviewSessionRecord, ReviewSessionStatus,
+    ReviewEventRecord, RevisionMetrics, ReviewSessionRecord, ReviewSessionStatus,
 };
 use crate::store::OptimizerStore;
 
@@ -179,6 +180,251 @@ impl OptimizerStore {
                 id: run_id.to_owned(),
             })?;
         raw.try_into_record()
+    }
+
+    pub fn list_operation_runs(
+        &self,
+        project_id: &str,
+        limit: i64,
+        offset: i64,
+    ) -> StoreResult<Vec<OperationRunRecord>> {
+        if project_id.trim().is_empty() || limit <= 0 || limit > 200 || offset < 0 {
+            return Err(StoreError::Validation(
+                "project id, limit (1..=200) and offset (>= 0) are required".into(),
+            ));
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT id, operation_intent_id, project_id, base_commit_id, provider_id,
+                    provider_configuration_id, provider_endpoint_id, model,
+                    state, context_packet_id, response_id, finish_reason,
+                    input_tokens, output_tokens, total_tokens, cached_input_tokens, reasoning_tokens,
+                    failure_code, failure_message, failure_retriable, started_at, updated_at
+             FROM operation_run WHERE project_id = ?1
+             ORDER BY started_at DESC, id DESC
+             LIMIT ?2 OFFSET ?3",
+        )?;
+        let rows = statement
+            .query_map(params![project_id, limit, offset], read_raw_operation_run)?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter().map(|raw| raw.try_into_record()).collect()
+    }
+
+    pub fn get_operation_insights(
+        &self,
+        project_id: &str,
+    ) -> StoreResult<OperationInsightsRecord> {
+        if project_id.trim().is_empty() {
+            return Err(StoreError::Validation("project id must not be empty".into()));
+        }
+        let record = self.connection.query_row(
+            "SELECT
+                COALESCE(SUM(input_tokens), 0),
+                COALESCE(SUM(output_tokens), 0),
+                COALESCE(SUM(total_tokens), 0),
+                COALESCE(SUM(CASE WHEN state = 'accepted' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN state = 'rejected' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN state = 'conflicted' THEN 1 ELSE 0 END), 0),
+                COUNT(*)
+             FROM operation_run WHERE project_id = ?1",
+            [project_id],
+            |row| {
+                Ok(OperationInsightsRecord {
+                    total_input_tokens: row.get(0)?,
+                    total_output_tokens: row.get(1)?,
+                    total_tokens: row.get(2)?,
+                    accepted_count: row.get(3)?,
+                    rejected_count: row.get(4)?,
+                    conflicted_count: row.get(5)?,
+                    total_runs: row.get(6)?,
+                })
+            },
+        )?;
+        Ok(record)
+    }
+
+    /// 计算项目的二次编辑率指标。
+    ///
+    /// 基于 `patch_review_event` 审计表聚合（不新增表，不新增 `operation_run` 字段）：
+    /// - `total_proposals_accepted`: 至少有一次 `apply` 事件的 proposal 总数
+    /// - `proposals_with_rejection`: 至少有一次 `reject` 事件的 proposal 总数
+    /// - `accepted_after_rejection`: 同一 proposal 的事件序列中出现 `reject` 后又出现
+    ///   `apply` 的 proposal 数量（多次 reject 后 apply 只计一次）
+    /// - `accepted_after_rejection_rate = accepted_after_rejection / max(total_proposals_accepted, 1)`
+    ///
+    /// 冷启动期（`total_proposals_accepted == 0`）`rate = 0.0` 避免除零。
+    ///
+    /// 查询使用 `idx_patch_review_event_proposal_kind(proposal_id, kind)` 覆盖索引：
+    /// `WHERE proposal_id IN (...) AND kind IN ('apply', 'reject')` 命中索引的两列前缀，
+    /// 通过 `INDEXED BY` 显式锁定该索引；序列顺序在 Rust 端按 `sequence` 升序排序恢复。
+    pub fn get_revision_metrics(&self, project_id: &str) -> StoreResult<RevisionMetrics> {
+        if project_id.trim().is_empty() {
+            return Err(StoreError::Validation("project id must not be empty".into()));
+        }
+
+        // 拉取项目下所有 proposal 的 (proposal_id, kind, sequence) 事件序列。
+        // INDEXED BY 强制使用 idx_patch_review_event_proposal_kind(proposal_id, kind)；
+        // 不带 ORDER BY 以避免 SQLite 因 (proposal_id, sequence) 唯一索引绕过该索引。
+        let mut statement = self.connection.prepare(
+            "SELECT pre.proposal_id, pre.kind, pre.sequence
+             FROM patch_review_event AS pre INDEXED BY idx_patch_review_event_proposal_kind
+             WHERE pre.proposal_id IN (
+                 SELECT h.proposal_id FROM patch_review_head AS h
+                 JOIN operation_run AS r ON r.id = h.run_id
+                 WHERE r.project_id = ?1
+             )
+             AND pre.kind IN ('apply', 'reject')",
+        )?;
+        let mut rows = statement
+            .query_map([project_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // 按 proposal_id 分组，组内按 sequence 升序排序恢复事件顺序。
+        rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.cmp(&b.2)));
+        let mut proposals: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for (proposal_id, kind, _sequence) in rows {
+            proposals.entry(proposal_id).or_default().push(kind);
+        }
+
+        let mut total_proposals_accepted: i64 = 0;
+        let mut proposals_with_rejection: i64 = 0;
+        let mut accepted_after_rejection: i64 = 0;
+
+        for kinds in proposals.values() {
+            let has_apply = kinds.iter().any(|k| k == "apply");
+            let has_reject = kinds.iter().any(|k| k == "reject");
+            if has_apply {
+                total_proposals_accepted += 1;
+            }
+            if has_reject {
+                proposals_with_rejection += 1;
+            }
+            // 在 sequence 升序中查找 reject 后 apply；多次 reject 后 apply 只计一次。
+            let mut saw_reject = false;
+            let mut matched = false;
+            for kind in kinds {
+                if kind == "reject" {
+                    saw_reject = true;
+                } else if kind == "apply" && saw_reject {
+                    matched = true;
+                    break;
+                }
+            }
+            if matched {
+                accepted_after_rejection += 1;
+            }
+        }
+
+        let accepted_after_rejection_rate = if total_proposals_accepted == 0 {
+            0.0
+        } else {
+            accepted_after_rejection as f64 / total_proposals_accepted as f64
+        };
+
+        Ok(RevisionMetrics {
+            total_proposals_accepted,
+            proposals_with_rejection,
+            accepted_after_rejection,
+            accepted_after_rejection_rate,
+        })
+    }
+
+    /// v0.7.0 Stage 2 — payload_hash 变形追踪。
+    ///
+    /// 复用 `patch_review_event.payload_json` JSON 字段存储 `{"payload_hash":"..."}`
+    /// （来源：`operation_artifact.binding_hash`），统计同一 proposal 下出现
+    /// 2+ 不同 payload_hash 的变形情况。不新增表、不新增列，schema 兼容。
+    ///
+    /// - `total_proposals`: 至少有一个 `patch_review_event` 的 proposal 总数
+    /// - `proposals_with_variation`: 有 2+ 不同 payload_hash 的 proposal 数
+    /// - `variations`: 总变形次数（所有 proposal 的不同 payload_hash 数之和减去
+    ///   有 hash 的 proposal 数，即 `Σ max(distinct_count - 1, 0)`）
+    /// - `variation_rate = proposals_with_variation / max(total_proposals, 1)`
+    ///
+    /// 冷启动期（`total_proposals == 0`）`rate = 0.0` 避免除零。
+    /// `payload_json` 为 NULL 或缺失 `payload_hash` 字段时 graceful 处理：
+    /// 该 proposal 计入 `total_proposals` 但不计入变形统计。
+    pub fn get_payload_hash_variations(
+        &self,
+        project_id: &str,
+    ) -> StoreResult<PayloadHashVariations> {
+        if project_id.trim().is_empty() {
+            return Err(StoreError::Validation("project id must not be empty".into()));
+        }
+
+        // 拉取项目下所有 proposal 的 (proposal_id, payload_json) 事件序列。
+        // 关联路径：patch_review_event → patch_review_head → operation_run(project_id)。
+        let mut statement = self.connection.prepare(
+            "SELECT pre.proposal_id, pre.payload_json
+             FROM patch_review_event AS pre
+             WHERE pre.proposal_id IN (
+                 SELECT h.proposal_id FROM patch_review_head AS h
+                 JOIN operation_run AS r ON r.id = h.run_id
+                 WHERE r.project_id = ?1
+             )",
+        )?;
+        let rows = statement
+            .query_map([project_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // 按 proposal_id 分组：total_proposals_set 统计所有有事件的 proposal，
+        // hashes 收集每个 proposal 的不同 payload_hash 集合。
+        let mut total_proposals_set: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        let mut proposal_hashes: std::collections::BTreeMap<
+            String,
+            std::collections::BTreeSet<String>,
+        > = std::collections::BTreeMap::new();
+
+        for (proposal_id, payload_json) in rows {
+            total_proposals_set.insert(proposal_id.clone());
+            // payload_json 为 NULL 或非 JSON 时 graceful 跳过。
+            if let Some(json_str) = payload_json
+                && let Ok(value) = serde_json::from_str::<serde_json::Value>(&json_str)
+                && let Some(hash) = value.get("payload_hash").and_then(|v| v.as_str())
+            {
+                proposal_hashes
+                    .entry(proposal_id)
+                    .or_default()
+                    .insert(hash.to_string());
+            }
+        }
+
+        let total_proposals = total_proposals_set.len() as i64;
+        let mut proposals_with_variation: i64 = 0;
+        let mut variations: i64 = 0;
+
+        for hashes in proposal_hashes.values() {
+            // distinct_count >= 1 保证（仅出现在 map 中的 proposal 至少有 1 个 hash）。
+            if hashes.len() >= 2 {
+                proposals_with_variation += 1;
+            }
+            variations += (hashes.len() as i64).saturating_sub(1);
+        }
+
+        let variation_rate = if total_proposals == 0 {
+            0.0
+        } else {
+            proposals_with_variation as f64 / total_proposals as f64
+        };
+
+        Ok(PayloadHashVariations {
+            total_proposals,
+            proposals_with_variation,
+            variations,
+            variation_rate,
+        })
     }
 
     pub fn get_context_packet(&self, packet_id: &str) -> StoreResult<ContextPacketRecord> {

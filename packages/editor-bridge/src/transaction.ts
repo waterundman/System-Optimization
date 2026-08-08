@@ -1,5 +1,4 @@
-import type { BlockId } from "../../protocol/src/index.ts";
-import { canonicalJson } from "./canonical-json.ts";
+import { stableStringify, type BlockId } from "../../protocol/src/index.ts";
 import { EditorBridgeError } from "./errors.ts";
 import type {
   CompiledEditorTransaction,
@@ -158,7 +157,7 @@ async function hashBlock(
   hasher: EditorHasher,
 ): Promise<string> {
   return hasher.sha256(
-    canonicalJson({
+    stableStringify({
       kind: block.kind,
       content: block.content,
       plainText: block.plainText,

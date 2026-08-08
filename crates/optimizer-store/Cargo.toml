@@ -13,5 +13,8 @@ serde_json = "1.0.150"
 sha2 = "0.10.9"
 zstd = "0.13.3"
 
+[dev-dependencies]
+zstd = "0.13.3"
+
 [lib]
 path = "src/lib.rs"

@@ -78,6 +78,17 @@ impl OptimizerStore {
         })
     }
 
+    pub fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    /// Mutable access to the underlying SQLite connection. Intended for
+    /// host-side operations that need the rusqlite transaction API
+    /// (e.g. project_id remap during backup import).
+    pub fn connection_mut(&mut self) -> &mut Connection {
+        &mut self.connection
+    }
+
     pub fn diagnostics(&self) -> StoreResult<StoreDiagnostics> {
         Ok(StoreDiagnostics {
             sqlite_version: self.sqlite_version()?,
@@ -1678,6 +1689,76 @@ impl OptimizerStore {
         Ok(commits)
     }
 
+    /// v0.7.0 Stage 1 (D1): return the ordered list of parent commit ids
+    /// recorded in `commit_parent` for the given `commit_id`, ordered by
+    /// `position` ascending so the first parent is the mainline and
+    /// subsequent parents are branch merge heads. Returns an empty `Vec`
+    /// for the seed commit (zero parents) and a single-element `Vec` for
+    /// linear commits — both cases stay backward compatible with the
+    /// v0.6.0 linear timeline renderer. The lookup reuses the existing
+    /// `commit_parent` index and does not modify the schema; the caller
+    /// (host layer) is expected to validate that `commit_id` belongs to
+    /// `project_id` before invoking this method.
+    pub fn list_commit_parents(
+        &self,
+        project_id: &str,
+        commit_id: &str,
+    ) -> StoreResult<Vec<String>> {
+        let mut statement = self.connection.prepare(
+            "SELECT cp.parent_id
+             FROM commit_parent AS cp
+             JOIN commit_node AS cn ON cn.id = cp.commit_id
+             WHERE cp.commit_id = ?1 AND cn.project_id = ?2
+             ORDER BY cp.position ASC",
+        )?;
+        let parents = statement
+            .query_map(params![commit_id, project_id], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(parents)
+    }
+
+    /// Batch variant of [`list_commit_parents`] for timeline rendering, so the
+    /// host can preload parent ids for all checkpoint commits with a bounded
+    /// number of queries (chunks of at most 200 ids each). Returns a map from
+    /// commit_id to its ordered parent ids; commits that do not belong to
+    /// `project_id` are simply absent from the map.
+    pub fn list_commit_parents_batch(
+        &self,
+        project_id: &str,
+        commit_ids: &[String],
+    ) -> StoreResult<BTreeMap<String, Vec<String>>> {
+        let mut parents_by_commit = BTreeMap::new();
+        for chunk in commit_ids.chunks(200) {
+            let placeholders = (1..=chunk.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT cp.commit_id, cp.parent_id
+                 FROM commit_parent AS cp
+                 JOIN commit_node AS cn ON cn.id = cp.commit_id
+                 WHERE cp.commit_id IN ({placeholders}) AND cn.project_id = ?{}
+                 ORDER BY cp.commit_id ASC, cp.position ASC",
+                chunk.len() + 1
+            );
+            let mut statement = self.connection.prepare(&sql)?;
+            let rows = statement.query_map(
+                rusqlite::params_from_iter(
+                    chunk.iter().map(String::as_str).chain(std::iter::once(project_id)),
+                ),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?;
+            for row in rows {
+                let (commit_id, parent_id) = row?;
+                parents_by_commit
+                    .entry(commit_id)
+                    .or_insert_with(Vec::new)
+                    .push(parent_id);
+            }
+        }
+        Ok(parents_by_commit)
+    }
+
     pub fn create_snapshot(&mut self, snapshot: &CreateSnapshot) -> StoreResult<()> {
         if snapshot.codec.trim().is_empty()
             || snapshot.checksum.trim().is_empty()
@@ -1885,10 +1966,16 @@ impl OptimizerStore {
         Ok(record)
     }
 
+    pub fn head_snapshot(&self, project_id: &str) -> StoreResult<ProjectSnapshotV1> {
+        let transaction = self.connection.unchecked_transaction()?;
+        read_head_snapshot(&transaction, project_id)
+    }
+
     pub fn restore_snapshot(&mut self, command: &RestoreSnapshot) -> StoreResult<RestoreReceipt> {
         validate_restore(command)?;
         let record = self.get_snapshot(&command.snapshot_id)?;
         let snapshot = self.decode_snapshot_record(&record)?;
+
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;

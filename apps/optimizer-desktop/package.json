@@ -6,6 +6,9 @@
   "scripts": {
     "build": "node ../../scripts/build-desktop.mjs",
     "pretest": "npm run build",
-    "test": "node --test test/frontend-state.test.js test/operation-client.test.js"
+    "test": "node --test test/frontend-state.test.js test/operation-client.test.js test/insights-panel.test.js test/insights-dom.test.js test/compare-dom.test.js test/timeline-dom.test.js test/i18n.test.js test/i18n-grep-audit.test.js test/backup-wizard-dom.test.js test/a11y.test.js test/a11y-dom.test.js"
+  },
+  "devDependencies": {
+    "linkedom": "^0.18.0"
   }
 }

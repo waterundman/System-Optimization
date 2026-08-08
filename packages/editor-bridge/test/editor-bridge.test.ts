@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import type { BlockId, DocumentId } from "../../protocol/src/index.ts";
+import { stableStringify, type BlockId, type DocumentId } from "../../protocol/src/index.ts";
 import {
   EditorBridgeError,
-  canonicalJson,
   compileEditorTransaction,
   fromTiptapSnapshot,
   selectionToOperationTarget,
@@ -137,7 +136,7 @@ test("content hashes are canonical and independent from stable identity and orde
   }]), hasher);
 
   assert.equal(first.nextDocument.blocks[0]?.contentHash, second.nextDocument.blocks[0]?.contentHash);
-  assert.equal(canonicalJson({ z: 2, a: 1 }), '{"a":1,"z":2}');
+  assert.equal(stableStringify({ z: 2, a: 1 }), '{"a":1,"z":2}');
 });
 
 test("rejects stale, locked, empty and cross-document transactions", async () => {

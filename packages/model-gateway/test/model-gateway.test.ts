@@ -396,6 +396,25 @@ test("streams standard DeepSeek deltas and usage-only chunks", async () => {
   ]);
 });
 
+test("rejects a stream that ends without any finish chunk", async () => {
+  const gateway = new OpenAICompatibleModelGateway({
+    profile: deepSeekProfile,
+    apiKey: "deepseek-key",
+    fetch: async () => sseResponse([
+      'data: {"id":"no-finish","model":"deepseek-v4-flash","choices":[{"delta":{"content":"你好"},"finish_reason":null}]}\n\n',
+      'data: {"id":"no-finish","model":"deepseek-v4-flash","choices":[{"delta":{}}]}\n\n',
+      "data: [DONE]\n\n",
+    ]),
+  });
+  await assert.rejects(
+    async () => {
+      const events = [];
+      for await (const event of gateway.stream(basicRequest)) events.push(event);
+    },
+    (error: unknown) => error instanceof ProviderError && error.kind === "protocol",
+  );
+});
+
 test("classifies timeout and external cancellation separately", async () => {
   const abortingFetch: FetchLike = async (_url, init) => {
     if (init.signal.aborted) throw new DOMException("aborted", "AbortError");

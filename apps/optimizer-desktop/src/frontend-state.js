@@ -71,8 +71,11 @@ export function applySaveResponse(workspace, response) {
 }
 
 export function countVisibleCharacters(workspace) {
+  // Note: whitespace removal via a global regex is O(n) per block; counting
+  // the resulting string's UTF-16 length avoids materialising a spread
+  // character array per block (which doubled allocation for large workspaces).
   return (workspace?.blocks ?? []).reduce(
-    (total, block) => total + [...block.plainText.replace(/\s/gu, "")].length,
+    (total, block) => total + block.plainText.replace(/\s/gu, "").length,
     0,
   );
 }

@@ -11,7 +11,7 @@
 - `kernel-lab`：无需第三方依赖即可运行的上下文编译示例。
 - `optimizer-host`：Rust 宿主路径边界、原子 `.optimizer` 项目包、严格 JSON 命令适配、宿主最近项目与可信模型端点注册表、Operation/Review 持久化、审计读取、Secret Store、一次性模型 capability，以及四个固定云端 Provider、可信 OpenAI-compatible HTTPS 端点和固定回环 Ollama 的原生流式执行。
 - `optimizer-desktop`：Tauri 2 桌面入口、宿主验证的最近项目、单项目 Session、文档树、版本化自动保存、冲突草稿、检查点/恢复、模型与可信端点设置、流式 AI 操作、有界自动重试、取消、显式重新尝试与 Patch/Findings 审查界面。
-- `optimizer-store`：SQLite 3.51.3、Block/Commit/快照、Operation/Artifact/Review 审计日志、FTS5、迁移前在线备份、分层摘要队列、schema v6 的事实/约束资产、schema v7 的不可变候选分支映射、schema v8 的不可变模型尝试审计，以及 schema v9 的通用 Provider 配置/端点来源审计。
+- `optimizer-store`：SQLite 3.51.3、Block/Commit/快照、Operation/Artifact/Review 审计日志、FTS5、迁移前在线备份、分层摘要队列、schema v6 的事实/约束资产、schema v7 的不可变候选分支映射、schema v8 的不可变模型尝试审计、schema v9 的通用 Provider 配置/端点来源审计、schema v10 的 Operation insights 复合索引，以及 schema v11 的 Patch review event kind 索引。
 - 项目风格库：独立保存、归档和恢复固定样本；canonical 样本以 L4 Context 参与操作，`never_send` 对远程模型强制排除并允许本地 Ollama 使用。
 - `@optimizer/editor-bridge`：稳定 Block ID、UTF-16 选区映射、乐观并发编辑事务与 Tiptap 快照适配。
 - `@optimizer/patch-engine`：中文分层 diff、PatchProposal v2、逐 hunk 审查、原子决策与冲突检测。
@@ -56,13 +56,51 @@ docs/adr/              架构决策记录
 scripts/               工程约束检查
 ```
 
-## 下一步
+## 下一步（v0.9.0 候选）
 
-1. 增加费用换算、接受率/二次编辑率聚合、用户反馈与安全诊断导出。
-2. Ollama 缺失模型拉取指引、版本兼容提示与可选上下文窗口配置。
-3. 依赖源可用后将正文输入适配器替换为 Tiptap，并提供行内 decoration 审查。
-4. 显式成本策略下的 Provider fallback 与请求上限；不得把通用端点失败静默回退到另一个目标。
-5. 在显式费用/隐私同意下，为摘要 worker 增加可插拔云端/本地模型生成器、失败隔离与质量评估；内置提取生成器保留为零费用回退。
+1. 接入 updater 签名密钥与自动更新端点；启用 `plugins.updater.active=true` 并验证差量更新通道。
+2. 引入 Windows 代码签名证书，release job 增加 signtool 签名步骤，消除 SmartScreen 警告。
+3. 生成正式 `icons/icon.ico` 资源（多分辨率），替换当前 placeholder 路径。
+4. 增加费用换算、接受率/二次编辑率聚合、用户反馈与安全诊断导出。
+5. Ollama 缺失模型拉取指引、版本兼容提示与可选上下文窗口配置。
+6. 依赖源可用后将正文输入适配器替换为 Tiptap，并提供行内 decoration 审查。
+7. 显式成本策略下的 Provider fallback 与请求上限；不得把通用端点失败静默回退到另一个目标。
+8. 在显式费用/隐私同意下，为摘要 worker 增加可插拔云端/本地模型生成器、失败隔离与质量评估；内置提取生成器保留为零费用回退。
+
+## 最新迭代：v0.8.0 发布工程与国际化基线
+
+- tauri.conf.json 版本从 0.1.0 同步到 0.8.0，`bundle.active` 启用 Windows MSI/NSIS 打包目标。
+- updater 配置骨架已就位（`active=false`），pubkey 与 endpoints 留空，v0.9.0 接入签名密钥与自动更新通道。
+- CI 新增 release job（仅 `v*` tag 触发）、audit job（push/PR 告警，release 阻塞）与 SBOM 生成（CycloneDX JSON，Rust + 前端双产物）。
+- 版本一致性 lint（`npm run check:version-sync`）纳入 `npm run check`：校验 tauri.conf.json、package.json 与 README 版本一致，以及 migration.rs 的 CURRENT_SCHEMA_VERSION 与 MIGRATION 常量数量一致。
+- 桌面前端 i18n 基线：zh-CN 与 en-US 双语字典键对齐、非空校验与 `t/tf/setLocale/getLocale/registerLocale` 导出检查纳入 CI。
+- 可访问性基线：键盘导航、焦点管理与 ARIA 语义在主要交互路径可用，UI 文案无 emoji。
+- bundle.icon 指向 `icons/icon.ico`（TODO：v0.9.0 前生成正式 .ico 资源）。
+
+### 备份与恢复
+
+- 项目包级备份与恢复通过 Host 原子操作完成；恢复创建新 Commit，不覆盖历史。
+- 迁移前在线备份在 schema 升级路径中自动执行，失败时回滚且不写入部分迁移。
+- 检查点与恢复均通过 Host 命令，桌面只消费 opaque 引用，不能直接操作 SQLite 文件。
+
+### 国际化
+
+- 桌面前端支持 zh-CN（默认）与 en-US 双语；`setLocale` 切换运行时语言，`tf` 支持带参数的模板插值。
+- 字典键采用点分层命名，CI 校验 zh-CN 与 en-US 键集一致且值非空。
+- 后端 Host 与 Store 不依赖界面语言；错误码与协议字段保持语言无关。
+
+### 可访问性
+
+- 主要交互路径支持键盘导航：文档树、AI 工具栏、命令面板与审查面板均可通过 Tab/方向键/Enter 操作。
+- 焦点管理遵循 DOM 顺序与显式 `aria-label`/`role` 语义；模态对话框打开时焦点受限。
+- UI 文案不使用 emoji 作为信息载体，颜色对比度遵循 WCAG AA 目标。
+
+### 发布工程
+
+- tauri.conf.json `bundle.active=true`，`targets=['msi','nsis']`；`plugins.updater.active=false`（v0.9.0 候选）。
+- release job 仅在 `v*` tag 触发，runs-on windows-latest；步骤包含 cargo audit + npm audit high/critical 阻塞、cargo cyclonedx + npm sbom 生成 CycloneDX JSON，并通过 tauri-action 上传 MSI/NSIS/SBOM 到 GitHub Release。
+- audit job 在 push/PR 运行，`continue-on-error=true` 仅告警；高危漏洞以 GitHub Annotation 形式标注，日志作为 artifact 上传供 release 诊断。
+- v0.8.0 不接入代码签名密钥与自动更新端点；二者均推迟到 v0.9.0。
 
 ## 最新迭代：可运行桌面工作区
 

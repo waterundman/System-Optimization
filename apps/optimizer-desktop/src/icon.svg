@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Optimizer System — App Icon
+       Concept: Refinement. A diamond-nib formed by converging
+       lines, symbolizing precision editing. Below it, a single
+       polished stroke represents refined output. Monochrome, flat. -->
+  <rect width="256" height="256" rx="56" fill="#18181b"/>
+
+  <!-- Diamond nib — two converging strokes forming a pen tip -->
+  <path d="M88 72 L168 72 L128 152 Z" fill="none" stroke="#ffffff" stroke-width="10" stroke-linejoin="round"/>
+
+  <!-- Center vein of the nib -->
+  <line x1="128" y1="72" x2="128" y2="152" stroke="#ffffff" stroke-width="4" opacity="0.5"/>
+
+  <!-- Cutting edge — the sharp tip mark -->
+  <circle cx="128" cy="152" r="5" fill="#ffffff"/>
+
+  <!-- Refined output stroke — single clean line -->
+  <rect x="80" y="178" width="96" height="8" rx="4" fill="#ffffff" opacity="0.85"/>
+</svg>

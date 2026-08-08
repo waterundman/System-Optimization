@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeedDocument {
     pub id: String,
@@ -512,6 +514,51 @@ pub struct OperationRunRecord {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationInsightsRecord {
+    pub total_input_tokens: i64,
+    pub total_output_tokens: i64,
+    pub total_tokens: i64,
+    pub accepted_count: i64,
+    pub rejected_count: i64,
+    pub conflicted_count: i64,
+    pub total_runs: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevisionMetrics {
+    pub total_proposals_accepted: i64,
+    pub proposals_with_rejection: i64,
+    pub accepted_after_rejection: i64,
+    pub accepted_after_rejection_rate: f64,
+}
+
+/// v0.7.0 Stage 2 — payload_hash 变形追踪指标。
+///
+/// 复用 `patch_review_event.payload_json` JSON 字段存储 `{"payload_hash":"..."}`
+/// （来源：`operation_artifact.binding_hash`），统计同一 proposal 下出现
+/// 2+ 不同 payload_hash 的变形情况。
+///
+/// - `total_proposals`: 至少有一个 `patch_review_event` 的 proposal 总数
+/// - `proposals_with_variation`: 有 2+ 不同 payload_hash 的 proposal 数
+/// - `variations`: 总变形次数（所有 proposal 的不同 payload_hash 数之和减去
+///   有 hash 的 proposal 数）
+/// - `variation_rate = proposals_with_variation / max(total_proposals, 1)`
+///
+/// 冷启动期（`total_proposals == 0`）`rate = 0.0` 避免除零。
+/// `payload_json` 缺失 `payload_hash` 时 graceful 处理：该 proposal 计入
+/// `total_proposals` 但不计入变形统计。
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PayloadHashVariations {
+    pub total_proposals: i64,
+    pub proposals_with_variation: i64,
+    pub variations: i64,
+    pub variation_rate: f64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewOperationLifecycleEvent {
     pub from_state: OperationState,
@@ -768,4 +815,144 @@ pub struct CreateReviewCandidateBranch {
     pub new_content_hash: String,
     pub new_root_hash: String,
     pub occurred_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BlockDiffKind {
+    Unchanged,
+    Added,
+    Removed,
+    Modified,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextDiffOp {
+    Equal(String),
+    Delete(String),
+    Insert(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffSummary {
+    pub added_count: i64,
+    pub removed_count: i64,
+    pub modified_count: i64,
+    pub unchanged_count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockDiffEntry {
+    pub block_id_a: Option<String>,
+    pub block_id_b: Option<String>,
+    pub kind: BlockDiffKind,
+    pub text_diff: Option<Vec<TextDiffOp>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentDiffResult {
+    pub document_id_a: String,
+    pub document_id_b: String,
+    pub blocks: Vec<BlockDiffEntry>,
+    pub summary: DiffSummary,
+}
+
+/// v0.8.0 Stage 1 (FR-11) — project-level backup manifest.
+///
+/// Serialized as `manifest.json` at the root of every `.optimizer-backup`
+/// zip archive. `#[serde(default)]` on every field so future schema
+/// additions (new optional metadata) do not break deserialization of
+/// older backups — the contract requires T14 (missing fields must not
+/// error).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupManifest {
+    #[serde(default)]
+    pub schema_version: i64,
+    #[serde(default)]
+    pub source_project_id: String,
+    #[serde(default)]
+    pub source_path: String,
+    #[serde(default)]
+    pub generated_at: String,
+    #[serde(default)]
+    pub included_items: Vec<String>,
+    #[serde(default)]
+    pub optimizer_version: String,
+    #[serde(default)]
+    pub schema_db_version: i64,
+}
+
+#[cfg(test)]
+mod backup_manifest_tests {
+    use super::BackupManifest;
+
+    /// T13: manifest.json can be deserialized into BackupManifest.
+    #[test]
+    fn t13_manifest_json_deserializes_into_backup_manifest() {
+        let json = r#"{
+            "schemaVersion": 1,
+            "sourceProjectId": "project-abc-123",
+            "sourcePath": "W:\\writing\\novel.optimizer",
+            "generatedAt": "2026-08-03T12:00:00.000Z",
+            "includedItems": ["project.sqlite3", "manifest.json", "endpoints.json"],
+            "optimizerVersion": "0.8.0",
+            "schemaDbVersion": 11
+        }"#;
+        let manifest: BackupManifest = serde_json::from_str(json)
+            .expect("manifest.json must deserialize into BackupManifest");
+        assert_eq!(manifest.schema_version, 1);
+        assert_eq!(manifest.source_project_id, "project-abc-123");
+        assert_eq!(manifest.source_path, "W:\\writing\\novel.optimizer");
+        assert_eq!(manifest.generated_at, "2026-08-03T12:00:00.000Z");
+        assert_eq!(
+            manifest.included_items,
+            vec!["project.sqlite3", "manifest.json", "endpoints.json"]
+        );
+        assert_eq!(manifest.optimizer_version, "0.8.0");
+        assert_eq!(manifest.schema_db_version, 11);
+    }
+
+    /// T14: BackupManifest #[serde(default)] tolerates missing fields.
+    #[test]
+    fn t14_backup_manifest_serde_default_tolerates_missing_fields() {
+        let json = r#"{"schemaVersion": 1}"#;
+        let manifest: BackupManifest = serde_json::from_str(json)
+            .expect("missing fields must not cause an error due to #[serde(default)]");
+        assert_eq!(manifest.schema_version, 1);
+        assert_eq!(manifest.source_project_id, "");
+        assert_eq!(manifest.source_path, "");
+        assert_eq!(manifest.generated_at, "");
+        assert!(manifest.included_items.is_empty());
+        assert_eq!(manifest.optimizer_version, "");
+        assert_eq!(manifest.schema_db_version, 0);
+
+        let empty_json = r#"{}"#;
+        let empty_manifest: BackupManifest = serde_json::from_str(empty_json)
+            .expect("completely empty object must not error");
+        assert_eq!(empty_manifest.schema_version, 0);
+        assert!(empty_manifest.included_items.is_empty());
+    }
+
+    /// T13 bonus: round-trip serialization preserves all fields.
+    #[test]
+    fn t13_backup_manifest_round_trips_through_serde() {
+        let original = BackupManifest {
+            schema_version: 1,
+            source_project_id: "project-round-trip".into(),
+            source_path: "/tmp/test.optimizer".into(),
+            generated_at: "2026-08-03T10:00:00.000Z".into(),
+            included_items: vec!["project.sqlite3".into(), "manifest.json".into()],
+            optimizer_version: "0.8.0".into(),
+            schema_db_version: 11,
+        };
+        let json = serde_json::to_string(&original).expect("serialize must succeed");
+        let round_tripped: BackupManifest =
+            serde_json::from_str(&json).expect("deserialize must succeed");
+        assert_eq!(original, round_tripped);
+    }
 }

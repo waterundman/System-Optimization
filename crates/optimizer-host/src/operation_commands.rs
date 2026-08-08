@@ -4,12 +4,15 @@ use optimizer_store::{
     AppendReviewEvent, ContextPacketRecord, ModelUsageRecord, NewContextPacket,
     NewOperationArtifact, NewOperationAttempt, NewOperationLifecycleEvent, NewOperationRun,
     OperationArtifactKind, OperationArtifactRecord, OperationAttemptRecord, OperationFailureRecord,
-    OperationLifecycleEventRecord, OperationRunRecord, OperationState, OptimizerStore,
-    PersistOperationBundle, ProjectRecord, ReviewDecision, ReviewEventKind, ReviewEventRecord,
-    ReviewSessionRecord, ReviewSessionStatus, StoreError,
+    OperationInsightsRecord, OperationLifecycleEventRecord, OperationRunRecord, OperationState,
+    OptimizerStore, PersistOperationBundle, PayloadHashVariations, ProjectRecord, ReviewDecision,
+    ReviewEventKind, ReviewEventRecord, RevisionMetrics, ReviewSessionRecord, ReviewSessionStatus,
+    StoreError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 #[derive(Debug)]
 pub enum OperationCommandError {
@@ -17,6 +20,7 @@ pub enum OperationCommandError {
     UnsupportedSchema { command: &'static str, actual: u32 },
     SensitiveField { path: String },
     Store(StoreError),
+    Clock(String),
 }
 
 impl fmt::Display for OperationCommandError {
@@ -33,6 +37,7 @@ impl fmt::Display for OperationCommandError {
                 )
             }
             Self::Store(error) => write!(formatter, "operation store command failed: {error}"),
+            Self::Clock(message) => write!(formatter, "host clock is unavailable: {message}"),
         }
     }
 }
@@ -53,6 +58,7 @@ impl OperationCommandError {
                 StoreError::Snapshot(_) => "SNAPSHOT_FAILED",
                 StoreError::Sqlite(_) | StoreError::InvariantViolation(_) => "STORAGE_FAILED",
             },
+            Self::Clock(_) => "HOST_CLOCK_UNAVAILABLE",
         }
     }
 
@@ -199,6 +205,31 @@ impl OperationCommandHost {
         })
     }
 
+    pub fn get_operation_insights(
+        &self,
+        project_id: &str,
+    ) -> Result<OperationInsightsResponse, OperationCommandError> {
+        let summary = self.store.get_operation_insights(project_id)?;
+        let recent_run_records = self.store.list_operation_runs(project_id, 10, 0)?;
+        let recent_runs = recent_run_records
+            .into_iter()
+            .map(RecentRunSummary::from)
+            .collect();
+        let revision_metrics = self.store.get_revision_metrics(project_id)?;
+        let payload_hash_variations = self.store.get_payload_hash_variations(project_id)?;
+        let generated_at = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .map_err(|error| OperationCommandError::Clock(error.to_string()))?;
+        Ok(OperationInsightsResponse {
+            schema_version: 4,
+            summary,
+            recent_runs,
+            generated_at,
+            revision_metrics,
+            payload_hash_variations,
+        })
+    }
+
     pub fn into_store(self) -> OptimizerStore {
         self.store
     }
@@ -242,6 +273,65 @@ pub struct OperationAuditResponse {
     pub attempts: Vec<OperationAttemptAudit>,
     pub artifact: Option<ArtifactAudit>,
     pub review: Option<ReviewAudit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationInsightsResponse {
+    pub schema_version: u32,
+    pub summary: OperationInsightsRecord,
+    pub recent_runs: Vec<RecentRunSummary>,
+    pub generated_at: String,
+    #[serde(default)]
+    pub revision_metrics: RevisionMetrics,
+    #[serde(default)]
+    pub payload_hash_variations: PayloadHashVariations,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentRunSummary {
+    pub run_id: String,
+    pub operation_intent_id: String,
+    pub state: String,
+    pub provider_id: String,
+    pub started_at: String,
+    pub total_tokens: Option<i64>,
+    #[serde(default)]
+    pub input_tokens: i64,
+    #[serde(default)]
+    pub output_tokens: i64,
+    #[serde(default = "default_zero_i64")]
+    pub cached_input_tokens: Option<i64>,
+}
+
+fn default_zero_i64() -> Option<i64> {
+    Some(0)
+}
+
+impl From<OperationRunRecord> for RecentRunSummary {
+    fn from(record: OperationRunRecord) -> Self {
+        let (total_tokens, input_tokens, output_tokens, cached_input_tokens) = match &record.usage {
+            Some(usage) => (
+                Some(usage.total_tokens),
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cached_input_tokens,
+            ),
+            None => (None, 0, 0, None),
+        };
+        Self {
+            run_id: record.id,
+            operation_intent_id: record.operation_intent_id,
+            state: record.state.as_str().into(),
+            provider_id: record.provider_id,
+            started_at: record.started_at,
+            total_tokens,
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1165,5 +1255,61 @@ mod tests {
             review.events[0].payload.as_ref().unwrap()["source"],
             "inline-review"
         );
+    }
+
+    #[test]
+    fn t01_operation_insights_response_v3_serializes_token_split() {
+        let run = RecentRunSummary {
+            run_id: "run-1".into(),
+            operation_intent_id: "intent-1".into(),
+            state: "accepted".into(),
+            provider_id: "deepseek".into(),
+            started_at: "2026-07-15T00:00:00Z".into(),
+            total_tokens: Some(1700),
+            input_tokens: 1000,
+            output_tokens: 500,
+            cached_input_tokens: Some(200),
+        };
+        let response = OperationInsightsResponse {
+            schema_version: 3,
+            summary: OperationInsightsRecord {
+                total_input_tokens: 1000,
+                total_output_tokens: 500,
+                total_tokens: 1700,
+                accepted_count: 1,
+                rejected_count: 0,
+                conflicted_count: 0,
+                total_runs: 1,
+            },
+            recent_runs: vec![run],
+            generated_at: "2026-07-15T00:00:00Z".into(),
+            revision_metrics: RevisionMetrics::default(),
+            payload_hash_variations: PayloadHashVariations::default(),
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["schemaVersion"], json!(3));
+        let run_json = &json["recentRuns"][0];
+        assert_eq!(run_json["inputTokens"], json!(1000));
+        assert_eq!(run_json["outputTokens"], json!(500));
+        assert_eq!(run_json["cachedInputTokens"], json!(200));
+        assert_eq!(run_json["totalTokens"], json!(1700));
+    }
+
+    #[test]
+    fn t02_v1_recent_run_summary_json_deserializes_to_v2_with_serde_defaults() {
+        let v1_json = json!({
+            "runId": "run-1",
+            "operationIntentId": "intent-1",
+            "state": "accepted",
+            "providerId": "deepseek",
+            "startedAt": "2026-07-15T00:00:00Z",
+            "totalTokens": 1700
+        });
+        let summary: RecentRunSummary = serde_json::from_value(v1_json).unwrap();
+        assert_eq!(summary.run_id, "run-1");
+        assert_eq!(summary.total_tokens, Some(1700));
+        assert_eq!(summary.input_tokens, 0);
+        assert_eq!(summary.output_tokens, 0);
+        assert_eq!(summary.cached_input_tokens, Some(0));
     }
 }

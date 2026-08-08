@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": true,
+    "exactOptionalPropertyTypes": false,
+    "forceConsistentCasingInFileNames": true,
+    "noUncheckedIndexedAccess": false,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": false,
+    "types": ["node"]
+  },
+  "include": [
+    "packages/**/*.ts",
+    "apps/kernel-lab/**/*.ts",
+    "test/**/*.ts"
+  ]
+}

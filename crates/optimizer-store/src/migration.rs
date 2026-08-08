@@ -2,7 +2,7 @@ use rusqlite::{Connection, TransactionBehavior};
 
 use crate::error::{StoreError, StoreResult};
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 9;
+pub const CURRENT_SCHEMA_VERSION: i64 = 11;
 
 pub(crate) const MIGRATION_1: &str = r#"
 CREATE TABLE schema_migration (
@@ -749,6 +749,19 @@ END;
 UPDATE project SET schema_version = 9 WHERE schema_version < 9;
 "#;
 
+pub const MIGRATION_10: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_operation_run_project_insights
+  ON operation_run(project_id, state, input_tokens, output_tokens, total_tokens, cached_input_tokens);
+
+CREATE INDEX IF NOT EXISTS idx_operation_run_project_started_at
+  ON operation_run(project_id, started_at DESC, id DESC);
+"#;
+
+pub const MIGRATION_11: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_patch_review_event_proposal_kind
+  ON patch_review_event(proposal_id, kind);
+"#;
+
 pub fn migrate(connection: &mut Connection) -> StoreResult<()> {
     let current: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if current > CURRENT_SCHEMA_VERSION {
@@ -900,6 +913,22 @@ pub fn migrate(connection: &mut Connection) -> StoreResult<()> {
                 [],
             )?;
             transaction.pragma_update(None, "user_version", 9)?;
+        }
+        if current < 10 {
+            transaction.execute_batch(MIGRATION_10)?;
+            transaction.execute(
+                "INSERT INTO schema_migration(version, applied_at) VALUES (10, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                [],
+            )?;
+            transaction.pragma_update(None, "user_version", 10)?;
+        }
+        if current < 11 {
+            transaction.execute_batch(MIGRATION_11)?;
+            transaction.execute(
+                "INSERT INTO schema_migration(version, applied_at) VALUES (11, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                [],
+            )?;
+            transaction.pragma_update(None, "user_version", 11)?;
         }
         transaction.commit()?;
         Ok(())

@@ -1,4 +1,5 @@
 export * from "./types.ts";
 export * from "./validation.ts";
-export * from "./storage.ts";
+export { type BlockKind, type DocumentKind } from "./storage.ts";
+export * from "./stable-json.ts";
 

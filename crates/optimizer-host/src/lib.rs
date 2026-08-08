@@ -12,6 +12,7 @@ mod recent_projects;
 mod secrets;
 mod summary_worker;
 mod trusted_model_endpoints;
+mod user_config;
 mod workspace_commands;
 
 pub use confirmed_context::ConfirmedContextPacket;
@@ -25,16 +26,19 @@ pub use model_gateway::{
 pub use operation_commands::{
     ArtifactAudit, ContextPacketAudit, FailureAudit, LifecycleEventAudit, ModelUsageAudit,
     OperationAttemptAudit, OperationAuditResponse, OperationCommandError, OperationCommandHost,
-    PersistOperationResponse, PersistReviewResponse, ReviewAudit, ReviewEventAudit, RunAudit,
+    OperationInsightsResponse, PersistOperationResponse, PersistReviewResponse, RecentRunSummary,
+    ReviewAudit, ReviewEventAudit, RunAudit,
 };
 pub use operation_context::{
     OperationContextCandidate, OperationContextSignals, OperationContextSpec,
 };
 pub use project_package::{
+    DiagnosticBundle, DiagnosticManifest, ExportDiagnosticsResponse, ExportJsonResponse,
     ExportMarkdownResponse, NewProjectSpec, OpenedProject, ProjectInfo, ProjectPackageError,
     ProjectPackageManifest,
 };
 pub use recent_projects::{RecentProject, RecentProjectError, RecentProjectRegistry};
+pub use user_config::{UserConfigError, UserConfigRegistry};
 #[cfg(windows)]
 pub use secrets::WindowsCredentialStore;
 pub use secrets::{MemorySecretStore, SecretReference, SecretStore, SecretStoreError, SecretValue};
@@ -47,16 +51,23 @@ pub use trusted_model_endpoints::{
 };
 pub use workspace_commands::{
     ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, ArchivedDocument,
-    ChangeDocumentDepthSpec, CheckpointSummary, CreateDocumentResponse, CreateDocumentSpec,
-    CreateKnowledgeItemSpec, CreateReviewCandidateBranchResponse, CreateReviewCandidateBranchSpec,
-    CreateStyleSampleSpec, DocumentDepthDirection, DocumentMoveDirection, DocumentMutationResponse,
-    KnowledgeContextCandidate, KnowledgeContextSpec, KnowledgeItem, ProjectWorkspace,
-    RenameDocumentSpec, ReorderDocumentSpec, RestoreCheckpointResponse, RestoreCheckpointSpec,
-    ReviewCandidateBranch, ReviewCandidateDetail, ReviewCandidateSession, ReviewCandidateSummary,
-    SaveBlockResponse, SaveBlockSpec, SetDocumentArchivedSpec, SetKnowledgeItemStatusSpec,
-    SetStyleSampleStatusSpec, StyleSample, SummaryInvalidation, VersionCommit, VersionHistory,
-    WorkspaceBlock, WorkspaceCommandError, WorkspaceDocument,
+    ChangeDocumentDepthSpec, CheckpointSummary, CompareDocumentsSpec, CreateDocumentResponse,
+    CreateDocumentSpec, CreateKnowledgeItemSpec, CreateReviewCandidateBranchResponse,
+    CreateReviewCandidateBranchSpec, CreateStyleSampleSpec, DocumentDepthDirection,
+    DocumentMoveDirection, DocumentMutationResponse, ExportProjectBackupRequest,
+    ExportProjectBackupResponse, ImportProjectBackupRequest, ImportProjectBackupResponse,
+    KnowledgeContextCandidate, KnowledgeContextSpec, KnowledgeItem, OperationSummary,
+    ProjectWorkspace, RenameDocumentSpec, ReorderDocumentSpec, RestoreCheckpointResponse,
+    RestoreCheckpointSpec, ReviewCandidateBranch, ReviewCandidateDetail, ReviewCandidateSession,
+    ReviewCandidateSummary, SaveBlockResponse, SaveBlockSpec, SetDocumentArchivedSpec,
+    SetKnowledgeItemStatusSpec, SetStyleSampleStatusSpec, StyleSample, SummaryInvalidation,
+    TimelineEvent, TimelineEventsResponse, VersionCommit, VersionHistory, WorkspaceBlock,
+    WorkspaceCommandError, WorkspaceDocument,
 };
+pub use optimizer_store::{
+    BackupManifest, BlockDiffEntry, BlockDiffKind, DiffSummary, DocumentDiffResult, TextDiffOp,
+};
+pub use workspace_commands::list_timeline_events;
 
 #[derive(Debug)]
 pub enum HostError {

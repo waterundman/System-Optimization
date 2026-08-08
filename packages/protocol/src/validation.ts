@@ -27,6 +27,11 @@ const operationTypes = new Set<OperationType>([
   "critique",
 ]);
 
+const constraintSeverities = new Set(["hard", "soft"]);
+const maxConstraints = 256;
+const maxConstraintRuleLength = 10_000;
+const maxUserInstructionLength = 10_000;
+
 const outputKinds = new Set<OutputKind>(["patch_proposal", "insert_proposal", "findings"]);
 const granularities = new Set<DiffGranularity>(["paragraph", "sentence", "token"]);
 const proposalStatuses = new Set<PatchProposalStatus>(["review", "accepted", "rejected", "conflicted"]);
@@ -90,6 +95,46 @@ export function validateOperationIntent(input: unknown): ValidationResult<Operat
 
   if (!Array.isArray(input.constraints)) {
     issues.push({ path: "$.constraints", message: "must be an array" });
+  } else {
+    if (input.constraints.length > maxConstraints) {
+      issues.push({ path: "$.constraints", message: `must contain at most ${maxConstraints} constraints` });
+    }
+    for (const [index, value] of input.constraints.entries()) {
+      const path = `$.constraints[${index}]`;
+      if (!isRecord(value)) {
+        issues.push({ path, message: "must be an object" });
+        continue;
+      }
+      for (const field of Object.keys(value)) {
+        if (field !== "severity" && field !== "rule" && field !== "sourceRef") {
+          issues.push({ path: `${path}.${field}`, message: "is not allowed" });
+        }
+      }
+      if (!constraintSeverities.has(String(value.severity))) {
+        issues.push({ path: `${path}.severity`, message: "must be hard or soft" });
+      }
+      if (!nonEmptyString(value.rule)) {
+        issues.push({ path: `${path}.rule`, message: "must be a non-empty string" });
+      } else if (String(value.rule).length > maxConstraintRuleLength) {
+        issues.push({ path: `${path}.rule`, message: `must be at most ${maxConstraintRuleLength} characters` });
+      }
+      if (value.sourceRef !== undefined && !nonEmptyString(value.sourceRef)) {
+        issues.push({ path: `${path}.sourceRef`, message: "must be a non-empty string" });
+      }
+    }
+  }
+
+  if (
+    input.userInstruction !== undefined
+    && (
+      typeof input.userInstruction !== "string"
+      || input.userInstruction.length > maxUserInstructionLength
+    )
+  ) {
+    issues.push({
+      path: "$.userInstruction",
+      message: `must be a string of at most ${maxUserInstructionLength} characters`,
+    });
   }
 
   if (!isRecord(input.output)) {

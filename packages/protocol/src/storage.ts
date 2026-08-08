@@ -1,5 +1,11 @@
 import type { BlockId, CommitId, DocumentId, ProjectId } from "./types.ts";
 
+// These structures mirror the Rust host side (crates/optimizer-store) snapshot
+// and commit descriptors. They have no TypeScript consumers today and are NOT
+// re-exported from the protocol package: they exist solely as a reference for
+// the Rust counterpart. Do not import them from the protocol package API;
+// only the DocumentKind/BlockKind enums are used by TS consumers (editor-bridge).
+
 export type DocumentKind = "folder" | "document" | "chapter" | "scene" | "note";
 export type BlockKind = "paragraph" | "heading" | "quote" | "dialogue" | "list" | "table" | "scene_break" | "locked";
 

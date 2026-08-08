@@ -893,9 +893,12 @@ impl ModelExecutionHost {
             authorization_id,
             request_id: input.request_id,
             provider_id,
-            expires_at: expires_at
-                .format(&Rfc3339)
-                .expect("RFC 3339 formatting supports OffsetDateTime"),
+            expires_at: expires_at.format(&Rfc3339).map_err(|error| {
+                ModelGatewayError::new(
+                    "MODEL_AUTHORIZATION_UNAVAILABLE",
+                    format!("failed to format authorization expiry timestamp: {error}"),
+                )
+            })?,
         })
     }
 
@@ -1047,7 +1050,13 @@ impl ModelExecutionHost {
         let secret = if provider_id == ModelProviderId::Ollama {
             None
         } else {
-            let reference = SecretReference::parse(input.configuration.credential_ref.clone())?;
+            // T1 hardening: never resolve the API key from the
+            // WebView-supplied `configuration.credential_ref`. Derive the
+            // reference strictly from the host-bound provider slot so a key
+            // registered for one endpoint cannot be borrowed against another
+            // host. `prepare_request` above has already verified the request
+            // is destined for this slot's canonical hostname.
+            let reference = self.host_bound_credential_reference(&input)?;
             Some(self.secrets.resolve(&reference)?.ok_or_else(|| {
                 ModelGatewayError::new(
                     "PROVIDER_CREDENTIAL_MISSING",
@@ -1149,25 +1158,69 @@ impl ModelExecutionHost {
             })
     }
 
+    /// T1 hardening: derive the secret slot reference for a model request
+    /// strictly from the host-bound provider configuration, ignoring the
+    /// WebView-supplied `credential_ref`. For `openai_compatible` requests
+    /// the key is resolved from the registered endpoint record, so a key
+    /// bound to endpoint A can never be presented against endpoint B (the
+    /// request destination host is always `endpoint.hostname`, see
+    /// `provider_endpoint`).
+    fn host_bound_credential_reference(
+        &self,
+        input: &ModelExecutionRequest,
+    ) -> Result<SecretReference, ModelGatewayError> {
+        let provider_id = input.configuration.provider_id;
+        let reference = if provider_id == ModelProviderId::OpenAICompatible {
+            let compatible = input
+                .configuration
+                .openai_compatible
+                .as_ref()
+                .ok_or_else(|| {
+                    configuration_error(
+                        provider_id,
+                        "openaiCompatible configuration is required",
+                    )
+                })?;
+            let endpoint = self.trusted_endpoint(&compatible.endpoint_id)?;
+            SecretReference::parse(endpoint.credential_ref.clone())?
+        } else {
+            SecretReference::parse(format!("secret://providers/{provider_id}/default"))?
+        };
+        Ok(reference)
+    }
+
     pub fn cancel(&self, request_id: impl Into<String>) -> CancelModelRequestResponse {
         let request_id = request_id.into();
-        let active_cancelled = self
-            .active
-            .lock()
-            .ok()
-            .and_then(|active| active.get(&request_id).cloned())
-            .is_some_and(|control| control.cancel());
-        let pending_cancelled = self
-            .pending
-            .lock()
-            .ok()
-            .and_then(|mut pending| {
-                let authorization_id = pending.iter().find_map(|(id, authorization)| {
+        // Cancellation is best-effort: the response shape is a plain value
+        // (not a Result) to keep the IPC surface stable. A poisoned lock —
+        // only reachable if a previous holder panicked — is logged and
+        // treated as a no-op rather than silently swallowed.
+        let active_cancelled = match self.active.lock() {
+            Ok(active) => active
+                .get(&request_id)
+                .cloned()
+                .is_some_and(|control| control.cancel()),
+            Err(_) => {
+                eprintln!(
+                    "[optimizer-host] model_gateway: cancel lost active state (poisoned mutex)"
+                );
+                false
+            }
+        };
+        let pending_cancelled = match self.pending.lock() {
+            Ok(mut pending) => pending
+                .iter()
+                .find_map(|(id, authorization)| {
                     (authorization.input.request_id == request_id).then(|| id.clone())
-                })?;
-                pending.remove(&authorization_id)
-            })
-            .is_some();
+                })
+                .is_some_and(|authorization_id| pending.remove(&authorization_id).is_some()),
+            Err(_) => {
+                eprintln!(
+                    "[optimizer-host] model_gateway: cancel lost pending state (poisoned mutex)"
+                );
+                false
+            }
+        };
         CancelModelRequestResponse {
             schema_version: REQUEST_SCHEMA_VERSION,
             request_id,
@@ -1176,24 +1229,34 @@ impl ModelExecutionHost {
     }
 
     pub fn cancel_all(&self) -> usize {
-        let controls = self
-            .active
-            .lock()
-            .map(|active| active.values().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
+        // Best-effort bulk cancellation (used at teardown); poisoned-lock
+        // failures are logged and counted as nothing cancelled.
+        let controls = match self.active.lock() {
+            Ok(active) => active.values().cloned().collect::<Vec<_>>(),
+            Err(_) => {
+                eprintln!(
+                    "[optimizer-host] model_gateway: cancel_all lost active state (poisoned mutex)"
+                );
+                Vec::new()
+            }
+        };
         let active = controls
             .into_iter()
             .filter(|control| control.cancel())
             .count();
-        let pending = self
-            .pending
-            .lock()
-            .map(|mut pending| {
+        let pending = match self.pending.lock() {
+            Ok(mut pending) => {
                 let count = pending.len();
                 pending.clear();
                 count
-            })
-            .unwrap_or_default();
+            }
+            Err(_) => {
+                eprintln!(
+                    "[optimizer-host] model_gateway: cancel_all lost pending state (poisoned mutex)"
+                );
+                0
+            }
+        };
         active + pending
     }
 }
@@ -1207,8 +1270,16 @@ struct ActiveRequestGuard {
 impl Drop for ActiveRequestGuard {
     fn drop(&mut self) {
         self.control.complete();
+        // Best-effort cleanup: errors cannot be propagated from `Drop`. A
+        // poisoned lock means another holder panicked; the registry entry
+        // may leak but is keyed by unique ids and therefore harmless.
         if let Ok(mut active) = self.active.lock() {
             active.remove(&self.request_id);
+        } else {
+            eprintln!(
+                "[optimizer-host] model_gateway: ActiveRequestGuard could not unregister {} (poisoned mutex)",
+                self.request_id
+            );
         }
     }
 }
@@ -3270,6 +3341,69 @@ mod tests {
             "PROVIDER_CONFIGURATION"
         );
         assert_eq!(transport.calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn cross_endpoint_credential_borrow_is_rejected_before_transport() {
+        let frames = concat!(
+            "data: {\"id\":\"compatible-1\",\"model\":\"compatible-model\",",
+            "\"choices\":[{\"delta\":{\"content\":\"trusted result\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let transport = Arc::new(ScriptedTransport::sse(vec![frames.as_bytes().to_vec()]));
+        let (registry, endpoint) = trusted_compatible_registry();
+        let host = host_with_compatible_endpoint(registry, &endpoint, transport.clone());
+        let mut request = compatible_request(&endpoint);
+        // T1: attacker points at endpoint A but tries to borrow endpoint B's
+        // secret slot. `validate_model_request`/`provider_endpoint` must
+        // reject this before anything is sent over the network.
+        request.request_id = "request-compatible-borrow".into();
+        request.configuration.credential_ref =
+            "secret://providers/openai-compatible/endpoint-evil".into();
+        assert_eq!(
+            host.execute_stream(request, |_| Ok(()))
+                .unwrap_err()
+                .code(),
+            "PROVIDER_CONFIGURATION"
+        );
+        assert_eq!(transport.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn builtin_provider_cannot_borrow_another_slots_key() {
+        let frames = concat!(
+            "data: {\"id\":\"kimi-1\",\"model\":\"kimi-k2.6\",",
+            "\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let transport = Arc::new(ScriptedTransport::sse(vec![frames.as_bytes().to_vec()]));
+        let host = host_with_secret(transport.clone());
+        let mut request = model_request(ModelProviderId::Kimi);
+        request.request.response_format = Some(ModelResponseFormat::Text);
+        // T1: a Kimi request may only present the `secret://providers/kimi/default`
+        // slot; borrowing the Deepseek slot must be rejected by the host.
+        request.configuration.credential_ref = "secret://providers/deepseek/default".into();
+        assert_eq!(
+            host.execute_stream(request, |_| Ok(()))
+                .unwrap_err()
+                .code(),
+            "PROVIDER_CONFIGURATION"
+        );
+        assert_eq!(transport.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn host_bound_credential_reference_ignores_webview_supplied_ref() {
+        let transport = Arc::new(ScriptedTransport::sse(vec![]));
+        let (registry, endpoint) = trusted_compatible_registry();
+        let host = host_with_compatible_endpoint(registry, &endpoint, transport);
+        let mut request = compatible_request(&endpoint);
+        // Even if the WebView-supplied credential_ref is tampered with, the
+        // host resolves the key strictly from the registered endpoint slot.
+        request.configuration.credential_ref =
+            "secret://providers/openai-compatible/endpoint-evil".into();
+        let reference = host.host_bound_credential_reference(&request).unwrap();
+        assert_eq!(reference.as_str(), endpoint.credential_ref);
     }
 
     #[test]

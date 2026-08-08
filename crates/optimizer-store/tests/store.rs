@@ -7,10 +7,10 @@ use optimizer_store::{
     CreateDocumentWithBlock, CreateKnowledgeItem, CreateReviewCandidateBranch, CreateSnapshot,
     CreateStyleSample, DocumentMutation, MINIMUM_SQLITE_VERSION, ModelUsageRecord,
     NewContextPacket, NewOperationArtifact, NewOperationAttempt, NewOperationLifecycleEvent,
-    NewOperationRun, OperationArtifactKind, OperationFailureRecord, OperationState, OptimizerStore,
-    PersistOperationBundle, ProjectSeed, PutSummaryRecord, RestoreSnapshot, ReviewDecision,
-    ReviewEventKind, ReviewSessionStatus, SeedBlock, SeedDocument, SetKnowledgeItemStatus,
-    SetStyleSampleStatus, StoreError, encode_snapshot,
+    NewOperationRun, OperationArtifactKind, OperationFailureRecord, OperationInsightsRecord,
+    OperationState, OptimizerStore, PersistOperationBundle, ProjectSeed, PutSummaryRecord,
+    RestoreSnapshot, ReviewDecision, ReviewEventKind, ReviewSessionStatus, SeedBlock, SeedDocument,
+    SetKnowledgeItemStatus, SetStyleSampleStatus, StoreError, encode_snapshot,
 };
 
 struct TempDatabase {
@@ -1688,4 +1688,205 @@ fn immutable_operation_artifacts_reject_out_of_band_tampering() {
         [],
     );
     assert!(impossible_attempt.is_err());
+}
+
+#[test]
+fn t01_operation_insights_returns_zeros_for_empty_project() {
+    let temp = TempDatabase::new();
+    let store = open_seeded(&temp.database);
+    let insights = store.get_operation_insights("project-1").unwrap();
+    assert_eq!(
+        insights,
+        OperationInsightsRecord {
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_tokens: 0,
+            accepted_count: 0,
+            rejected_count: 0,
+            conflicted_count: 0,
+            total_runs: 0,
+        }
+    );
+}
+
+#[test]
+fn t02_operation_insights_aggregates_token_counts_across_runs() {
+    let temp = TempDatabase::new();
+    let mut store = open_seeded(&temp.database);
+    store
+        .persist_operation_bundle(&operation_bundle("run-1", "context-1", "proposal-1"))
+        .unwrap();
+    store
+        .persist_operation_bundle(&operation_bundle("run-2", "context-2", "proposal-2"))
+        .unwrap();
+    let insights = store.get_operation_insights("project-1").unwrap();
+    assert_eq!(insights.total_input_tokens, 160);
+    assert_eq!(insights.total_output_tokens, 40);
+    assert_eq!(insights.total_tokens, 200);
+    assert_eq!(insights.total_runs, 2);
+    assert_eq!(insights.accepted_count, 0);
+    assert_eq!(insights.rejected_count, 0);
+    assert_eq!(insights.conflicted_count, 0);
+}
+
+#[test]
+fn t03_operation_insights_counts_state_breakdowns_correctly() {
+    let temp = TempDatabase::new();
+    let mut store = open_seeded(&temp.database);
+
+    store
+        .persist_operation_bundle(&operation_bundle(
+            "run-accepted",
+            "context-accepted",
+            "proposal-accepted",
+        ))
+        .unwrap();
+    store
+        .append_review_event(&AppendReviewEvent {
+            id: "event-accepted-1".into(),
+            proposal_id: "proposal-accepted".into(),
+            expected_revision: 0,
+            expected_status: ReviewSessionStatus::Review,
+            kind: ReviewEventKind::Decision,
+            next_status: ReviewSessionStatus::Ready,
+            hunk_id: Some("hunk-1".into()),
+            decision: Some(ReviewDecision::Accepted),
+            payload_json: None,
+            occurred_at: "2026-07-15T00:02:00.000Z".into(),
+        })
+        .unwrap();
+    store
+        .append_review_event(&AppendReviewEvent {
+            id: "event-accepted-2".into(),
+            proposal_id: "proposal-accepted".into(),
+            expected_revision: 1,
+            expected_status: ReviewSessionStatus::Ready,
+            kind: ReviewEventKind::Apply,
+            next_status: ReviewSessionStatus::Applied,
+            hunk_id: None,
+            decision: None,
+            payload_json: None,
+            occurred_at: "2026-07-15T00:03:00.000Z".into(),
+        })
+        .unwrap();
+
+    store
+        .persist_operation_bundle(&operation_bundle(
+            "run-rejected",
+            "context-rejected",
+            "proposal-rejected",
+        ))
+        .unwrap();
+    store
+        .append_review_event(&AppendReviewEvent {
+            id: "event-rejected-1".into(),
+            proposal_id: "proposal-rejected".into(),
+            expected_revision: 0,
+            expected_status: ReviewSessionStatus::Review,
+            kind: ReviewEventKind::Reject,
+            next_status: ReviewSessionStatus::Rejected,
+            hunk_id: None,
+            decision: None,
+            payload_json: None,
+            occurred_at: "2026-07-15T00:02:00.000Z".into(),
+        })
+        .unwrap();
+
+    store
+        .persist_operation_bundle(&operation_bundle(
+            "run-conflicted",
+            "context-conflicted",
+            "proposal-conflicted",
+        ))
+        .unwrap();
+    store
+        .append_review_event(&AppendReviewEvent {
+            id: "event-conflicted-1".into(),
+            proposal_id: "proposal-conflicted".into(),
+            expected_revision: 0,
+            expected_status: ReviewSessionStatus::Review,
+            kind: ReviewEventKind::Conflict,
+            next_status: ReviewSessionStatus::Conflicted,
+            hunk_id: None,
+            decision: None,
+            payload_json: None,
+            occurred_at: "2026-07-15T00:02:00.000Z".into(),
+        })
+        .unwrap();
+
+    store
+        .persist_operation_bundle(&operation_bundle(
+            "run-review",
+            "context-review",
+            "proposal-review",
+        ))
+        .unwrap();
+
+    let insights = store.get_operation_insights("project-1").unwrap();
+    assert_eq!(insights.accepted_count, 1);
+    assert_eq!(insights.rejected_count, 1);
+    assert_eq!(insights.conflicted_count, 1);
+    assert_eq!(insights.total_runs, 4);
+}
+
+#[test]
+fn t04_list_operation_runs_orders_by_recency_and_paginates() {
+    let temp = TempDatabase::new();
+    let mut store = open_seeded(&temp.database);
+    store
+        .persist_operation_bundle(&operation_bundle("run-1", "context-1", "proposal-1"))
+        .unwrap();
+    store
+        .persist_operation_bundle(&operation_bundle("run-2", "context-2", "proposal-2"))
+        .unwrap();
+    store
+        .persist_operation_bundle(&operation_bundle("run-3", "context-3", "proposal-3"))
+        .unwrap();
+
+    let first_page = store.list_operation_runs("project-1", 2, 0).unwrap();
+    assert_eq!(first_page.len(), 2);
+    assert_eq!(first_page[0].id, "run-3");
+    assert_eq!(first_page[1].id, "run-2");
+
+    let second_page = store.list_operation_runs("project-1", 2, 2).unwrap();
+    assert_eq!(second_page.len(), 1);
+    assert_eq!(second_page[0].id, "run-1");
+
+    let empty_page = store.list_operation_runs("project-1", 2, 4).unwrap();
+    assert!(empty_page.is_empty());
+}
+
+#[test]
+fn t05_operation_insights_and_list_runs_reject_invalid_inputs() {
+    let temp = TempDatabase::new();
+    let store = open_seeded(&temp.database);
+
+    assert!(matches!(
+        store.get_operation_insights("").unwrap_err(),
+        StoreError::Validation(_)
+    ));
+    assert!(matches!(
+        store.get_operation_insights("   ").unwrap_err(),
+        StoreError::Validation(_)
+    ));
+    assert!(matches!(
+        store.list_operation_runs("", 10, 0).unwrap_err(),
+        StoreError::Validation(_)
+    ));
+    assert!(matches!(
+        store.list_operation_runs("project-1", 0, 0).unwrap_err(),
+        StoreError::Validation(_)
+    ));
+    assert!(matches!(
+        store.list_operation_runs("project-1", 201, 0).unwrap_err(),
+        StoreError::Validation(_)
+    ));
+    assert!(matches!(
+        store.list_operation_runs("project-1", 10, -1).unwrap_err(),
+        StoreError::Validation(_)
+    ));
+    assert!(matches!(
+        store.list_operation_runs("project-1", -1, 0).unwrap_err(),
+        StoreError::Validation(_)
+    ));
 }

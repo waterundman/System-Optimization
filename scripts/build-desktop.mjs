@@ -11,17 +11,14 @@ if (dirname(destination) !== resolve(repository, "apps/optimizer-desktop")) {
   throw new Error(`Refusing to replace unexpected desktop output: ${destination}`);
 }
 
-for (const required of [
-  "index.html",
-  "main.js",
-  "frontend-state.js",
-  "operation-client.js",
-  "styles.css",
-]) {
-  const content = await readFile(resolve(source, required), "utf8");
-  if (!content.trim()) throw new Error(`Desktop source is empty: ${required}`);
+// Every frontend source file must be non-empty and must not load remote
+// assets: the desktop runs under the CSP-controlled asset protocol and any
+// https:// in a bundled script would be a network-exfiltration vector.
+for (const file of await sourceFiles(source, [".js", ".html", ".css"])) {
+  const content = await readFile(file, "utf8");
+  if (!content.trim()) throw new Error(`Desktop source is empty: ${relative(source, file)}`);
   if (/https?:\/\//u.test(content)) {
-    throw new Error(`Desktop source must not load remote assets: ${required}`);
+    throw new Error(`Desktop source must not load remote assets: ${relative(source, file)}`);
   }
 }
 
@@ -44,23 +41,32 @@ for (const packageName of [
       relative(packageSource, input).replace(/\.ts$/u, ".js"),
     );
     const code = await readFile(input, "utf8");
-    const transformed = stripTypeScriptTypes(code, {
-      mode: "transform",
-      sourceMap: false,
-    }).replace(/(from\s+["'][^"']+)\.ts(["'])/gu, "$1.js$2");
+    let transformed;
+    try {
+      transformed = stripTypeScriptTypes(code, {
+        mode: "transform",
+        sourceMap: false,
+      }).replace(/(from\s+["'][^"']+)\.ts(["'])/gu, "$1.js$2");
+    } catch (error) {
+      throw new Error(
+        `Failed to strip TypeScript types from ${relative(repository, input)}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
     await mkdir(dirname(output), { recursive: true });
     await writeFile(output, transformed, "utf8");
   }
 }
 console.log(`Desktop frontend built: ${destination}`);
 
-async function sourceFiles(directory) {
+async function sourceFiles(directory, extensions = [".ts"]) {
   const entries = await readdir(directory, { withFileTypes: true });
   const files = [];
   for (const entry of entries) {
     const path = resolve(directory, entry.name);
-    if (entry.isDirectory()) files.push(...await sourceFiles(path));
-    else if (entry.isFile() && extname(entry.name) === ".ts") files.push(path);
+    if (entry.isDirectory()) files.push(...await sourceFiles(path, extensions));
+    else if (entry.isFile() && extensions.includes(extname(entry.name))) files.push(path);
   }
   return files.sort();
 }

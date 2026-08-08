@@ -1,4 +1,5 @@
 import "../packages/protocol/test/protocol.test.ts";
+import "../packages/protocol/test/stable-json.test.ts";
 import "../packages/kernel/test/operation-state-machine.test.ts";
 import "../packages/kernel/test/context-compiler.test.ts";
 import "../packages/editor-bridge/test/editor-bridge.test.ts";
@@ -6,5 +7,3 @@ import "../packages/patch-engine/test/patch-engine.test.ts";
 import "../packages/model-gateway/test/model-gateway.test.ts";
 import "../packages/operation-runner/test/operation-runner.test.ts";
 import "../packages/operation-runner/test/persistence.test.ts";
-import "../apps/optimizer-desktop/test/frontend-state.test.js";
-import "../apps/optimizer-desktop/test/operation-client.test.js";

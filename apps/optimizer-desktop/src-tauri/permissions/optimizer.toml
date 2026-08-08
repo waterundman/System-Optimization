@@ -9,6 +9,11 @@ description = "Allows the bundled welcome page to list, reopen and forget host-m
 commands.allow = ["list_recent_projects", "open_recent_project", "remove_recent_project"]
 
 [[permission]]
+identifier = "allow-user-locale"
+description = "Allows the bundled editor to read and persist the host-owned user UI locale preference."
+commands.allow = ["set_user_locale", "get_user_locale"]
+
+[[permission]]
 identifier = "allow-workspace-read"
 description = "Allows the bundled editor to read the document tree and blocks from the current project session."
 commands.allow = ["get_project_workspace"]
@@ -50,18 +55,23 @@ commands.allow = ["refresh_summaries", "get_summary_context"]
 
 [[permission]]
 identifier = "allow-project-export"
-description = "Allows the bundled editor to atomically export the current project as Markdown inside its project package."
-commands.allow = ["export_markdown"]
+description = "Allows the bundled editor to atomically export the current project as Markdown, JSON or a diagnostics bundle inside its project package."
+commands.allow = ["export_markdown", "export_json", "export_diagnostics"]
 
 [[permission]]
 identifier = "allow-version-read"
-description = "Allows the bundled editor to list commits and safe checkpoint metadata for the current project."
-commands.allow = ["get_version_history"]
+description = "Allows the bundled editor to list commits, safe checkpoint metadata, timeline events and document diffs across snapshots for the current project."
+commands.allow = ["get_version_history", "list_timeline_events", "compare_documents"]
 
 [[permission]]
 identifier = "allow-version-write"
 description = "Allows the bundled editor to create and restore verified project checkpoints."
 commands.allow = ["create_checkpoint", "restore_checkpoint"]
+
+[[permission]]
+identifier = "allow-project-backup"
+description = "Allows the bundled editor to export the current project as a .optimizer-backup zip archive and restore a backup archive into a new project package."
+commands.allow = ["export_project_backup", "import_project_backup"]
 
 [[permission]]
 identifier = "allow-operation-write"
@@ -72,6 +82,11 @@ commands.allow = ["persist_operation_bundle", "append_review_event"]
 identifier = "allow-operation-audit-read"
 description = "Allows the bundled editor to read the complete audit record for one operation run."
 commands.allow = ["get_operation_audit"]
+
+[[permission]]
+identifier = "allow-operation-insights-read"
+description = "Allows the bundled editor to read aggregated operation insights and recent run summaries for the current project."
+commands.allow = ["get_operation_insights"]
 
 [[permission]]
 identifier = "allow-review-candidate-read"

@@ -1,6 +1,6 @@
 {
   "name": "optimizer-system",
-  "version": "0.1.0",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "workspaces": [
@@ -11,18 +11,25 @@
   "engines": {
     "node": ">=24"
   },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "typescript": "^7.0.2"
+  },
   "scripts": {
     "pretest": "npm run desktop:build",
-    "test": "node --test test/all.test.ts",
+    "test": "node --test test/all.test.ts apps/optimizer-desktop/test/*.test.js",
     "test:protocol": "node --test packages/protocol/test/protocol.test.ts",
     "test:kernel": "node --test packages/kernel/test/context-compiler.test.ts packages/kernel/test/operation-state-machine.test.ts",
     "test:patch": "node --test packages/patch-engine/test/patch-engine.test.ts",
     "test:models": "node --test packages/model-gateway/test/model-gateway.test.ts",
     "test:operations": "node --test packages/operation-runner/test/operation-runner.test.ts packages/operation-runner/test/persistence.test.ts",
-    "test:desktop": "node --test apps/optimizer-desktop/test/frontend-state.test.js",
+    "test:desktop": "node --test apps/optimizer-desktop/test/*.test.js",
     "check:schemas": "node scripts/check-protocol-schemas.mjs",
     "check:architecture": "node scripts/check-architecture.mjs",
-    "check": "npm run check:schemas && npm run check:architecture && npm run desktop:build && npm test",
+    "check:i18n": "node scripts/check-i18n.mjs",
+    "check:version-sync": "node scripts/check-version-sync.mjs",
+    "check:types": "tsc -p . --noEmit",
+    "check": "npm run check:schemas && npm run check:architecture && npm run check:i18n && npm run check:version-sync && npm run check:types && npm run desktop:build && npm test",
     "lab": "node apps/kernel-lab/src/index.ts",
     "desktop:build": "node scripts/build-desktop.mjs",
     "desktop:dev": "npm run desktop:build && cargo run -p optimizer-desktop --bin optimizer-desktop --offline"

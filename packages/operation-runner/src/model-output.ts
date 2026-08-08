@@ -1,6 +1,7 @@
 import type { OutputKind } from "../../protocol/src/index.ts";
 import { OperationStageError } from "./errors.ts";
 import type {
+  FindingSeverity,
   OperationFinding,
   ParsedModelOutput,
 } from "./types.ts";
@@ -8,6 +9,10 @@ import type {
 const summaryLimit = 2_000;
 const findingLimit = 200;
 const findingMessageLimit = 5_000;
+
+function isSeverity(value: unknown): value is FindingSeverity {
+  return value === "info" || value === "warning" || value === "error";
+}
 
 export function parseModelOutput(text: string, expectedKind: OutputKind): ParsedModelOutput {
   let value: unknown;
@@ -46,13 +51,13 @@ export function parseModelOutput(text: string, expectedKind: OutputKind): Parsed
 function parseFinding(value: unknown, index: number): OperationFinding {
   const finding = record(value, `findings[${index}]`);
   exactFields(finding, ["severity", "message", "sourceRef"]);
-  if (!(["info", "warning", "error"] as const).includes(finding.severity as never)) {
+  if (!isSeverity(finding.severity)) {
     throw invalid(`findings[${index}].severity is invalid`);
   }
   const message = boundedString(finding.message, `findings[${index}].message`, findingMessageLimit);
   const sourceRef = optionalBoundedString(finding.sourceRef, `findings[${index}].sourceRef`, 1_000);
   return {
-    severity: finding.severity as OperationFinding["severity"],
+    severity: finding.severity,
     message,
     ...(sourceRef !== undefined ? { sourceRef } : {}),
   };

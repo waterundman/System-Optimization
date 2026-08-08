@@ -550,8 +550,9 @@ function emit(
 ): void {
   try {
     observer?.(event);
-  } catch {
+  } catch (error) {
     // Progress observers are UI-only and must not alter operation semantics.
+    console.error("[operation-runner] observer error:", error);
   }
 }
 

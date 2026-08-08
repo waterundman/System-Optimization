@@ -186,6 +186,7 @@ mod windows_store {
     use std::ptr;
     use std::slice;
 
+    use zeroize::Zeroize;
     use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_NOT_FOUND, GetLastError};
     use windows_sys::Win32::Security::Credentials::{
         CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree,
@@ -274,8 +275,19 @@ mod windows_store {
             let blob = unsafe {
                 slice::from_raw_parts(record.CredentialBlob, record.CredentialBlobSize as usize)
             };
-            let value =
-                String::from_utf8(blob.to_vec()).map_err(|_| SecretStoreError::InvalidEncoding)?;
+            // Consume the transient heap copy directly into `String` (no
+            // intermediate duplicate buffer is left behind). On a UTF-8
+            // error the original bytes are recovered and zeroized before
+            // returning so the secret does not linger in memory.
+            let bytes = blob.to_vec();
+            let value = match String::from_utf8(bytes) {
+                Ok(value) => value,
+                Err(error) => {
+                    let mut invalid = error.into_bytes();
+                    invalid.zeroize();
+                    return Err(SecretStoreError::InvalidEncoding);
+                }
+            };
             Ok(Some(SecretValue::new(value)?))
         }
 

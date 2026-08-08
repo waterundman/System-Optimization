@@ -97,6 +97,7 @@ export class OpenAICompatibleModelGateway {
     let streamModel: string | undefined;
     let cumulativeContent = "";
     let cumulativeReasoning = "";
+    let receivedFinishChunk = false;
     let finishReason: ModelStreamEvent & { readonly type: "finish" } = {
       type: "finish",
       reason: "unknown",
@@ -167,10 +168,16 @@ export class OpenAICompatibleModelGateway {
           yield { type: "tool_call_delta", ...call };
         }
         if (chunk.usage) yield { type: "usage", usage: chunk.usage };
-        if (chunk.finishReason) finishReason = { type: "finish", reason: chunk.finishReason };
+        if (chunk.finishReason) {
+          receivedFinishChunk = true;
+          finishReason = { type: "finish", reason: chunk.finishReason };
+        }
       }
       if (!started) {
         throw new ResponseProtocolError("Stream ended before an output chunk was received");
+      }
+      if (!receivedFinishChunk) {
+        throw new ResponseProtocolError("Stream ended without a finish chunk");
       }
       yield finishReason;
     } catch (error) {
@@ -194,22 +201,18 @@ export class OpenAICompatibleModelGateway {
       });
     }
     let response: HttpResponseLike;
-    try {
-      response = await this.fetch(url, {
-        method: "POST",
-        headers: {
-          ...(this.profile.authentication === "bearer"
-            ? { Authorization: `Bearer ${this.#apiKey}` }
-            : {}),
-          "Content-Type": "application/json",
-          Accept: "application/json, text/event-stream",
-        },
-        body: serializedBody,
-        signal,
-      });
-    } catch (error) {
-      throw error;
-    }
+    response = await this.fetch(url, {
+      method: "POST",
+      headers: {
+        ...(this.profile.authentication === "bearer"
+          ? { Authorization: `Bearer ${this.#apiKey}` }
+          : {}),
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+      },
+      body: serializedBody,
+      signal,
+    });
     if (!response.ok) throw await this.httpError(response);
     return response;
   }
@@ -411,7 +414,18 @@ function redactSecret(message: string, secret?: string): string {
 }
 
 function boundedRedacted(message: string, secret: string | undefined, maxLength: number): string {
-  return Array.from(redactSecret(message, secret)).slice(0, maxLength).join("");
+  const source = redactSecret(message, secret);
+  // Iterate by code point without materialising a full Array.from() copy so
+  // provider error payloads near the ~1 MiB cap never allocate a doubled
+  // array. Keeps the historical semantics: at most `maxLength` code points.
+  let output = "";
+  let count = 0;
+  for (const character of source) {
+    if (count >= maxLength) break;
+    output += character;
+    count += 1;
+  }
+  return output;
 }
 
 function isAbortError(error: unknown): boolean {

@@ -25,6 +25,11 @@ pub struct RecentProject {
     pub directory: String,
     pub last_opened_at: String,
     pub available: bool,
+    /// v0.8.0 Stage 1: `Some("backup")` when the project was restored from
+    /// a `.optimizer-backup` archive. `None` for normally created/opened
+    /// projects. The frontend uses this to badge restored projects.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +41,11 @@ struct RecentProjectEntry {
     language: String,
     directory: String,
     last_opened_at: String,
+    /// v0.8.0 Stage 1: `Some("backup")` for restored projects.
+    /// `#[serde(default)]` ensures backward compatibility with existing
+    /// registry files that predate the source field.
+    #[serde(default)]
+    source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,6 +176,7 @@ impl RecentProjectRegistry {
                 directory: entry.directory.clone(),
                 last_opened_at: entry.last_opened_at.clone(),
                 available: project_package_exists(&entry.directory),
+                source: entry.source.clone(),
             })
             .collect()
     }
@@ -179,6 +190,17 @@ impl RecentProjectRegistry {
     }
 
     pub fn record(&mut self, info: &ProjectInfo) -> Result<(), RecentProjectError> {
+        self.record_with_source(info, None)
+    }
+
+    /// v0.8.0 Stage 1: record a project with an optional source tag.
+    /// When `source` is `Some("backup")`, the frontend can badge the
+    /// project as restored from a `.optimizer-backup` archive.
+    pub fn record_with_source(
+        &mut self,
+        info: &ProjectInfo,
+        source: Option<&str>,
+    ) -> Result<(), RecentProjectError> {
         let entry = RecentProjectEntry {
             schema_version: RECENT_PROJECT_SCHEMA_VERSION,
             project_id: info.project_id.clone(),
@@ -188,6 +210,7 @@ impl RecentProjectRegistry {
             last_opened_at: OffsetDateTime::now_utc()
                 .format(&Rfc3339)
                 .map_err(RecentProjectError::Time)?,
+            source: source.map(str::to_owned),
         };
         validate_entry(&entry)?;
         let previous = self.projects.clone();

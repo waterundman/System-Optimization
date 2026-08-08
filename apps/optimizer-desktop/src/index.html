@@ -8,10 +8,24 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
+    <div id="titlebar" data-tauri-drag-region>
+      <div class="titlebar-drag" data-tauri-drag-region></div>
+      <div class="titlebar-controls">
+        <button class="titlebar-button" data-win="minimize" type="button" aria-hidden="true">
+          <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M1 6h10" stroke="currentColor" stroke-width="1.1" fill="none"/></svg>
+        </button>
+        <button class="titlebar-button" data-win="maximize" type="button" aria-hidden="true">
+          <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><rect x="1" y="1" width="10" height="10" rx="1" stroke="currentColor" stroke-width="1.1" fill="none"/></svg>
+        </button>
+        <button class="titlebar-button titlebar-close" data-win="close" type="button" aria-hidden="true">
+          <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.1" fill="none"/></svg>
+        </button>
+      </div>
+    </div>
     <main id="app" aria-live="polite">
       <div class="boot-screen">
-        <div class="brand-mark" aria-hidden="true">优</div>
-        <p>正在连接本地创作空间…</p>
+        <div class="boot-mark" aria-hidden="true"></div>
+        <div class="boot-progress" aria-hidden="true"></div>
       </div>
     </main>
     <script type="module" src="./main.js"></script>

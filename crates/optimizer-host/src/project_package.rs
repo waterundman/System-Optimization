@@ -3,7 +3,8 @@ use std::fs;
 use std::path::{Component, Path};
 
 use optimizer_store::{
-    DocumentRecord, OptimizerStore, ProjectRecord, ProjectSeed, SeedBlock, SeedDocument, StoreError,
+    DocumentRecord, OperationInsightsRecord, OptimizerStore, PayloadHashVariations, ProjectRecord,
+    ProjectSeed, RevisionMetrics, SeedBlock, SeedDocument, StoreError,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -14,26 +15,30 @@ use crate::confirmed_context::{ConfirmContextPacketInput, confirm_context_packet
 use crate::operation_context::collect_operation_context;
 use crate::summary_worker::{refresh_summaries, summary_context};
 use crate::workspace_commands::{
-    apply_reviewed_proposal, block_content_hash, change_document_depth, create_checkpoint,
-    create_document, create_knowledge_item, create_review_candidate_branch, create_style_sample,
-    knowledge_context, list_archived_documents, list_knowledge_items, list_review_candidates,
-    list_style_samples, list_summary_invalidations, load_project_workspace, load_review_candidate,
-    load_version_history, project_root_hash, rename_document, reorder_document, restore_checkpoint,
-    save_block, set_document_archived, set_knowledge_item_status, set_style_sample_status,
+    apply_reviewed_proposal, block_content_hash, change_document_depth, compare_documents,
+    create_checkpoint, create_document, create_knowledge_item, create_review_candidate_branch,
+    create_style_sample, export_project_backup, import_project_backup, knowledge_context,
+    list_archived_documents, list_knowledge_items, list_review_candidates, list_style_samples,
+    list_summary_invalidations, list_timeline_events, load_project_workspace,
+    load_review_candidate, load_version_history, project_root_hash, rename_document,
+    reorder_document, restore_checkpoint, save_block, set_document_archived,
+    set_knowledge_item_status, set_style_sample_status,
 };
 use crate::{
     ApplyReviewedProposalResponse, ApplyReviewedProposalSpec, ArchivedDocument,
-    ChangeDocumentDepthSpec, CheckpointSummary, ConfirmedContextPacket, CreateDocumentResponse,
-    CreateDocumentSpec, CreateKnowledgeItemSpec, CreateReviewCandidateBranchResponse,
-    CreateReviewCandidateBranchSpec, CreateStyleSampleSpec, DocumentMutationResponse, HostError,
-    KnowledgeContextCandidate, KnowledgeContextSpec, KnowledgeItem, ModelExecutionRequest,
-    OperationCommandHost, OperationContextCandidate, OperationContextSpec, ProjectRoot,
-    ProjectWorkspace, RefreshSummariesSpec, RenameDocumentSpec, ReorderDocumentSpec,
+    ChangeDocumentDepthSpec, CheckpointSummary, CompareDocumentsSpec, ConfirmedContextPacket,
+    CreateDocumentResponse, CreateDocumentSpec, CreateKnowledgeItemSpec,
+    CreateReviewCandidateBranchResponse, CreateReviewCandidateBranchSpec, CreateStyleSampleSpec,
+    DocumentMutationResponse, ExportProjectBackupRequest, ExportProjectBackupResponse,
+    HostError, ImportProjectBackupRequest, ImportProjectBackupResponse, KnowledgeContextCandidate,
+    KnowledgeContextSpec, KnowledgeItem, ModelExecutionRequest, OperationCommandHost,
+    OperationContextCandidate, OperationContextSpec, ProjectRoot, ProjectWorkspace,
+    RecentRunSummary, RefreshSummariesSpec, RenameDocumentSpec, ReorderDocumentSpec,
     RestoreCheckpointResponse, RestoreCheckpointSpec, ReviewCandidateDetail,
     ReviewCandidateSummary, SaveBlockResponse, SaveBlockSpec, SetDocumentArchivedSpec,
     SetKnowledgeItemStatusSpec, SetStyleSampleStatusSpec, StyleSample, SummaryContextCandidate,
-    SummaryContextSpec, SummaryInvalidation, SummaryRefreshReport, VersionHistory,
-    WorkspaceCommandError,
+    SummaryContextSpec, SummaryInvalidation, SummaryRefreshReport, TimelineEventsResponse,
+    VersionHistory, WorkspaceCommandError,
 };
 
 const PACKAGE_SCHEMA_VERSION: u32 = 1;
@@ -83,6 +88,42 @@ pub struct ExportMarkdownResponse {
     pub path: String,
     pub bytes: usize,
     pub documents: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportJsonResponse {
+    pub schema_version: u32,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticManifest {
+    pub project_id: String,
+    pub project_title: String,
+    pub generated_at: String,
+    pub store_schema_version: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticBundle {
+    pub schema_version: u32,
+    pub manifest: DiagnosticManifest,
+    pub insights: OperationInsightsRecord,
+    pub recent_runs: Vec<RecentRunSummary>,
+    #[serde(default)]
+    pub revision_metrics: RevisionMetrics,
+    #[serde(default)]
+    pub payload_hash_variations: PayloadHashVariations,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportDiagnosticsResponse {
+    pub schema_version: u32,
+    pub path: String,
 }
 
 pub struct OpenedProject {
@@ -269,6 +310,140 @@ impl OpenedProject {
             path: final_path.to_string_lossy().into_owned(),
             bytes: markdown.len(),
             documents: documents.len(),
+        })
+    }
+
+    pub fn export_json(&self) -> Result<ExportJsonResponse, ProjectPackageError> {
+        let snapshot = self
+            .operations
+            .store()
+            .head_snapshot(&self.project_id)
+            .map_err(ProjectPackageError::Store)?;
+        let export = snapshot.to_export();
+        let json = serde_json::to_string_pretty(&export).map_err(|source| ProjectPackageError::Io {
+            operation: "serialize JSON export",
+            source: std::io::Error::other(source),
+        })?;
+
+        let exports = self
+            .root
+            .resolve_for_create("exports")
+            .map_err(ProjectPackageError::Host)?;
+        fs::create_dir_all(&exports).map_err(|source| ProjectPackageError::Io {
+            operation: "create exports directory",
+            source,
+        })?;
+        let file_name = format!("optimizer-export-{}.json", Uuid::new_v4().simple());
+        let relative = Path::new("exports").join(&file_name);
+        let final_path = self
+            .root
+            .resolve_for_create(&relative)
+            .map_err(ProjectPackageError::Host)?;
+        let temporary = self
+            .root
+            .resolve_for_create(Path::new("exports").join(format!(".{file_name}.tmp")))
+            .map_err(ProjectPackageError::Host)?;
+        fs::write(&temporary, json.as_bytes()).map_err(|source| ProjectPackageError::Io {
+            operation: "write JSON export",
+            source,
+        })?;
+        if let Err(source) = fs::rename(&temporary, &final_path) {
+            let _ = fs::remove_file(&temporary);
+            return Err(ProjectPackageError::Io {
+                operation: "publish JSON export",
+                source,
+            });
+        }
+        Ok(ExportJsonResponse {
+            schema_version: export.schema_version,
+            path: final_path.to_string_lossy().into_owned(),
+        })
+    }
+
+    pub fn export_diagnostics(&self) -> Result<ExportDiagnosticsResponse, ProjectPackageError> {
+        let project = self
+            .operations
+            .store()
+            .get_project(&self.project_id)
+            .map_err(ProjectPackageError::Store)?;
+        let insights = self
+            .operations
+            .store()
+            .get_operation_insights(&self.project_id)
+            .map_err(ProjectPackageError::Store)?;
+        let revision_metrics = self
+            .operations
+            .store()
+            .get_revision_metrics(&self.project_id)
+            .map_err(ProjectPackageError::Store)?;
+        let payload_hash_variations = self
+            .operations
+            .store()
+            .get_payload_hash_variations(&self.project_id)
+            .map_err(ProjectPackageError::Store)?;
+        let recent_run_records = self
+            .operations
+            .store()
+            .list_operation_runs(&self.project_id, 50, 0)
+            .map_err(ProjectPackageError::Store)?;
+        let recent_runs = recent_run_records
+            .into_iter()
+            .map(RecentRunSummary::from)
+            .collect();
+        let generated_at = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .map_err(|_| ProjectPackageError::Clock)?;
+        let manifest = DiagnosticManifest {
+            project_id: self.project_id.clone(),
+            project_title: project.title,
+            generated_at,
+            store_schema_version: self.database_schema_version as u32,
+        };
+        let bundle = DiagnosticBundle {
+            schema_version: 4,
+            manifest,
+            insights,
+            recent_runs,
+            revision_metrics,
+            payload_hash_variations,
+        };
+        let json = serde_json::to_string_pretty(&bundle).map_err(|source| ProjectPackageError::Io {
+            operation: "serialize diagnostics export",
+            source: std::io::Error::other(source),
+        })?;
+
+        let exports = self
+            .root
+            .resolve_for_create("exports")
+            .map_err(ProjectPackageError::Host)?;
+        fs::create_dir_all(&exports).map_err(|source| ProjectPackageError::Io {
+            operation: "create exports directory",
+            source,
+        })?;
+        let file_name = format!("optimizer-diagnostics-{}.json", Uuid::new_v4().simple());
+        let relative = Path::new("exports").join(&file_name);
+        let final_path = self
+            .root
+            .resolve_for_create(&relative)
+            .map_err(ProjectPackageError::Host)?;
+        let temporary = self
+            .root
+            .resolve_for_create(Path::new("exports").join(format!(".{file_name}.tmp")))
+            .map_err(ProjectPackageError::Host)?;
+        fs::write(&temporary, json.as_bytes()).map_err(|source| ProjectPackageError::Io {
+            operation: "write diagnostics export",
+            source,
+        })?;
+        if let Err(source) = fs::rename(&temporary, &final_path) {
+            let _ = fs::remove_file(&temporary);
+            return Err(ProjectPackageError::Io {
+                operation: "publish diagnostics export",
+                source,
+            });
+        }
+        Ok(ExportDiagnosticsResponse {
+            schema_version: 1,
+            path: final_path.to_string_lossy().into_owned(),
         })
     }
 
@@ -491,6 +666,10 @@ impl OpenedProject {
         load_version_history(self.operations.store(), &self.project_id)
     }
 
+    pub fn timeline_events(&self) -> Result<TimelineEventsResponse, WorkspaceCommandError> {
+        list_timeline_events(self.operations.store(), &self.project_id)
+    }
+
     pub fn restore_checkpoint(
         &mut self,
         spec: &RestoreCheckpointSpec,
@@ -501,6 +680,43 @@ impl OpenedProject {
             &self.main_branch_id,
             spec,
         )
+    }
+
+    pub fn compare_documents(
+        &self,
+        spec: &CompareDocumentsSpec,
+    ) -> Result<optimizer_store::DocumentDiffResult, WorkspaceCommandError> {
+        compare_documents(self.operations.store(), &self.project_id, spec)
+    }
+
+    /// v0.8.0 Stage 1 (FR-11): export the entire `.optimizer` project package
+    /// as a single `.optimizer-backup` zip archive. The caller provides
+    /// optional endpoint and recent-project metadata as JSON strings — the
+    /// host core never touches the Secret Store.
+    pub fn export_project_backup(
+        &self,
+        request: &ExportProjectBackupRequest,
+    ) -> Result<ExportProjectBackupResponse, ProjectPackageError> {
+        export_project_backup(
+            self.operations.store(),
+            self.root.as_path(),
+            request,
+        )
+        .map_err(ProjectPackageError::Workspace)
+    }
+
+    /// v0.8.0 Stage 1 (FR-11): restore a `.optimizer-backup` archive into a
+    /// new project package. This is an associated function because it creates
+    /// a new project rather than operating on the current session.
+    pub fn import_project_backup(
+        request: &ImportProjectBackupRequest,
+    ) -> Result<ImportProjectBackupResponse, ProjectPackageError> {
+        import_project_backup(request).map_err(ProjectPackageError::Workspace)
+    }
+
+    /// Expose the project root path for backup operations.
+    pub fn root_path(&self) -> &Path {
+        self.root.as_path()
     }
 }
 
@@ -1667,5 +1883,136 @@ mod tests {
             OpenedProject::open(directory),
             Err(ProjectPackageError::Store(StoreError::NotFound { .. }))
         ));
+    }
+
+    #[test]
+    fn export_diagnostics_writes_a_pretty_json_bundle_into_the_exports_directory() {
+        let parent = TempParent::new();
+        let project = OpenedProject::create(&parent.0, &spec()).unwrap();
+        let info = project.info().unwrap();
+        let response = project.export_diagnostics().unwrap();
+        assert_eq!(response.schema_version, 1);
+        let path = Path::new(&response.path);
+        assert!(path.starts_with(Path::new(&info.directory).join("exports")));
+        assert!(
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("optimizer-diagnostics-")
+                    && name.ends_with(".json"))
+        );
+        assert!(path.is_file());
+        let bytes = fs::read(path).unwrap();
+        assert!(!bytes.is_empty());
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["schemaVersion"], serde_json::json!(4));
+        assert!(value["manifest"].is_object());
+        assert!(value["insights"].is_object());
+        assert!(value["recentRuns"].is_array());
+    }
+
+    #[test]
+    fn export_diagnostics_manifest_binds_to_the_current_project_and_store_schema() {
+        let parent = TempParent::new();
+        let project = OpenedProject::create(&parent.0, &spec()).unwrap();
+        let info = project.info().unwrap();
+        let response = project.export_diagnostics().unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&response.path).unwrap()).unwrap();
+        let manifest = &value["manifest"];
+        assert_eq!(manifest["projectId"], serde_json::json!(info.project_id));
+        assert_eq!(manifest["projectTitle"], serde_json::json!(info.title));
+        assert_eq!(
+            manifest["storeSchemaVersion"],
+            serde_json::json!(info.database_schema_version as u32)
+        );
+        let generated_at = manifest["generatedAt"].as_str().unwrap();
+        assert!(OffsetDateTime::parse(generated_at, &Rfc3339).is_ok());
+    }
+
+    #[test]
+    fn export_diagnostics_bundle_round_trips_through_serde_json() {
+        let parent = TempParent::new();
+        let project = OpenedProject::create(&parent.0, &spec()).unwrap();
+        let info = project.info().unwrap();
+        let response = project.export_diagnostics().unwrap();
+        let json = fs::read_to_string(&response.path).unwrap();
+        let bundle: DiagnosticBundle = serde_json::from_str(&json).unwrap();
+        assert_eq!(bundle.schema_version, 4);
+        assert_eq!(bundle.manifest.project_id, info.project_id);
+        assert_eq!(bundle.manifest.project_title, info.title);
+        assert_eq!(
+            bundle.manifest.store_schema_version,
+            info.database_schema_version as u32
+        );
+        assert!(OffsetDateTime::parse(&bundle.manifest.generated_at, &Rfc3339).is_ok());
+        let reserialized = serde_json::to_string(&bundle).unwrap();
+        let reparsed: DiagnosticBundle = serde_json::from_str(&reserialized).unwrap();
+        assert_eq!(bundle, reparsed);
+    }
+
+    #[test]
+    fn export_diagnostics_includes_operation_insights_and_recent_runs() {
+        let parent = TempParent::new();
+        let project = OpenedProject::create(&parent.0, &spec()).unwrap();
+        let response = project.export_diagnostics().unwrap();
+        let json = fs::read_to_string(&response.path).unwrap();
+        let bundle: DiagnosticBundle = serde_json::from_str(&json).unwrap();
+        let insights = &bundle.insights;
+        assert_eq!(insights.total_input_tokens, 0);
+        assert_eq!(insights.total_output_tokens, 0);
+        assert_eq!(insights.total_tokens, 0);
+        assert_eq!(insights.accepted_count, 0);
+        assert_eq!(insights.rejected_count, 0);
+        assert_eq!(insights.conflicted_count, 0);
+        assert_eq!(insights.total_runs, 0);
+        assert!(bundle.recent_runs.is_empty());
+    }
+
+    #[test]
+    fn t03_diagnostic_bundle_v3_carries_extended_recent_runs() {
+        let run = RecentRunSummary {
+            run_id: "run-1".into(),
+            operation_intent_id: "intent-1".into(),
+            state: "accepted".into(),
+            provider_id: "deepseek".into(),
+            started_at: "2026-07-15T00:00:00Z".into(),
+            total_tokens: Some(1700),
+            input_tokens: 1000,
+            output_tokens: 500,
+            cached_input_tokens: Some(200),
+        };
+        let bundle = DiagnosticBundle {
+            schema_version: 3,
+            manifest: DiagnosticManifest {
+                project_id: "project-1".into(),
+                project_title: "Test".into(),
+                generated_at: "2026-07-15T00:00:00Z".into(),
+                store_schema_version: 10,
+            },
+            insights: OperationInsightsRecord {
+                total_input_tokens: 1000,
+                total_output_tokens: 500,
+                total_tokens: 1700,
+                accepted_count: 1,
+                rejected_count: 0,
+                conflicted_count: 0,
+                total_runs: 1,
+            },
+            recent_runs: vec![run],
+            revision_metrics: RevisionMetrics::default(),
+            payload_hash_variations: PayloadHashVariations::default(),
+        };
+        let json = serde_json::to_value(&bundle).unwrap();
+        assert_eq!(json["schemaVersion"], serde_json::json!(3));
+        let run_json = &json["recentRuns"][0];
+        assert_eq!(run_json["inputTokens"], serde_json::json!(1000));
+        assert_eq!(run_json["outputTokens"], serde_json::json!(500));
+        assert_eq!(run_json["cachedInputTokens"], serde_json::json!(200));
+        assert_eq!(run_json["totalTokens"], serde_json::json!(1700));
+        let reparsed: DiagnosticBundle = serde_json::from_value(json).unwrap();
+        assert_eq!(reparsed.schema_version, 3);
+        assert_eq!(reparsed.recent_runs[0].input_tokens, 1000);
+        assert_eq!(reparsed.recent_runs[0].output_tokens, 500);
+        assert_eq!(reparsed.recent_runs[0].cached_input_tokens, Some(200));
     }
 }

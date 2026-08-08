@@ -24,21 +24,53 @@ import {
   retryableOperationFailure,
   runDesktopOperation,
 } from "./operation-client.js";
+import { PRICING_TABLE, estimateFees } from "./insights-pricing.js";
+import { t, setLocale } from "./i18n.js";
+import { trapFocus, announceLive } from "./a11y.js";
 
-const app = document.querySelector("#app");
+const app = typeof document !== "undefined" ? document.querySelector("#app") : null;
 const PROVIDER_SETTINGS_KEY = "optimizer.provider-settings.v1";
 const SUMMARY_REFRESH_DEBOUNCE_MS = 800;
+const TIMELINE_STATE_COLORS = Object.freeze({
+  draft: "#9ca3af",
+  compiling: "#3b82f6",
+  preflight: "#06b6d4",
+  queued: "#2563eb",
+  streaming: "#8b5cf6",
+  validating: "#f59e0b",
+  review: "#eab308",
+  accepted: "#10b981",
+  rejected: "#ef4444",
+  conflicted: "#f97316",
+  failed: "#b91c1c",
+  cancelled: "#6b7280",
+});
+const TIMELINE_STATE_LABELS = Object.freeze({
+  draft: t("timeline.state.draft"),
+  compiling: t("timeline.state.compiling"),
+  preflight: t("timeline.state.preflight"),
+  queued: t("timeline.state.queued"),
+  streaming: t("timeline.state.streaming"),
+  validating: t("timeline.state.validating"),
+  review: t("timeline.state.review"),
+  accepted: t("timeline.state.accepted"),
+  rejected: t("timeline.state.rejected"),
+  conflicted: t("timeline.state.conflicted"),
+  failed: t("timeline.state.failed"),
+  cancelled: t("timeline.state.cancelled"),
+});
 const AI_OPERATION_COMMANDS = Object.freeze([
-  { type: "continue_scene", label: "续写", description: "从当前光标继续创作", shortcut: "Alt+1", key: "1" },
-  { type: "polish", label: "润色", description: "保持原意优化表达", shortcut: "Alt+2", key: "2" },
-  { type: "compress", label: "压缩", description: "收紧当前选区或 Block", shortcut: "Alt+3", key: "3" },
-  { type: "expand", label: "扩写", description: "补充细节与过渡", shortcut: "Alt+4", key: "4" },
-  { type: "critique", label: "批评", description: "只返回问题与建议", shortcut: "Alt+5", key: "5" },
+  { type: "continue_scene", icon: "continue", label: t("ai.op.continue_scene.label"), description: t("ai.op.continue_scene.description"), shortcut: "Alt+1", key: "1" },
+  { type: "polish", icon: "polish", label: t("ai.op.polish.label"), description: t("ai.op.polish.description"), shortcut: "Alt+2", key: "2" },
+  { type: "compress", icon: "compress", label: t("ai.op.compress.label"), description: t("ai.op.compress.description"), shortcut: "Alt+3", key: "3" },
+  { type: "expand", icon: "expand", label: t("ai.op.expand.label"), description: t("ai.op.expand.description"), shortcut: "Alt+4", key: "4" },
+  { type: "critique", icon: "critique", label: t("ai.op.critique.label"), description: t("ai.op.critique.description"), shortcut: "Alt+5", key: "5" },
 ]);
 const state = {
   session: null,
   workspace: null,
   selectedDocumentId: null,
+  locale: "zh-CN",
   versionsOpen: false,
   candidatesOpen: false,
   providersOpen: false,
@@ -63,7 +95,7 @@ const state = {
   saveTimers: new Map(),
   pendingText: new Map(),
   savePromises: new Map(),
-  saveStatus: "已保存",
+  saveStatus: t("common.saved"),
   notice: null,
   conflictDraft: null,
   activeBlockId: null,
@@ -74,10 +106,59 @@ const state = {
   aiRetry: null,
   aiContextMenu: null,
   commandPaletteOpen: false,
+  insightsOpen: false,
+  insightsData: null,
+  insightsBusy: null,
+  compareOpen: false,
+  compareBusy: false,
+  compareResult: null,
+  compareSelection: {
+    snapshotIdA: "",
+    snapshotIdB: "",
+    documentIdA: "",
+    documentIdB: "",
+  },
+  timelineOpen: false,
+  timelineEvents: null,
+  timelineBusy: false,
+  timelineSelected: null,
+  showRevisionMetrics: false,
+  backupWizardOpen: false,
+  backupWizardStep: 1,
+  backupWizardMode: null,
+  backupWizardBusy: false,
+  backupWizardResult: null,
+  backupWizardForm: {
+    includeEndpoints: true,
+    includeRecent: true,
+    outputPath: "",
+    archivePath: "",
+    targetDirectory: "",
+    newProjectId: "",
+    overwrite: false,
+  },
+  backupWizardManifest: null,
+  backupWizardWarnings: [],
 };
 
-function element(tag, options = {}, children = []) {
-  const item = document.createElement(tag);
+const SVG_NAMESPACE = "http:" + "//www.w3.org/2000/svg";
+
+function element(tag, options = {}, children = [], doc = (typeof document !== "undefined" ? document : null)) {
+  // v0.7.0 Stage 1 (D7): SVG namespace support. Tags prefixed with "svg:"
+  // are created via createElementNS so the SVG overlay and its <path>
+  // children sit in the SVG namespace and are addressable by SVG-aware
+  // CSS and querySelector. The "svg:" prefix is stripped from the
+  // qualified name passed to createElementNS so the resulting element's
+  // tagName is the plain local name (e.g. "svg", "path", "g") rather than
+  // "svg:svg" — this matches the behaviour of real browsers and keeps
+  // querySelectorAll("path") working in linkedom-based unit tests. Plain
+  // HTML tags still use createElement so the v0.6.0 baseline callers are
+  // unaffected.
+  const isSvg = tag.startsWith("svg:");
+  const qualifiedName = isSvg ? tag.slice("svg:".length) : tag;
+  const item = isSvg
+    ? doc.createElementNS(SVG_NAMESPACE, qualifiedName)
+    : doc.createElement(tag);
   if (options.className) item.className = options.className;
   if (options.text !== undefined) item.textContent = options.text;
   if (options.type) item.type = options.type;
@@ -93,18 +174,130 @@ function element(tag, options = {}, children = []) {
   return item;
 }
 
-function button(label, className, onClick, options = {}) {
-  const item = element("button", { className, text: label, type: "button", ...options });
+function button(label, className, onClick, options = {}, doc = (typeof document !== "undefined" ? document : null)) {
+  const item = element("button", { className, text: label, type: "button", ...options }, [], doc);
   if (onClick) item.addEventListener("click", onClick);
   return item;
+}
+
+// SVG icon paths — 16x16 viewBox, 1.4 stroke, currentColor
+const ICON_PATHS = Object.freeze({
+  chapter: "M4 2h5l3 3v9H4z M9 2v3h3 M6 8h4 M6 10h3",
+  text: "M3 4.5h10 M3 7.5h10 M3 10.5h7",
+  plus: "M8 3v10 M3 8h10",
+  up: "M8 3.5v9 M4.5 7L8 3.5L11.5 7",
+  down: "M8 3.5v9 M4.5 9L8 12.5L11.5 9",
+  edit: "M3 13l1-3 6-6 2 2-6 6z M9 4l2 2",
+  close: "M4 4l8 8 M12 4l-8 8",
+  continue: "M3 8h8 M8 5l3 3-3 3",
+  polish: "M8 3L9.5 6.5L13 8L9.5 9.5L8 13L6.5 9.5L3 8L6.5 6.5Z",
+  compress: "M2 8h4 M6 5l2 3-2 3 M14 8h-4 M10 5l-2 3 2 3",
+  expand: "M8 3v4 M8 9v4 M5 6L8 3L11 6 M5 10L8 13L11 10",
+  critique: "M3 3h10v7H7l-2 2v-2H3z M5.5 6h5 M5.5 8h3",
+  download: "M8 2v6 M5.5 5L8 7.5 10.5 5 M3 13h10",
+  upload: "M8 9V3 M5.5 6L8 3.5 10.5 6 M3 13h10",
+  flag: "M4 2v12 M4 3h7l-1.5 2.5L11 8H4",
+  indent: "M3 4h10 M3 8h6 M3 12h10 M9 6l2 2-2 2",
+  outdent: "M3 4h10 M3 8h6 M3 12h10 M9 6l-2 2 2 2",
+  restore: "M4 8a4 4 0 1 0 1.5-3 M4 4.5v2h2",
+  compare: "M2 4h5v8H2z M9 4h5v8H9z",
+  chart: "M3 13h10 M5 13V9 M8 13V5.5 M11 13V7.5",
+  layers: "M8 3l5 3-5 3-5-3z M8 9l5 3-5 3-5-3",
+  history: "M8 4a4 4 0 1 0 0.01 0z M8 6v2l1.5 1",
+  timeline: "M4 3v10 M4 4h6 M4 8h4 M4 12h6",
+  book: "M3 4h4.5v9H3z M8.5 4H13v9H8.5 M8 4v9",
+  settings: "M8 5.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z M8 2v1.5 M8 12.5V14 M2 8h1.5 M12.5 8H14",
+  backup: "M3 5l2-2h6l2 2v8H3z M8 8v3 M6 10l2 2 2-2",
+});
+
+function svgIcon(name, size = 14) {
+  const d = ICON_PATHS[name];
+  if (!d) return null;
+  return element("svg:svg", {
+    attrs: {
+      viewBox: "0 0 16 16",
+      width: String(size),
+      height: String(size),
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": "1.4",
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round",
+      "aria-hidden": "true",
+    },
+  }, [element("svg:path", { attrs: { d } })]);
+}
+
+function iconOnlyButton(iconName, className, onClick, options = {}, doc = (typeof document !== "undefined" ? document : null)) {
+  const item = element("button", { className, type: "button", ...options }, [], doc);
+  const icon = svgIcon(iconName, 12);
+  if (icon) item.append(icon);
+  if (onClick) item.addEventListener("click", onClick);
+  return item;
+}
+
+function iconTextButton(iconName, label, className, onClick, options = {}, doc = (typeof document !== "undefined" ? document : null)) {
+  const item = element("button", { className, type: "button", ...options }, [], doc);
+  const icon = svgIcon(iconName, 13);
+  if (icon) item.append(icon);
+  item.append(label);
+  if (onClick) item.addEventListener("click", onClick);
+  return item;
+}
+
+// v0.8.0 Stage 3 (a11y): install focus trap + Escape-to-close on a drawer
+// container. `closeState` is called on Escape to flip the relevant state flag
+// (e.g. state.timelineOpen = false). The trapFocus release function restores
+// focus to the opener element. renderWorkspace is deferred via queueMicrotask
+// so the keydown event finishes dispatching before the DOM is replaced.
+function attachDrawerKeyboard(drawer, docFactory, closeState) {
+  const release = trapFocus(drawer, { document: docFactory });
+  drawer.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    closeState();
+    release();
+    queueMicrotask(() => {
+      try { renderWorkspace(); } catch { /* host unavailable in test env */ }
+    });
+  });
+  return drawer;
 }
 
 async function invokeHost(command, args = {}) {
   const invoke = window.__TAURI__?.core?.invoke;
   if (typeof invoke !== "function") {
-    throw { code: "HOST_UNAVAILABLE", message: "请通过 Optimizer System 桌面程序打开此界面" };
+    throw { code: "HOST_UNAVAILABLE", message: t("error.hostUnavailable") };
   }
   return invoke(command, args);
+}
+
+// v0.8.0 无边框窗口：把最小化/最大化/关闭融进前端自定义标题栏。
+// 依赖 Tauri 的 core:window 权限（start-dragging / minimize / toggle-maximize / close）。
+function setupWindowControls() {
+  const appWindow = window.__TAURI__?.window?.getCurrentWindow?.();
+  if (!appWindow) return;
+  const labels = {
+    minimize: t("window.minimize"),
+    maximize: t("window.maximize"),
+    close: t("window.close"),
+  };
+  const applyAction = (action) => {
+    if (action === "minimize") {
+      appWindow.minimize();
+    } else if (action === "maximize") {
+      appWindow.toggleMaximize();
+    } else if (action === "close") {
+      appWindow.close();
+    }
+  };
+  document.querySelectorAll("[data-win]").forEach((button) => {
+    const action = button.getAttribute("data-win");
+    button.removeAttribute("aria-hidden");
+    button.setAttribute("aria-label", labels[action] || action);
+    button.title = labels[action] || action;
+    button.addEventListener("click", () => applyAction(action));
+  });
 }
 
 function setNotice(kind, message, actionLabel, action) {
@@ -214,6 +407,13 @@ async function refreshTrustedModelEndpoints() {
 
 async function bootstrap() {
   try {
+    setupWindowControls();
+    // v0.8.0 Stage 2 leftover: load the persisted user locale from the host
+    // before any UI renders so the very first paint matches the user's
+    // saved preference. setLocale is imported from ./i18n.js but was
+    // previously never invoked at startup, leaving state.locale stuck on
+    // the hardcoded "zh-CN" default.
+    await applyPersistedLocale();
     await refreshTrustedModelEndpoints();
     state.session = await invokeHost("get_project_session");
     if (state.session.isOpen) await loadWorkspace();
@@ -227,48 +427,83 @@ async function bootstrap() {
   }
 }
 
-function renderWelcome() {
-  const brand = element("section", { className: "welcome-brand" }, [
-    element("div", { className: "brand-mark brand-mark-large", text: "优" }),
-    element("p", { className: "eyebrow", text: "OPTIMIZER KERNEL" }),
-    element("h1", { text: "把注意力留给文字" }),
-    element("p", {
-      className: "welcome-copy",
-      text: "本地优先、版本安全的 AI 协作写作空间。每一次保存都有基线，每一次恢复都留下历史。",
-    }),
-    element("div", { className: "trust-list" }, [
-      element("span", { text: "本地项目包" }),
-      element("span", { text: "可审计版本" }),
-      element("span", { text: "凭据不进 WebView" }),
-    ]),
-  ]);
+async function applyPersistedLocale() {
+  try {
+    const response = await invokeHost("get_user_locale");
+    if (response && typeof response.locale === "string" && response.locale) {
+      state.locale = response.locale;
+      setLocale(response.locale);
+    }
+  } catch {
+    // Host unavailable (e.g. unit tests / preview) — keep the default locale.
+  }
+}
 
-  const createForm = element("form", { className: "start-form" }, [
-    element("h2", { text: "创建新作品" }),
-    labeledInput("作品名称", "title", "例如：雾港来信", true),
-    labeledInput("保存到", "parentDirectory", "绝对目录，例如 W:\\写作", true),
-    labeledInput("项目包名称", "folderName", "例如：雾港来信.optimizer", true),
-    labeledInput("语言", "language", "zh-CN", true, "zh-CN"),
-    element("p", { className: "form-hint", text: "项目会创建为独立的 .optimizer 目录包，不覆盖已有目录。" }),
-    element("button", { className: "primary-button", text: "创建并进入", type: "submit" }),
+async function persistLocale(locale) {
+  if (typeof locale !== "string" || !locale) return false;
+  state.locale = locale;
+  setLocale(locale);
+  try {
+    const response = await invokeHost("set_user_locale", {
+      input: { schemaVersion: 1, locale },
+    });
+    if (response && typeof response.locale === "string") {
+      state.locale = response.locale;
+      setLocale(response.locale);
+      announceLive(t("a11y.localeSwitched"));
+      return true;
+    }
+  } catch (error) {
+    setNotice("error", normalizeHostError(error).message);
+  }
+  return false;
+}
+
+function renderWelcome() {
+  disposeVirtualControllers();
+  const createForm = element("form", { className: "create-form" }, [
+    labeledInput(t("welcome.create.titleLabel"), "title", t("welcome.create.titlePlaceholder"), true),
+    directoryField(t("welcome.create.saveTo"), "parentDirectory", t("welcome.create.saveToPlaceholder")),
+    labeledInput(t("welcome.create.folderLabel"), "folderName", t("welcome.create.folderPlaceholder"), true),
+    element("p", { className: "form-hint", text: t("welcome.create.hint") }),
+    element("button", { className: "primary-button create-form-submit", text: t("welcome.create.submit"), type: "submit" }),
   ]);
   createForm.addEventListener("submit", createProject);
 
-  const openForm = element("form", { className: "start-form start-form-secondary" }, [
-    element("h2", { text: "打开已有项目" }),
-    labeledInput("项目包路径", "projectDirectory", "例如 W:\\写作\\雾港来信.optimizer", true),
-    element("p", { className: "form-hint", text: "打开前会校验 manifest、SQLite 完整性、项目与主分支绑定。" }),
-    element("button", { className: "secondary-button", text: "打开项目", type: "submit" }),
+  const openForm = element("form", { className: "open-form" }, [
+    labeledInput(t("welcome.open.pathLabel"), "projectDirectory", t("welcome.open.pathPlaceholder"), true),
+    element("p", { className: "form-hint", text: t("welcome.open.hint") }),
+    element("button", { className: "secondary-button open-form-submit", text: t("welcome.open.submit"), type: "submit" }),
   ]);
   openForm.addEventListener("submit", openProject);
 
-  const panel = element("section", { className: "welcome-panel" }, [
+  app.replaceChildren(element("div", { className: "welcome-container" }, [
+    element("div", { className: "welcome-header" }, [
+      element("div", { className: "welcome-brand" }, [
+        element("div", { className: "brand-mark brand-mark-large", text: t("common.brandMark") }),
+      ]),
+    ]),
+    element("div", { className: "welcome-content" }, [
+      element("div", { className: "welcome-main" }, [
+        element("div", { className: "welcome-block welcome-block-create" }, [
+          element("div", { className: "welcome-block-header" }, [
+            element("h2", { text: t("welcome.create.title") }),
+          ]),
+          createForm,
+        ]),
+      ]),
+      element("div", { className: "welcome-sidebar" }, [
+        element("div", { className: "welcome-block welcome-block-open" }, [
+          element("div", { className: "welcome-block-header" }, [
+            element("h2", { text: t("welcome.open.title") }),
+          ]),
+          openForm,
+        ]),
+        recentProjectsView(),
+      ]),
+    ]),
     noticeView(),
-    recentProjectsView(),
-    createForm,
-    openForm,
-  ]);
-  app.replaceChildren(element("div", { className: "welcome-layout" }, [brand, panel]));
+  ]));
 }
 
 async function loadRecentProjects() {
@@ -284,8 +519,8 @@ function recentProjectsView() {
   if (!state.recentProjects.length) return null;
   return element("section", { className: "recent-projects", attrs: { "aria-labelledby": "recent-projects-title" } }, [
     element("div", { className: "recent-projects-heading" }, [
-      element("h2", { text: "最近项目", attrs: { id: "recent-projects-title" } }),
-      element("span", { text: `${state.recentProjects.length} 个` }),
+      element("h2", { text: t("recent.title"), attrs: { id: "recent-projects-title" } }),
+      element("span", { text: t("recent.count", { count: state.recentProjects.length }) }),
     ]),
     ...state.recentProjects.map(recentProjectRow),
   ]);
@@ -295,28 +530,28 @@ function recentProjectRow(project) {
   const busy = state.recentProjectBusy === project.projectId;
   const open = button("", "recent-project-open", () => openRecentProject(project), {
     disabled: busy || !project.available,
-    attrs: { "aria-label": `打开最近项目 ${project.title}` },
+    attrs: { "aria-label": t("recent.openLabel", { title: project.title }) },
   });
   open.append(
-    element("span", { className: "recent-project-mark", text: "优" }),
+    element("span", { className: "recent-project-mark", text: t("common.brandMark") }),
     element("span", { className: "recent-project-copy" }, [
       element("strong", { text: project.title }),
-      element("span", { text: project.available ? project.directory : "项目路径不可用" }),
+      element("span", { text: project.available ? project.directory : t("recent.unavailable") }),
     ]),
     element("span", { className: "recent-project-time", text: formatRecentTime(project.lastOpenedAt) }),
   );
   return element("div", { className: `recent-project${project.available ? "" : " recent-project-missing"}` }, [
     open,
-    button("移除", "recent-project-remove", () => removeRecentProject(project), {
+    button(t("recent.remove"), "recent-project-remove", () => removeRecentProject(project), {
       disabled: busy,
-      attrs: { "aria-label": `移除最近项目 ${project.title}` },
+      attrs: { "aria-label": t("recent.removeLabel", { title: project.title }) },
     }),
   ]);
 }
 
 function formatRecentTime(value) {
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "最近打开";
+  if (Number.isNaN(date.getTime())) return t("recent.lastOpened");
   return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(date);
 }
 
@@ -348,7 +583,7 @@ async function removeRecentProject(project) {
       input: { schemaVersion: 1, projectId: project.projectId },
     });
     state.recentProjects = state.recentProjects.filter((item) => item.projectId !== project.projectId);
-    setNotice("success", `已从最近项目中移除“${project.title}”，项目文件未被删除。`);
+    setNotice("success", t("recent.removed", { title: project.title }));
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
   } finally {
@@ -363,6 +598,30 @@ function labeledInput(label, name, placeholder, required, value = "") {
   return element("label", { className: "field" }, [element("span", { text: label }), input]);
 }
 
+// 目录选择字段 — 文本输入 + 「浏览…」按钮，点击后通过系统目录选择器选取路径。
+function directoryField(label, name, placeholder) {
+  const input = element("input", { name, placeholder, attrs: { autocomplete: "off" } });
+  const browse = button(t("welcome.create.browse"), "small-button", (event) => {
+    event.preventDefault();
+    const picker = element("input", {
+      type: "file",
+      attrs: { "aria-label": label, webkitdirectory: "", directory: "" },
+    });
+    picker.hidden = true;
+    picker.addEventListener("change", () => {
+      const file = picker.files?.[0];
+      picker.remove();
+      if (file?.path) input.value = file.path;
+    }, { once: true });
+    (document.body || document).append(picker);
+    picker.click();
+  });
+  return element("label", { className: "field" }, [
+    element("span", { text: label }),
+    element("div", { className: "field-row" }, [input, browse]),
+  ]);
+}
+
 function formValue(form, name) {
   return String(new FormData(form).get(name) ?? "").trim();
 }
@@ -375,7 +634,7 @@ async function createProject(event) {
     parentDirectory: formValue(form, "parentDirectory"),
     folderName: formValue(form, "folderName"),
     title: formValue(form, "title"),
-    language: formValue(form, "language"),
+    language: state.locale || "zh-CN",
   };
   setFormBusy(form, true);
   try {
@@ -437,7 +696,28 @@ async function loadWorkspace() {
   scheduleSummaryRefresh();
 }
 
+// Tear down virtualized list controllers (compare/timeline drawers) before
+// replacing the app DOM. Each controller holds a ResizeObserver per rendered
+// row plus a pending requestAnimationFrame; without this the observers and
+// RAF handles would accumulate on every panel toggle / re-render.
+function disposeVirtualControllers() {
+  if (!app) return;
+  const pending = [app];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    const controller = node?.__virtualController;
+    if (controller && typeof controller.destroy === "function") {
+      controller.destroy();
+      node.__virtualController = null;
+    }
+    if (node?.children) {
+      for (const child of node.children) pending.push(child);
+    }
+  }
+}
+
 function renderWorkspace() {
+  disposeVirtualControllers();
   const project = state.session?.project;
   if (!project || !state.workspace) return renderWelcome();
   const activeCandidates = state.reviewCandidates.filter(
@@ -445,10 +725,9 @@ function renderWorkspace() {
   ).length;
   const topbar = element("header", { className: "topbar" }, [
     element("div", { className: "topbar-brand" }, [
-      element("div", { className: "brand-mark", text: "优" }),
+      element("div", { className: "brand-mark", text: t("common.brandMark") }),
       element("div", {}, [
         element("strong", { text: project.title }),
-        element("span", { text: `${project.language} · r${state.workspace.revision}` }),
       ]),
     ]),
     element("div", { className: "topbar-actions" }, [
@@ -456,28 +735,45 @@ function renderWorkspace() {
       element("span", {
         className: "summary-status",
         text: summaryStatusLabel(),
-        title: "正文或结构变化后合并产生的分层摘要失效项",
+        title: t("toolbar.summaryInvalidations"),
         attrs: { id: "summary-status" },
       }),
-      button("导入 MD", "ghost-button", importMarkdown),
-      button("导出 MD", "ghost-button", exportMarkdown),
-      button("建立检查点", "ghost-button", createCheckpoint),
-      button(
-        state.candidatesOpen ? "收起候选" : "候选 " + activeCandidates,
-        "ghost-button",
-        toggleCandidates,
-        {
-          attrs: {
-            "aria-label": state.candidatesOpen
-              ? "收起候选"
-              : "候选中心，" + activeCandidates + " 个待处理",
-          },
+      iconTextButton("download", t("toolbar.importMd"), "ghost-button", importMarkdown),
+      iconTextButton("upload", t("toolbar.exportMd"), "ghost-button", exportMarkdown),
+      iconTextButton("upload", t("toolbar.exportJson"), "ghost-button", exportJson),
+      iconTextButton("flag", t("toolbar.checkpoint"), "ghost-button", createCheckpoint),
+      iconOnlyButton("compare", `ghost-button${state.compareOpen ? " active" : ""}`, toggleCompare, {
+        title: state.compareOpen ? t("toolbar.compareCollapse") : t("toolbar.compare"),
+      }),
+      iconOnlyButton("chart", `ghost-button${state.insightsOpen ? " active" : ""}`, toggleInsights, {
+        title: state.insightsOpen ? t("toolbar.insightsCollapse") : t("toolbar.insights"),
+      }),
+      iconOnlyButton("layers", `ghost-button${state.candidatesOpen ? " active" : ""}`, toggleCandidates, {
+        title: state.candidatesOpen
+          ? t("toolbar.candidatesCollapse")
+          : t("toolbar.candidateCenter", { count: activeCandidates }),
+        attrs: {
+          "aria-label": state.candidatesOpen
+            ? t("toolbar.candidatesCollapse")
+            : t("toolbar.candidateCenter", { count: activeCandidates }),
         },
-      ),
-      button(state.versionsOpen ? "收起版本" : "版本历史", "ghost-button", toggleVersions),
-      button(state.stylesOpen ? "收起知识" : "知识 / 风格", "ghost-button", toggleStyles),
-      button(state.providersOpen ? "收起模型" : "模型设置", "ghost-button", toggleProviders),
-      button("关闭项目", "quiet-button", closeProject),
+      }),
+      iconOnlyButton("history", `ghost-button${state.versionsOpen ? " active" : ""}`, toggleVersions, {
+        title: state.versionsOpen ? t("toolbar.versionsCollapse") : t("toolbar.versions"),
+      }),
+      iconOnlyButton("timeline", `ghost-button${state.timelineOpen ? " active" : ""}`, toggleTimeline, {
+        title: state.timelineOpen ? t("toolbar.timelineCollapse") : t("toolbar.timeline"),
+      }),
+      iconOnlyButton("book", `ghost-button${state.stylesOpen ? " active" : ""}`, toggleStyles, {
+        title: state.stylesOpen ? t("toolbar.stylesCollapse") : t("toolbar.styles"),
+      }),
+      iconOnlyButton("settings", `ghost-button${state.providersOpen ? " active" : ""}`, toggleProviders, {
+        title: state.providersOpen ? t("toolbar.providersCollapse") : t("toolbar.providers"),
+      }),
+      iconOnlyButton("backup", `ghost-button${state.backupWizardOpen ? " active" : ""}`, toggleBackupWizard, {
+        title: t("wizard.title"),
+      }),
+      button(t("toolbar.closeProject"), "quiet-button", closeProject),
     ]),
   ]);
   const sidebar = documentSidebar();
@@ -490,7 +786,15 @@ function renderWorkspace() {
         ? candidateDrawer()
         : state.versionsOpen
           ? versionDrawer()
-          : null;
+          : state.timelineOpen
+            ? timelineDrawer()
+            : state.insightsOpen
+              ? insightsDrawer()
+              : state.compareOpen
+                ? compareDrawer()
+                : state.backupWizardOpen
+                  ? backupRestoreWizard()
+                  : null;
   const body = element("div", { className: `workspace-body${drawer ? " with-versions" : ""}` }, [
     sidebar,
     editor,
@@ -535,22 +839,37 @@ function documentTreeEntries(documents) {
   return entries;
 }
 
-function documentDescendantCount(documentId, documents) {
-  let frontier = [documentId];
-  let count = 0;
-  while (frontier.length) {
-    const parentId = frontier.pop();
-    const children = documents.filter((document) => document.parentId === parentId);
-    count += children.length;
-    frontier.push(...children.map((document) => document.id));
+// O(n) descendant counts: build a single child index and sum in post-order
+// so deep document trees never trigger a full documents.filter() per node
+// (which made this quadratic for tall hierarchies).
+function documentDescendantCounts(documents) {
+  const byId = new Map(documents.map((document) => [document.id, document]));
+  const children = new Map();
+  for (const document of documents) {
+    const parentId = document.parentId && byId.has(document.parentId) ? document.parentId : null;
+    const siblings = children.get(parentId) ?? [];
+    siblings.push(document);
+    children.set(parentId, siblings);
   }
-  return count;
+  const counts = new Map();
+  const visit = (id) => {
+    const cached = counts.get(id);
+    if (cached !== undefined) return cached;
+    let total = 0;
+    for (const child of children.get(id) ?? []) {
+      total += 1 + visit(child.id);
+    }
+    counts.set(id, total);
+    return total;
+  };
+  for (const document of documents) visit(document.id);
+  return counts;
 }
 
 function documentSidebar() {
   const documents = state.workspace.documents;
   const entries = documentTreeEntries(documents);
-  const list = element("nav", { className: "document-list", attrs: { "aria-label": "文档" } });
+  const list = element("nav", { className: "document-list", attrs: { "aria-label": t("doc.ariaLabel") } });
   for (const entry of entries) {
     const { document, depth, siblingIndex, siblingCount } = entry;
     const select = button("", `document-button${document.id === state.selectedDocumentId ? " active" : ""}`, () => {
@@ -561,75 +880,75 @@ function documentSidebar() {
     select.append(
       element("span", {
         className: "document-indent",
-        text: depth ? "· ".repeat(depth) : "",
+        text: "",
         attrs: { "aria-hidden": "true" },
       }),
-      element("span", { className: "document-icon", text: document.kind === "chapter" ? "章" : "文" }),
+      element("span", { className: "document-icon" }, [svgIcon(document.kind === "chapter" ? "chapter" : "text", 14)]),
       element("span", { className: "document-name", text: document.title }),
     );
     const actions = element("span", { className: "document-actions" }, [
-      button("↑", "document-action", () => reorderDocument(document, "up"), {
-        title: `上移“${document.title}”`,
+      iconOnlyButton("up", "document-action", () => reorderDocument(document, "up"), {
+        title: t("doc.moveUpTitle", { title: document.title }),
         disabled: siblingIndex === 0,
-        attrs: { "aria-label": `上移 ${document.title}` },
+        attrs: { "aria-label": t("doc.moveUpLabel", { title: document.title }) },
       }),
-      button("↓", "document-action", () => reorderDocument(document, "down"), {
-        title: `下移“${document.title}”`,
+      iconOnlyButton("down", "document-action", () => reorderDocument(document, "down"), {
+        title: t("doc.moveDownTitle", { title: document.title }),
         disabled: siblingIndex === siblingCount - 1,
-        attrs: { "aria-label": `下移 ${document.title}` },
+        attrs: { "aria-label": t("doc.moveDownLabel", { title: document.title }) },
       }),
-      button("✎", "document-action", () => renameDocument(document), {
-        title: `重命名“${document.title}”`,
-        attrs: { "aria-label": `重命名 ${document.title}` },
+      iconOnlyButton("edit", "document-action", () => renameDocument(document), {
+        title: t("doc.renameTitle", { title: document.title }),
+        attrs: { "aria-label": t("doc.renameLabel", { title: document.title }) },
       }),
-      button("×", "document-action document-action-danger", () => archiveDocument(document), {
-        title: documents.length === 1 ? "项目必须保留一个有效章节" : `归档“${document.title}”`,
+      iconOnlyButton("close", "document-action document-action-danger", () => archiveDocument(document), {
+        title: documents.length === 1 ? t("doc.archiveOnlyDoc") : t("doc.archiveTitle", { title: document.title }),
         disabled: documents.length === 1,
-        attrs: { "aria-label": `归档 ${document.title}` },
+        attrs: { "aria-label": t("doc.archiveLabel", { title: document.title }) },
       }),
     ]);
-    list.append(element("div", { className: "document-row" }, [select, actions]));
+    list.append(element("div", { className: "document-row", attrs: { "data-depth": String(depth) } }, [select, actions]));
     if (document.id === state.selectedDocumentId) {
       list.append(element("div", { className: "document-structure-actions" }, [
-        button("缩进", "document-structure-action", () => changeDocumentDepth(document, "indent"), {
+        iconOnlyButton("indent", "document-structure-action", () => changeDocumentDepth(document, "indent"), {
           disabled: siblingIndex === 0,
-          attrs: { "aria-label": `缩进 ${document.title}` },
+          attrs: { "aria-label": t("doc.indentLabel", { title: document.title }) },
         }),
-        button("移出", "document-structure-action", () => changeDocumentDepth(document, "outdent"), {
+        iconOnlyButton("outdent", "document-structure-action", () => changeDocumentDepth(document, "outdent"), {
           disabled: !document.parentId,
-          attrs: { "aria-label": `移出 ${document.title}` },
+          attrs: { "aria-label": t("doc.outdentLabel", { title: document.title }) },
         }),
-        button("＋ 子章节", "document-structure-action", () => createDocument(document.id), {
-          attrs: { "aria-label": `新建 ${document.title} 的子章节` },
+        iconOnlyButton("plus", "document-structure-action", () => createDocument(document.id), {
+          attrs: { "aria-label": t("doc.addChildLabel", { title: document.title }) },
         }),
       ]));
     }
   }
   if (state.archivedDocuments.length) {
-    list.append(element("div", { className: "archived-heading", text: `已归档 · ${state.archivedDocuments.length}` }));
+    list.append(element("div", { className: "archived-heading", text: t("doc.archivedHeading", { count: state.archivedDocuments.length }) }));
     for (const document of state.archivedDocuments) {
       list.append(element("div", { className: "archived-document-row" }, [
         element("span", { text: document.title, title: document.title }),
-        button("恢复", "document-restore", () => restoreArchivedDocument(document), {
-          attrs: { "aria-label": `恢复 ${document.title}` },
+        iconOnlyButton("restore", "document-restore", () => restoreArchivedDocument(document), {
+          attrs: { "aria-label": t("doc.restoreLabel", { title: document.title }) },
         }),
       ]));
     }
   }
   return element("aside", { className: "sidebar" }, [
     element("div", { className: "sidebar-heading" }, [
-      element("span", { text: "文档" }),
+      element("span", { text: t("doc.listLabel") }),
       element("div", { className: "sidebar-heading-actions" }, [
         element("span", { className: "count-pill", text: String(documents.length) }),
-        button("＋", "icon-button document-add", () => createDocument(null), {
-          title: "新建顶层章节",
-          attrs: { "aria-label": "新建顶层章节" },
+        iconOnlyButton("plus", "icon-button document-add", () => createDocument(null), {
+          title: t("doc.newTopLevel"),
+          attrs: { "aria-label": t("doc.newTopLevel") },
         }),
       ]),
     ]),
     list,
     element("div", { className: "sidebar-stats" }, [
-      element("span", { text: "有效字符" }),
+      element("span", { text: t("doc.validChars") }),
       element("strong", { text: countVisibleCharacters(state.workspace).toLocaleString("zh-CN") }),
     ]),
   ]);
@@ -669,13 +988,13 @@ async function commitDocumentMutation(command, input, preferredDocumentId, succe
 }
 
 async function renameDocument(document) {
-  const title = window.prompt("新的章节标题", document.title);
+  const title = window.prompt(t("doc.renamePrompt"), document.title);
   if (title === null || title.trim() === document.title) return;
   await commitDocumentMutation(
     "rename_document",
     { documentId: document.id, expectedRevision: document.revision, title },
     document.id,
-    `已重命名为“${title.trim()}”，并记录版本。`,
+    t("doc.renamed", { title: title.trim() }),
   );
 }
 
@@ -684,7 +1003,7 @@ async function reorderDocument(document, direction) {
     "reorder_document",
     { documentId: document.id, expectedRevision: document.revision, direction },
     document.id,
-    `已${direction === "up" ? "上移" : "下移"}“${document.title}”，并记录版本。`,
+    t("doc.moved", { direction: direction === "up" ? t("doc.directionUp") : t("doc.directionDown"), title: document.title }),
   );
 }
 
@@ -694,20 +1013,20 @@ async function changeDocumentDepth(document, direction) {
     { documentId: document.id, expectedRevision: document.revision, direction },
     document.id,
     direction === "indent"
-      ? `已将“${document.title}”缩进为上一章节的子章节。`
-      : `已将“${document.title}”移出到上一层。`,
+      ? t("doc.indented", { title: document.title })
+      : t("doc.outdented", { title: document.title }),
   );
 }
 
 async function archiveDocument(document) {
-  const descendants = documentDescendantCount(document.id, state.workspace.documents);
-  const cascade = descendants ? `及其 ${descendants} 个子章节` : "";
-  if (!window.confirm(`归档“${document.title}”${cascade}？正文会被保留，并可从侧栏恢复。`)) return;
+  const descendants = documentDescendantCounts(state.workspace.documents).get(document.id) ?? 0;
+  const cascade = descendants ? t("doc.archiveCascade", { count: descendants }) : "";
+  if (!window.confirm(t("doc.archiveConfirm", { title: document.title, cascade }))) return;
   await commitDocumentMutation(
     "set_document_archived",
     { documentId: document.id, expectedRevision: document.revision, archived: true },
     state.selectedDocumentId === document.id ? null : state.selectedDocumentId,
-    `已归档“${document.title}”，正文和版本记录仍被保留。`,
+    t("doc.archived", { title: document.title }),
   );
 }
 
@@ -716,13 +1035,13 @@ async function restoreArchivedDocument(document) {
     "set_document_archived",
     { documentId: document.id, expectedRevision: document.revision, archived: false },
     document.id,
-    `已恢复“${document.title}”。`,
+    t("doc.restored", { title: document.title }),
   );
 }
 
 async function createDocument(parentDocumentId = null) {
   const parent = state.workspace.documents.find((document) => document.id === parentDocumentId);
-  const title = window.prompt(parent ? `新建“${parent.title}”的子章节` : "新章节标题");
+  const title = window.prompt(parent ? t("doc.newChildPrompt", { title: parent.title }) : t("doc.newTitlePrompt"));
   if (title === null) return;
   try {
     await flushAll();
@@ -730,7 +1049,7 @@ async function createDocument(parentDocumentId = null) {
       input: { schemaVersion: 1, title, initialText: "", parentDocumentId },
     });
     state.summaryInvalidations = await invokeHost("list_summary_invalidations");
-    applyCreatedDocument(created, `已创建章节“${created.document.title}”并记录版本。`);
+    applyCreatedDocument(created, t("doc.created", { title: created.document.title }));
     scheduleSummaryRefresh();
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
@@ -761,7 +1080,7 @@ function applyCreatedDocument(created, message) {
 function importMarkdown() {
   const picker = element("input", {
     type: "file",
-    attrs: { accept: ".md,.markdown,text/markdown,text/plain", "aria-label": "选择 Markdown 文件" },
+    attrs: { accept: ".md,.markdown,text/markdown,text/plain", "aria-label": t("import.ariaLabel") },
   });
   picker.hidden = true;
   picker.addEventListener("change", async () => {
@@ -770,16 +1089,16 @@ function importMarkdown() {
     if (!file) return;
     try {
       if (file.size > 2 * 1024 * 1024) {
-        throw { code: "IMPORT_TOO_LARGE", message: "Markdown 文件不能超过 2 MiB。" };
+        throw { code: "IMPORT_TOO_LARGE", message: t("error.importTooLarge") };
       }
       await flushAll();
       const text = (await file.text()).replace(/^\uFEFF/, "");
-      const title = file.name.replace(/\.(?:md|markdown|txt)$/i, "") || "导入文档";
+      const title = file.name.replace(/\.(?:md|markdown|txt)$/i, "") || t("doc.importedName");
       const created = await invokeHost("create_document", {
         input: { schemaVersion: 1, title, initialText: text },
       });
       state.summaryInvalidations = await invokeHost("list_summary_invalidations");
-      applyCreatedDocument(created, `已导入 ${file.name}；原始 Markdown 已作为版本化正文保存。`);
+      applyCreatedDocument(created, t("doc.imported", { name: file.name }));
       scheduleSummaryRefresh();
     } catch (error) {
       setNotice("error", normalizeHostError(error).message);
@@ -794,7 +1113,19 @@ async function exportMarkdown() {
   try {
     await flushAll();
     const exported = await invokeHost("export_markdown");
-    setNotice("success", `已导出 ${exported.documents} 个文档到 ${exported.path}`);
+    setNotice("success", t("export.markdown", { count: exported.documents, path: exported.path }));
+    renderWorkspace();
+  } catch (error) {
+    setNotice("error", normalizeHostError(error).message);
+    renderWorkspace();
+  }
+}
+
+async function exportJson() {
+  try {
+    await flushAll();
+    const exported = await invokeHost("export_json");
+    setNotice("success", t("export.json", { path: exported.path }));
     renderWorkspace();
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
@@ -805,27 +1136,27 @@ async function exportMarkdown() {
 function editorPane() {
   const document = state.workspace.documents.find((item) => item.id === state.selectedDocumentId);
   if (!document) {
-    return element("section", { className: "editor-empty", text: "项目中还没有可编辑文档。" });
+    return element("section", { className: "editor-empty", text: t("editor.empty") });
   }
   const toolbar = element("div", { className: "editor-toolbar" }, [
-    element("span", { className: "toolbar-label", text: "AI 操作" }),
+    element("span", { className: "toolbar-label", text: t("ai.toolbar.label") }),
     ...AI_OPERATION_COMMANDS.map((command) =>
-      button(command.label, "tool-button", () => runAiOperation(command.type), {
+      iconTextButton(command.icon, command.label, "tool-button", () => runAiOperation(command.type), {
         disabled: Boolean(state.aiRunning || state.aiReview?.kind === "patch_proposal"),
         title: `${command.description} · ${command.shortcut}`,
         attrs: { "aria-keyshortcuts": command.shortcut },
       }),
     ),
-    button("固定风格", "tool-button style-pin-button", pinCurrentStyleSample, {
+    button(t("ai.toolbar.pinStyle"), "tool-button style-pin-button", pinCurrentStyleSample, {
       disabled: Boolean(state.aiRunning || state.aiReview?.kind === "patch_proposal"),
-      title: "将当前选区固定为项目风格样本",
+      title: t("ai.toolbar.pinStyleTitle"),
     }),
-    button("命令", "tool-button command-palette-trigger", openCommandPalette, {
-      title: "打开 AI 命令面板 · Ctrl/⌘+Shift+P",
+    button(t("ai.toolbar.command"), "tool-button command-palette-trigger", openCommandPalette, {
+      title: t("ai.toolbar.commandTitle"),
       attrs: { "aria-keyshortcuts": "Control+Shift+P Meta+Shift+P" },
     }),
     state.aiRunning
-      ? button("取消", "danger-button", cancelAiOperation)
+      ? button(t("common.cancel"), "danger-button", cancelAiOperation)
       : null,
     element("span", {
       className: "toolbar-note",
@@ -848,11 +1179,11 @@ function conflictView() {
   const conflict = state.conflictDraft;
   if (!conflict || !state.workspace.blocks.some((block) => block.id === conflict.blockId)) return null;
   return element("div", { className: "conflict-card" }, [
-    element("strong", { text: "检测到并发修改，草稿尚未丢失" }),
-    element("p", { text: "已重新载入磁盘上的最新版本。你可以把本地草稿重新保存，或放弃它。" }),
+    element("strong", { text: t("ai.conflict.title") }),
+    element("p", { text: t("ai.conflict.description") }),
     element("div", { className: "conflict-actions" }, [
-      button("用本地草稿覆盖最新版本", "danger-button", retryConflictDraft),
-      button("放弃本地草稿", "quiet-button", () => {
+      button(t("ai.conflict.overwrite"), "danger-button", retryConflictDraft),
+      button(t("ai.conflict.discard"), "quiet-button", () => {
         state.conflictDraft = null;
         renderWorkspace();
       }),
@@ -867,14 +1198,13 @@ function blockEditor(block) {
   const wrapper = element("section", { className: `editor-block block-${block.kind}${editable ? "" : " locked"}` });
   const meta = element("div", { className: "block-meta" }, [
     element("span", { text: block.kind }),
-    element("span", { text: `r${block.revision}` }),
   ]);
   const content = element("div", {
     className: "block-content",
     text: block.plainText,
     attrs: {
       "data-block-id": block.id,
-      "data-placeholder": editable ? "开始写作…" : "此 Block 暂不支持直接编辑",
+      "data-placeholder": editable ? t("editor.placeholder.editable") : t("editor.placeholder.readonly"),
       role: "textbox",
       "aria-multiline": "true",
       spellcheck: "true",
@@ -948,18 +1278,18 @@ function aiContextMenuView() {
   if (!context || !state.workspace) return null;
   const menu = element("div", {
     className: "ai-context-menu",
-    attrs: { role: "menu", "aria-label": "AI 文本操作" },
+    attrs: { role: "menu", "aria-label": t("ai.menu.title") },
   }, [
-    element("div", { className: "context-menu-heading", text: "AI 文本操作" }),
+    element("div", { className: "context-menu-heading", text: t("ai.menu.title") }),
     ...AI_OPERATION_COMMANDS.map((command) => commandMenuButton(command)),
     element("div", { className: "context-menu-separator", attrs: { role: "separator" } }),
     commandMenuButton({
       type: "pin_style",
-      label: "固定为风格样本",
-      description: "保存当前选区",
+      label: t("ai.menu.pinStyle"),
+      description: t("ai.menu.saveSelection"),
       shortcut: "",
     }),
-    element("div", { className: "context-menu-hint", text: "Shift + 右键打开系统菜单" }),
+    element("div", { className: "context-menu-hint", text: t("ai.menu.hint") }),
   ]);
   menu.style.left = `${Math.max(8, Math.min(context.x, window.innerWidth - 244))}px`;
   menu.style.top = `${Math.max(8, Math.min(context.y, window.innerHeight - 340))}px`;
@@ -1002,19 +1332,30 @@ function openCommandPalette() {
 
 function commandPaletteModal() {
   if (!state.commandPaletteOpen || !state.workspace) return null;
-  const commandRows = [
+  // v0.8.0 Stage 3 (a11y): the palette is a real listbox so screen readers
+  // announce the active option as the user arrows through it. The query
+  // input owns the keyboard: ArrowUp/Down move the active option, Enter
+  // executes it, Escape closes. aria-activedescendant on the listbox points
+  // at the currently active option's id so AT speaks it without moving DOM
+  // focus away from the input.
+  let activeIndex = 0;
+  const commands = [
     ...AI_OPERATION_COMMANDS,
     {
       type: "pin_style",
-      label: "固定为风格样本",
-      description: "将当前选区保存到项目风格库",
+      label: t("ai.menu.pinStyle"),
+      description: t("ai.menu.saveToLibrary"),
       shortcut: "",
     },
-  ].map((command) => {
+  ];
+  const commandRows = commands.map((command, index) => {
     const row = button("", "command-palette-item", () => executeRegisteredCommand(command.type), {
       disabled: operationCommandsDisabled(),
       attrs: {
         "data-command-search": `${command.label} ${command.description} ${command.type}`.toLowerCase(),
+        role: "option",
+        id: `command-palette-option-${index}`,
+        "aria-selected": index === 0 ? "true" : "false",
       },
     });
     row.append(element("span", { className: "command-palette-copy" }, [
@@ -1024,20 +1365,49 @@ function commandPaletteModal() {
     if (command.shortcut) row.append(element("kbd", { text: command.shortcut }));
     return row;
   });
+  const list = element("div", {
+    className: "command-palette-list",
+    attrs: {
+      id: "command-palette-list",
+      role: "listbox",
+      "aria-labelledby": "command-palette-title",
+      "aria-activedescendant": commandRows[0] ? commandRows[0].id : "",
+    },
+  }, commandRows);
   const query = element("input", {
     type: "search",
-    placeholder: "搜索续写、润色、压缩…",
+    placeholder: t("ai.palette.searchPlaceholder"),
     attrs: {
       id: "command-palette-query",
-      "aria-label": "搜索 AI 命令",
+      "aria-label": t("ai.palette.searchLabel"),
+      "aria-controls": "command-palette-list",
+      "aria-autocomplete": "list",
+      "aria-expanded": "true",
+      "aria-activedescendant": commandRows[0] ? commandRows[0].id : "",
       autocomplete: "off",
     },
   });
+  const updateActive = (nextIndex) => {
+    if (nextIndex < 0 || nextIndex >= commandRows.length) return;
+    activeIndex = nextIndex;
+    for (let i = 0; i < commandRows.length; i++) {
+      commandRows[i].setAttribute("aria-selected", i === activeIndex ? "true" : "false");
+    }
+    const activeId = commandRows[activeIndex].id;
+    list.setAttribute("aria-activedescendant", activeId);
+    query.setAttribute("aria-activedescendant", activeId);
+  };
+  const visibleIndices = () => commandRows
+    .map((row, i) => ({ row, i }))
+    .filter(({ row }) => !row.hidden && !row.disabled)
+    .map(({ i }) => i);
   query.addEventListener("input", () => {
     const needle = query.value.trim().toLowerCase();
     for (const row of commandRows) {
       row.hidden = !row.dataset.commandSearch.includes(needle);
     }
+    const firstVisible = visibleIndices()[0];
+    if (firstVisible !== undefined) updateActive(firstVisible);
   });
   query.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
@@ -1045,7 +1415,24 @@ function commandPaletteModal() {
       closeCommandSurfaces();
     } else if (event.key === "Enter") {
       event.preventDefault();
-      commandRows.find((row) => !row.hidden && !row.disabled)?.click();
+      const active = commandRows[activeIndex];
+      if (active && !active.hidden && !active.disabled) active.click();
+    } else if (event.key === "ArrowDown") {
+      event.preventDefault();
+      const visible = visibleIndices();
+      if (!visible.length) return;
+      const currentPos = visible.indexOf(activeIndex);
+      const nextPos = currentPos < 0 ? 0 : (currentPos + 1) % visible.length;
+      updateActive(visible[nextPos]);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      const visible = visibleIndices();
+      if (!visible.length) return;
+      const currentPos = visible.indexOf(activeIndex);
+      const prevPos = currentPos < 0
+        ? 0
+        : (currentPos - 1 + visible.length) % visible.length;
+      updateActive(visible[prevPos]);
     }
   });
   const backdrop = element("div", {
@@ -1059,15 +1446,15 @@ function commandPaletteModal() {
       element("div", { className: "command-palette-heading" }, [
         element("div", {}, [
           element("span", { className: "eyebrow", text: "COMMAND PALETTE" }),
-          element("h2", { text: "选择 AI 操作", attrs: { id: "command-palette-title" } }),
+          element("h2", { text: t("ai.palette.title"), attrs: { id: "command-palette-title" } }),
         ]),
         element("kbd", { text: "Esc" }),
       ]),
       query,
       operationCommandsDisabled()
-        ? element("p", { className: "command-palette-warning", text: "请先完成或放弃当前 AI 操作与审查。" })
+        ? element("p", { className: "command-palette-warning", text: t("ai.palette.warning") })
         : null,
-      element("div", { className: "command-palette-list" }, commandRows),
+      list,
     ]),
   ]);
   backdrop.addEventListener("pointerdown", (event) => {
@@ -1101,11 +1488,12 @@ async function runAiOperation(operationType, retryTarget = null) {
     state.versionsOpen = false;
     state.stylesOpen = false;
     state.candidatesOpen = false;
+    state.timelineOpen = false;
     setNotice(
       "warning",
       credentialRequired
-        ? `请先在模型设置中启用 ${PROVIDER_PRESETS[state.selectedProviderId].label} 并保存 API Key。`
-        : `请先在模型设置中启用 ${PROVIDER_PRESETS[state.selectedProviderId].label}。`,
+        ? t("ai.op.providerDisabled", { label: PROVIDER_PRESETS[state.selectedProviderId].label })
+        : t("ai.op.providerDisabledNoKey", { label: PROVIDER_PRESETS[state.selectedProviderId].label }),
     );
     renderWorkspace();
     return;
@@ -1120,13 +1508,13 @@ async function runAiOperation(operationType, retryTarget = null) {
       : state.workspace.blocks.find((candidate) => candidate.id === state.activeBlockId)
         ?? documentBlocks.find(isEditableBlock);
     if (!block || !isEditableBlock(block)) {
-      throw { code: "TARGET_INVALID", message: "请先把光标放到一个可编辑文本 Block 中。" };
+      throw { code: "TARGET_INVALID", message: t("error.targetInvalid") };
     }
     let from;
     let to;
     if (retryTarget) {
       if (!matchesDesktopRetryTarget(block, retryTarget)) {
-        throw { code: "TARGET_STALE", message: "原重试目标已经变化，请重新选择正文后发起操作。" };
+        throw { code: "TARGET_STALE", message: t("error.targetStale") };
       }
       from = retryTarget.from;
       to = retryTarget.to;
@@ -1152,12 +1540,12 @@ async function runAiOperation(operationType, retryTarget = null) {
     };
     const Channel = window.__TAURI__?.core?.Channel;
     if (typeof Channel !== "function") {
-      throw { code: "HOST_UNAVAILABLE", message: "当前桌面运行时不支持流式模型通道。" };
+      throw { code: "HOST_UNAVAILABLE", message: t("error.streamUnsupported") };
     }
     const controller = new AbortController();
     state.aiRunning = {
       controller,
-      label: "正在编译上下文…",
+      label: t("ai.op.compilingContext"),
       received: 0,
     };
     state.aiReview = null;
@@ -1188,7 +1576,7 @@ async function runAiOperation(operationType, retryTarget = null) {
       };
       await refreshReviewCandidates();
       state.aiRetry = null;
-      setNotice("success", `AI 已生成 ${execution.result.proposal.hunks.length} 个可审查修改，正文尚未改变。`);
+      setNotice("success", t("ai.op.generated", { count: execution.result.proposal.hunks.length }));
     } else {
       state.aiReview = {
         kind: "findings",
@@ -1196,7 +1584,7 @@ async function runAiOperation(operationType, retryTarget = null) {
         result: execution.result,
       };
       state.aiRetry = null;
-      setNotice("success", `批评完成，共 ${execution.result.findings.length} 条发现。`);
+      setNotice("success", t("ai.op.critiqueDone", { count: execution.result.findings.length }));
     }
   } catch (error) {
     const normalized = normalizeHostError(error);
@@ -1206,8 +1594,8 @@ async function runAiOperation(operationType, retryTarget = null) {
       const attempted = Math.max(1, retry.attempts);
       setNotice(
         "warning",
-        `模型请求在 ${attempted} 次安全尝试后仍失败：${normalized.message}`,
-        "重新尝试",
+        t("ai.op.retryFailed", { attempts: attempted, message: normalized.message }),
+        t("ai.op.retry"),
         retryLastAiOperation,
       );
     } else {
@@ -1233,7 +1621,7 @@ function retryLastAiOperation() {
 function confirmCompiledContext(packet) {
   return new Promise((resolve, reject) => {
     state.aiContextPreview = { packet, resolve, reject };
-    if (state.aiRunning) state.aiRunning.label = "等待确认发送上下文…";
+    if (state.aiRunning) state.aiRunning.label = t("ai.op.waitingConfirm");
     renderWorkspace();
   });
 }
@@ -1250,16 +1638,16 @@ function contextPreviewModal() {
       element("div", { className: "review-heading" }, [
         element("div", {}, [
           element("span", { className: "eyebrow", text: "CONTEXT PACKET" }),
-          element("h2", { text: "确认即将发送的上下文", attrs: { id: "context-title" } }),
+          element("h2", { text: t("ai.context.title"), attrs: { id: "context-title" } }),
         ]),
         element("span", {
           className: "count-pill",
-          text: `约 ${packet.budget.estimatedInput.toLocaleString("zh-CN")} tokens`,
+          text: t("ai.context.tokens", { count: packet.budget.estimatedInput.toLocaleString("zh-CN") }),
         }),
       ]),
       element("p", {
         className: "context-explainer",
-        text: "只有下列内容会发送到当前云端模型。API Key、废弃内容和被策略拒绝的来源不会包含在请求中。",
+        text: t("ai.context.description"),
       }),
       element("div", { className: "context-items" }, packet.items.map((item) => element("article", {
         className: "context-item",
@@ -1267,22 +1655,22 @@ function contextPreviewModal() {
         element("div", { className: "context-item-heading" }, [
           element("strong", { text: item.tier }),
           element("code", { text: item.sourceRef }),
-          item.mandatory ? element("span", { className: "mandatory-pill", text: "必需" }) : null,
+          item.mandatory ? element("span", { className: "mandatory-pill", text: t("common.mandatory") }) : null,
         ]),
-        element("pre", { text: item.content || "（空选区：插入点）" }),
+        element("pre", { text: item.content || t("common.emptySelection") }),
         element("span", { className: "context-reason", text: item.reasonCodes.join(" · ") }),
       ]))),
       packet.exclusions.length
         ? element("details", { className: "context-exclusions" }, [
-            element("summary", { text: `${packet.exclusions.length} 个来源未发送` }),
+            element("summary", { text: t("ai.context.exclusions", { count: packet.exclusions.length }) }),
             ...packet.exclusions.map((item) => element("code", {
               text: `${item.sourceRef} · ${item.reason}`,
             })),
           ])
         : null,
       element("div", { className: "modal-actions" }, [
-        button("取消本次操作", "quiet-button", cancelContextPreview),
-        button("确认并发送", "primary-button context-confirm", approveContextPreview),
+        button(t("ai.context.cancel"), "quiet-button", cancelContextPreview),
+        button(t("ai.context.confirm"), "primary-button context-confirm", approveContextPreview),
       ]),
     ]),
   ]);
@@ -1294,7 +1682,7 @@ function approveContextPreview() {
   state.aiContextPreview = null;
   renderWorkspace();
   preview.resolve();
-  updateAiStatus("模型正在生成…");
+  updateAiStatus(t("ai.op.modelGenerating"));
 }
 
 function cancelContextPreview() {
@@ -1309,22 +1697,22 @@ function updateAiProgress(event) {
   if (!state.aiRunning) return;
   if (event.type === "lifecycle") {
     const labels = {
-      compiling: "正在编译最小充分上下文…",
-      preflight: "正在校验目标与上下文…",
-      queued: "请求已进入队列…",
-      streaming: "模型正在生成…",
-      validating: "正在校验模型输出…",
-      review: "正在生成修改提案…",
+      compiling: t("ai.op.status.compiling"),
+      preflight: t("ai.op.status.preflight"),
+      queued: t("ai.op.status.queued"),
+      streaming: t("ai.op.status.streaming"),
+      validating: t("ai.op.status.validating"),
+      review: t("ai.op.status.review"),
     };
     state.aiRunning.label = labels[event.transition.to] ?? state.aiRunning.label;
   } else if (event.type === "model_text_delta") {
     state.aiRunning.received += event.text.length;
-    state.aiRunning.label = `模型正在生成… ${state.aiRunning.received.toLocaleString("zh-CN")} 字符`;
+    state.aiRunning.label = t("ai.op.modelGeneratingChars", { count: state.aiRunning.received.toLocaleString("zh-CN") });
   } else if (event.type === "model_reasoning_delta") {
-    state.aiRunning.label = "模型正在推理…";
+    state.aiRunning.label = t("ai.op.modelReasoning");
   } else if (event.type === "model_retry") {
     state.aiRunning.received = 0;
-    state.aiRunning.label = `请求暂时失败，${event.delayMs.toLocaleString("zh-CN")}ms 后进行第 ${event.nextAttempt} 次安全尝试…`;
+    state.aiRunning.label = t("ai.op.retryPending", { delay: event.delayMs.toLocaleString("zh-CN"), attempt: event.nextAttempt });
   }
   updateAiStatus(state.aiRunning.label);
 }
@@ -1340,7 +1728,7 @@ function cancelAiOperation() {
     return;
   }
   state.aiRunning?.controller.abort();
-  updateAiStatus("正在取消…");
+  updateAiStatus(t("ai.op.canceling"));
 }
 
 function aiReviewView() {
@@ -1351,9 +1739,9 @@ function aiReviewView() {
       element("div", { className: "review-heading" }, [
         element("div", {}, [
           element("span", { className: "eyebrow", text: "AI FINDINGS" }),
-          element("h2", { text: "批评与检查结果" }),
+          element("h2", { text: t("ai.critique.title") }),
         ]),
-        button("关闭", "quiet-button", () => {
+        button(t("common.close"), "quiet-button", () => {
           state.aiReview = null;
           renderWorkspace();
         }),
@@ -1377,15 +1765,15 @@ function aiReviewView() {
     element("div", { className: "review-heading" }, [
       element("div", {}, [
         element("span", { className: "eyebrow", text: "PATCH REVIEW" }),
-        element("h2", { text: "逐项审查 AI 修改" }),
+        element("h2", { text: t("review.title") }),
       ]),
       element("div", { className: "review-heading-actions" }, [
-        element("span", { className: "count-pill", text: `${accepted} 接受 · ${rejected} 拒绝` }),
-        element("div", { className: "review-batch-actions", attrs: { "aria-label": "批量审查" } }, [
-          button("全部接受", "small-button", () => decideAllCurrentHunks("accepted"), {
+        element("span", { className: "count-pill", text: t("review.count", { accepted, rejected }) }),
+        element("div", { className: "review-batch-actions", attrs: { "aria-label": t("review.batchLabel") } }, [
+          button(t("review.acceptAll"), "small-button", () => decideAllCurrentHunks("accepted"), {
             disabled: review.busy || accepted === total,
           }),
-          button("全部拒绝", "quiet-button", () => decideAllCurrentHunks("rejected"), {
+          button(t("review.rejectAll"), "quiet-button", () => decideAllCurrentHunks("rejected"), {
             disabled: review.busy || rejected === total,
           }),
         ]),
@@ -1394,19 +1782,19 @@ function aiReviewView() {
     proposal.summary ? element("p", { className: "review-summary", text: proposal.summary }) : null,
     review.candidateBranch
       ? element("div", { className: "review-branch-notice" }, [
-          element("span", { text: "已保存候选分支" }),
+          element("span", { text: t("review.branchSaved") }),
           element("code", { text: review.candidateBranch.branchName }),
         ])
       : null,
     ...proposal.hunks.map((hunk, index) => hunkReviewView(review, hunk, index)),
     element("div", { className: "review-footer" }, [
       element("div", { className: "review-footer-group" }, [
-        button("稍后审查", "quiet-button", deferCurrentReview, { disabled: review.busy }),
-        button("放弃提案", "quiet-button", rejectCurrentReview, { disabled: review.busy }),
+        button(t("review.defer"), "quiet-button", deferCurrentReview, { disabled: review.busy }),
+        button(t("review.reject"), "quiet-button", rejectCurrentReview, { disabled: review.busy }),
       ]),
       element("div", { className: "review-footer-group" }, [
         button(
-          review.candidateBranch ? "已保存分支" : "保存为分支",
+          review.candidateBranch ? t("review.branchSavedShort") : t("review.saveBranch"),
           "secondary-button",
           createCurrentCandidateBranch,
           {
@@ -1415,13 +1803,13 @@ function aiReviewView() {
               || accepted === 0
               || Boolean(review.candidateBranch),
             title: accepted === 0
-              ? "至少接受一个修改项后才能建立候选分支"
-              : "创建独立快照分支，不改动当前正文",
+              ? t("review.branchHintDisabled")
+              : t("review.branchHintEnabled"),
           },
         ),
-        button(accepted ? "应用已接受修改" : "完成审查（不改正文）", "primary-button review-apply", applyCurrentReview, {
+        button(accepted ? t("review.applyAccepted") : t("review.completeNoChange"), "primary-button review-apply", applyCurrentReview, {
           disabled: review.busy || review.session.status !== "ready",
-          title: review.session.status === "ready" ? "创建 ai_accept Commit 并完成审计" : "请先处理全部修改项",
+          title: review.session.status === "ready" ? t("review.applyTitle") : t("review.applyDisabled"),
         }),
       ]),
     ]),
@@ -1430,9 +1818,20 @@ function aiReviewView() {
 
 function hunkReviewView(review, hunk, index) {
   const decision = review.session.decisions[hunk.id];
-  return element("article", { className: `review-hunk decision-${decision}` }, [
+  // v0.8.0 Stage 3 (a11y): each hunk is a focusable group so keyboard users
+  // can Tab between hunks without descending into the diff text. Enter
+  // accepts the current hunk, Shift+Enter rejects it. Tab/Shift+Tab wrap
+  // between the first and last hunk so focus never escapes the review card.
+  const article = element("article", {
+    className: `review-hunk decision-${decision}`,
+    attrs: {
+      role: "group",
+      "aria-label": t("a11y.hunkGroup", { index: index + 1 }),
+      tabindex: "0",
+    },
+  }, [
     element("div", { className: "hunk-heading" }, [
-      element("strong", { text: `修改 ${index + 1}` }),
+      element("strong", { text: t("review.hunkIndex", { index: index + 1 }) }),
       element("span", { text: hunk.granularity }),
     ]),
     element("div", { className: "hunk-diff" }, [
@@ -1440,14 +1839,61 @@ function hunkReviewView(review, hunk, index) {
       element("ins", { text: hunk.replacement || "∅" }),
     ]),
     element("div", { className: "hunk-actions" }, [
-      button(decision === "accepted" ? "已接受" : "接受", "small-button", () => decideCurrentHunk(hunk.id, "accepted"), {
+      button(decision === "accepted" ? t("review.accepted") : t("review.accept"), "small-button", () => decideCurrentHunk(hunk.id, "accepted"), {
         disabled: review.busy || decision === "accepted",
       }),
-      button(decision === "rejected" ? "已拒绝" : "拒绝", "quiet-button", () => decideCurrentHunk(hunk.id, "rejected"), {
+      button(decision === "rejected" ? t("review.rejected") : t("review.reject"), "quiet-button", () => decideCurrentHunk(hunk.id, "rejected"), {
         disabled: review.busy || decision === "rejected",
       }),
     ]),
   ]);
+  article.addEventListener("keydown", (event) => {
+    // Only intercept when the hunk article itself is focused (not when a
+    // child button holds focus — buttons have their own native Enter/Space
+    // activation and their own place in the tab order).
+    if (event.target !== article) return;
+    if (event.key === "Enter") {
+      event.preventDefault();
+      if (event.shiftKey) {
+        const rejectBtn = article.querySelector(".hunk-actions button.quiet-button");
+        if (rejectBtn && !rejectBtn.disabled) rejectBtn.click();
+      } else {
+        const acceptBtn = article.querySelector(".hunk-actions button.small-button");
+        if (acceptBtn && !acceptBtn.disabled) acceptBtn.click();
+      }
+    } else if (event.key === "Tab") {
+      const parent = article.parentElement;
+      if (!parent) return;
+      const hunks = Array.from(parent.querySelectorAll(".review-hunk"));
+      const currentIdx = hunks.indexOf(article);
+      if (currentIdx < 0) return;
+      if (event.shiftKey) {
+        if (currentIdx === 0) {
+          event.preventDefault();
+          hunks[hunks.length - 1].focus();
+        }
+      } else if (currentIdx === hunks.length - 1) {
+        event.preventDefault();
+        hunks[0].focus();
+      }
+    }
+  });
+  return article;
+}
+
+// v0.8.0 Stage 3 (a11y): announce the current patch review state through
+// the aria-live region so screen reader users hear decision updates without
+// having to navigate back to the count pill. Reads from state.aiReview so
+// callers only need to invoke it after mutating the review session.
+function announceReviewState() {
+  const review = state.aiReview;
+  if (!review || review.kind !== "patch_proposal") return;
+  const proposal = review.result.proposal;
+  if (!proposal || !Array.isArray(proposal.hunks)) return;
+  const accepted = Object.values(review.session.decisions).filter((v) => v === "accepted").length;
+  const rejected = Object.values(review.session.decisions).filter((v) => v === "rejected").length;
+  const total = proposal.hunks.length;
+  announceLive(t("a11y.reviewSummary", { accepted, rejected, total }));
 }
 
 async function decideCurrentHunk(hunkId, decision) {
@@ -1468,6 +1914,7 @@ async function decideCurrentHunk(hunkId, decision) {
     });
     review.session = next;
     await refreshReviewCandidates();
+    announceReviewState();
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
   } finally {
@@ -1495,11 +1942,12 @@ async function decideAllCurrentHunks(decision) {
       review.session = step.next;
     }
     await refreshReviewCandidates();
+    announceReviewState();
     setNotice(
       "success",
       decision === "accepted"
-        ? `已接受全部 ${review.result.proposal.hunks.length} 个修改项；应用前正文仍未改变。`
-        : `已拒绝全部 ${review.result.proposal.hunks.length} 个修改项；完成审查后正文不会改变。`,
+        ? t("review.allAccepted", { count: review.result.proposal.hunks.length })
+        : t("review.allRejected", { count: review.result.proposal.hunks.length }),
     );
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
@@ -1516,7 +1964,7 @@ async function deferCurrentReview() {
   state.candidatesOpen = true;
   try {
     await refreshReviewCandidates();
-    setNotice("success", "候选已保留，可从候选中心或重新打开项目后继续审查。");
+    setNotice("success", t("review.deferred"));
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
   }
@@ -1532,16 +1980,16 @@ async function createCurrentCandidateBranch() {
     || review.candidateBranch
     || !Object.values(review.session.decisions).includes("accepted")
   ) return;
-  const suggested = "AI 候选 " + new Intl.DateTimeFormat("zh-CN", {
+  const suggested = t("review.branchSuggested", { date: new Intl.DateTimeFormat("zh-CN", {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-  }).format(new Date());
-  const branchName = window.prompt("候选分支名称", suggested)?.trim();
+  }).format(new Date()) });
+  const branchName = window.prompt(t("review.branchPrompt"), suggested)?.trim();
   if (!branchName) return;
   if (branchName.length > 120) {
-    setNotice("error", "候选分支名称不能超过 120 个字符。");
+    setNotice("error", t("error.branchNameTooLong"));
     renderWorkspace();
     return;
   }
@@ -1560,7 +2008,7 @@ async function createCurrentCandidateBranch() {
     await refreshReviewCandidates();
     setNotice(
       "success",
-      "已创建候选分支“" + response.branch.branchName + "”；当前正文与主分支未改变。",
+      t("review.branchCreated", { name: response.branch.branchName }),
     );
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
@@ -1583,7 +2031,7 @@ async function rejectCurrentReview() {
     });
     state.aiReview = null;
     await refreshReviewCandidates();
-    setNotice("success", "提案已拒绝，正文未发生变化，审计记录已保留。 ");
+    setNotice("success", t("review.rejectedNotice"));
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
     review.busy = false;
@@ -1610,12 +2058,12 @@ async function applyCurrentReview() {
       });
       state.aiReview = null;
       await refreshReviewCandidates();
-      setNotice("success", "所有修改项均已拒绝，正文未发生变化。 ");
+      setNotice("success", t("review.allRejectedNotice"));
       renderWorkspace();
       return;
     }
     if (compilation.status !== "ready_to_apply") {
-      throw { code: "CONFLICT", message: "提案目标已变化，无法安全应用。请重新发起 AI 操作。" };
+      throw { code: "CONFLICT", message: t("error.proposalTargetChanged") };
     }
     const response = await invokeHost("apply_reviewed_proposal", {
       input: {
@@ -1637,7 +2085,7 @@ async function applyCurrentReview() {
     state.aiReview = null;
     state.versionHistory = null;
     await refreshReviewCandidates();
-    setNotice("success", `已应用 ${response.acceptedHunks} 个修改项，并创建可审计的 ai_accept Commit。`);
+    setNotice("success", t("review.applied", { count: response.acceptedHunks }));
     scheduleSummaryRefresh();
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
@@ -1653,10 +2101,10 @@ function updateSaveStatus(status) {
 }
 
 function summaryStatusLabel() {
-  if (state.summaryRefreshBusy) return `摘要更新中 · ${state.summaryInvalidations.length}`;
+  if (state.summaryRefreshBusy) return t("summary.updating", { count: state.summaryInvalidations.length });
   return state.summaryInvalidations.length
-    ? `摘要待更新 ${state.summaryInvalidations.length}`
-    : "摘要已就绪";
+    ? t("summary.pending", { count: state.summaryInvalidations.length })
+    : t("summary.ready");
 }
 
 function updateSummaryStatus() {
@@ -1710,11 +2158,11 @@ function queueSave(blockId, plainText, immediate = false) {
   if (!block) return;
   if (plainText === block.plainText && !state.savePromises.has(blockId)) {
     state.pendingText.delete(blockId);
-    updateSaveStatus("已保存");
+    updateSaveStatus(t("common.saved"));
     return;
   }
   state.pendingText.set(blockId, plainText);
-  updateSaveStatus("编辑中");
+  updateSaveStatus(t("common.editing"));
   clearTimeout(state.saveTimers.get(blockId));
   const timer = setTimeout(() => flushBlock(blockId), immediate ? 0 : SAVE_DEBOUNCE_MS);
   state.saveTimers.set(blockId, timer);
@@ -1730,7 +2178,7 @@ function flushBlock(blockId) {
   state.pendingText.delete(blockId);
   const block = state.workspace.blocks.find((item) => item.id === blockId);
   if (!block) return Promise.resolve();
-  updateSaveStatus("保存中…");
+  updateSaveStatus(t("common.saving"));
   const promise = invokeHost("save_block", { input: buildSaveBlockRequest(block, plainText) })
     .then(async (response) => {
       state.workspace = applySaveResponse(state.workspace, response);
@@ -1739,25 +2187,25 @@ function flushBlock(blockId) {
         ...state.session,
         project: { ...state.session.project, headCommitId: response.headCommitId, revision: response.projectRevision },
       };
-      updateSaveStatus("已保存");
+      updateSaveStatus(t("common.saved"));
       scheduleSummaryRefresh();
     })
     .catch(async (error) => {
       const normalized = normalizeHostError(error);
       if (normalized.code === "NO_CHANGES") {
-        updateSaveStatus("已保存");
+        updateSaveStatus(t("common.saved"));
         return;
       }
       if (normalized.code === "CONFLICT") {
         state.conflictDraft = { blockId, plainText };
-        setNotice("warning", "检测到其他提交，已保留本地草稿并重新载入最新版本。");
+        setNotice("warning", t("save.detectedConflict"));
         await loadWorkspace();
-        updateSaveStatus("存在冲突");
+        updateSaveStatus(t("common.conflictState"));
         return;
       }
       state.pendingText.set(blockId, plainText);
       setNotice("error", normalized.message);
-      updateSaveStatus("保存失败");
+      updateSaveStatus(t("common.saveFailed"));
       renderWorkspace();
     })
     .finally(() => state.savePromises.delete(blockId))
@@ -1774,7 +2222,7 @@ async function flushAll({ allowConflict = false } = {}) {
   const ids = new Set([...state.pendingText.keys(), ...state.savePromises.keys()]);
   await Promise.all([...ids].map((blockId) => flushBlock(blockId)));
   if (state.conflictDraft && !allowConflict) {
-    throw { code: "CONFLICT", message: "请先处理已保留的冲突草稿，再继续此操作。" };
+    throw { code: "CONFLICT", message: t("error.conflictDraftPending") };
   }
 }
 
@@ -1790,9 +2238,10 @@ async function createCheckpoint() {
   try {
     await flushAll();
     const checkpoint = await invokeHost("create_checkpoint");
-    setNotice("success", `已建立检查点 ${checkpoint.id.slice(0, 20)}…`);
+    setNotice("success", t("checkpoint.created", { id: checkpoint.id.slice(0, 20) }));
     state.versionHistory = null;
-    if (state.versionsOpen) await loadVersionHistory();
+    state.compareResult = null;
+    if (state.versionsOpen || state.compareOpen) await loadVersionHistory();
     else renderWorkspace();
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
@@ -1811,6 +2260,9 @@ async function toggleCandidates() {
     state.providersOpen = false;
     state.stylesOpen = false;
     state.versionsOpen = false;
+    state.insightsOpen = false;
+    state.compareOpen = false;
+    state.timelineOpen = false;
     try {
       await refreshReviewCandidates();
     } catch (error) {
@@ -1832,23 +2284,23 @@ function candidateDrawer() {
     element("div", { className: "drawer-heading" }, [
       element("div", {}, [
         element("span", { className: "eyebrow", text: "PATCH CANDIDATES" }),
-        element("h2", { text: "候选中心" }),
+        element("h2", { text: t("candidate.center") }),
       ]),
-      button("×", "icon-button", toggleCandidates, { title: "关闭候选中心" }),
+      iconOnlyButton("close", "icon-button", toggleCandidates, { title: t("candidate.close") }),
     ]),
     element("p", {
       className: "drawer-intro",
-      text: "提案与审查决定保存在项目数据库中；稍后或重新打开项目仍可继续。",
+      text: t("candidate.description"),
     }),
-    element("h3", { text: "待处理 · " + active.length }),
+    element("h3", { text: t("candidate.pending", { count: active.length }) }),
   ]);
   if (!active.length) {
-    drawer.append(element("p", { className: "drawer-empty", text: "没有待处理候选。" }));
+    drawer.append(element("p", { className: "drawer-empty", text: t("candidate.empty") }));
   } else {
     drawer.append(...active.map(reviewCandidateCard));
   }
   if (history.length) {
-    drawer.append(element("h3", { text: "已完成 · " + history.length }));
+    drawer.append(element("h3", { text: t("candidate.done", { count: history.length }) }));
     drawer.append(...history.slice(0, 30).map(reviewCandidateCard));
   }
   return drawer;
@@ -1866,21 +2318,21 @@ function reviewCandidateCard(candidate) {
         className: "candidate-status status-" + candidate.status,
         text: reviewCandidateStatusLabel(candidate.status),
       }),
-      element("span", { text: candidate.hunkCount + " 项" }),
+      element("span", { text: t("candidate.hunkCount", { count: candidate.hunkCount }) }),
     ]),
-    element("strong", { text: candidate.summary || (document ? document.title : "AI 修改候选") }),
+    element("strong", { text: candidate.summary || (document ? document.title : t("candidate.defaultSummary")) }),
     element("span", { text: candidate.providerId + " · " + candidate.model }),
     element("span", { text: formatDate(candidate.updatedAt) }),
     candidate.candidateBranch
       ? element("div", { className: "candidate-branch-badge" }, [
-          element("span", { text: "分支" }),
+          element("span", { text: t("candidate.branch") }),
           element("code", { text: candidate.candidateBranch.branchName }),
         ])
       : null,
   ]);
   if (canResume) {
     card.append(button(
-      isCurrent ? "正在审查" : busy ? "正在恢复…" : "继续审查",
+      isCurrent ? t("candidate.reviewing") : busy ? t("candidate.restoring") : t("candidate.continue"),
       "small-button candidate-resume",
       () => openReviewCandidate(candidate.proposalId),
       { disabled: isCurrent || busy || Boolean(state.aiRunning || state.aiReview) },
@@ -1888,7 +2340,7 @@ function reviewCandidateCard(candidate) {
   } else if (candidate.status === "conflicted") {
     card.append(element("p", {
       className: "candidate-note",
-      text: "目标正文已变化；当前版本保留审计，等待后续重基工具。",
+      text: t("candidate.staleTarget"),
     }));
   }
   return card;
@@ -1896,11 +2348,11 @@ function reviewCandidateCard(candidate) {
 
 function reviewCandidateStatusLabel(status) {
   return {
-    review: "审查中",
-    ready: "可应用",
-    conflicted: "有冲突",
-    applied: "已应用",
-    rejected: "已拒绝",
+    review: t("candidate.status.review"),
+    ready: t("candidate.status.ready"),
+    conflicted: t("candidate.status.conflicted"),
+    applied: t("candidate.status.applied"),
+    rejected: t("candidate.status.rejected"),
   }[status] || status;
 }
 
@@ -1915,7 +2367,7 @@ async function openReviewCandidate(proposalId) {
     });
     const hydrated = await hydrateDesktopReviewCandidate(detail);
     if (hydrated.session.status !== "review" && hydrated.session.status !== "ready") {
-      throw { code: "REVIEW_FINALIZED", message: "这个候选当前不能继续审查。" };
+      throw { code: "REVIEW_FINALIZED", message: t("error.reviewFinalized") };
     }
     state.aiReview = {
       kind: "patch_proposal",
@@ -1931,7 +2383,7 @@ async function openReviewCandidate(proposalId) {
     }
     state.activeBlockId = hydrated.proposal.target.blockId;
     state.candidatesOpen = false;
-    setNotice("success", "已从项目数据库恢复未完成的候选审查。");
+    setNotice("success", t("review.restored"));
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
   } finally {
@@ -1946,6 +2398,9 @@ async function toggleVersions() {
     state.providersOpen = false;
     state.stylesOpen = false;
     state.candidatesOpen = false;
+    state.insightsOpen = false;
+    state.compareOpen = false;
+    state.timelineOpen = false;
   }
   if (state.versionsOpen) await loadVersionHistory();
   else renderWorkspace();
@@ -1957,6 +2412,9 @@ async function toggleProviders() {
     state.versionsOpen = false;
     state.stylesOpen = false;
     state.candidatesOpen = false;
+    state.insightsOpen = false;
+    state.compareOpen = false;
+    state.timelineOpen = false;
     await refreshProviderSecretStatus();
   }
   renderWorkspace();
@@ -1968,8 +2426,1050 @@ function toggleStyles() {
     state.providersOpen = false;
     state.versionsOpen = false;
     state.candidatesOpen = false;
+    state.insightsOpen = false;
+    state.compareOpen = false;
+    state.timelineOpen = false;
   }
   renderWorkspace();
+}
+
+async function toggleInsights() {
+  state.insightsOpen = !state.insightsOpen;
+  if (state.insightsOpen) {
+    state.providersOpen = false;
+    state.stylesOpen = false;
+    state.candidatesOpen = false;
+    state.versionsOpen = false;
+    state.compareOpen = false;
+    state.timelineOpen = false;
+    await loadInsights();
+  }
+  renderWorkspace();
+}
+
+function toggleRevisionMetrics() {
+  state.showRevisionMetrics = !state.showRevisionMetrics;
+  renderWorkspace();
+}
+
+async function toggleCompare() {
+  state.compareOpen = !state.compareOpen;
+  if (state.compareOpen) {
+    state.providersOpen = false;
+    state.stylesOpen = false;
+    state.candidatesOpen = false;
+    state.versionsOpen = false;
+    state.insightsOpen = false;
+    state.timelineOpen = false;
+    if (!state.versionHistory) {
+      try {
+        state.versionHistory = await invokeHost("get_version_history");
+      } catch (error) {
+        state.compareOpen = false;
+        setNotice("error", normalizeHostError(error).message);
+      }
+    }
+    if (state.compareOpen && state.versionHistory) {
+      const snapshots = state.versionHistory.checkpoints;
+      const documents = state.workspace.documents;
+      const firstSnapshot = snapshots[0]?.id ?? "";
+      const secondSnapshot = snapshots[1]?.id ?? snapshots[0]?.id ?? "";
+      const firstDocument = documents[0]?.id ?? "";
+      state.compareSelection = {
+        snapshotIdA: state.compareSelection.snapshotIdA || firstSnapshot,
+        snapshotIdB: state.compareSelection.snapshotIdB || secondSnapshot,
+        documentIdA: state.compareSelection.documentIdA || firstDocument,
+        documentIdB: state.compareSelection.documentIdB || firstDocument,
+      };
+    }
+  } else {
+    state.compareResult = null;
+  }
+  renderWorkspace();
+}
+
+async function toggleTimeline() {
+  state.timelineOpen = !state.timelineOpen;
+  if (state.timelineOpen) {
+    state.providersOpen = false;
+    state.stylesOpen = false;
+    state.candidatesOpen = false;
+    state.versionsOpen = false;
+    state.insightsOpen = false;
+    state.compareOpen = false;
+    await loadTimelineEvents();
+  } else {
+    state.timelineSelected = null;
+  }
+  renderWorkspace();
+}
+
+async function loadTimelineEvents() {
+  state.timelineBusy = true;
+  renderWorkspace();
+  try {
+    state.timelineEvents = await invokeHost("list_timeline_events");
+  } catch (error) {
+    setNotice("error", normalizeHostError(error).message);
+    state.timelineOpen = false;
+  } finally {
+    state.timelineBusy = false;
+    renderWorkspace();
+  }
+}
+
+async function loadInsights() {
+  state.insightsBusy = true;
+  renderWorkspace();
+  try {
+    state.insightsData = await invokeHost("get_operation_insights");
+  } catch (error) {
+    setNotice("error", normalizeHostError(error).message);
+  } finally {
+    state.insightsBusy = false;
+    renderWorkspace();
+  }
+}
+
+async function exportDiagnostics() {
+  try {
+    const response = await invokeHost("export_diagnostics");
+    setNotice("success", t("export.diagnostics", { path: response.path }));
+  } catch (error) {
+    setNotice("error", normalizeHostError(error).message);
+  } finally {
+    renderWorkspace();
+  }
+}
+
+function insightsDrawer(docFactory = (typeof document !== "undefined" ? document : null)) {
+  const data = state.insightsData;
+  const drawer = element("aside", { className: "version-drawer insights-drawer", attrs: { role: "dialog", "aria-modal": "true", "aria-labelledby": "insights-drawer-title" } }, [
+    element("div", { className: "drawer-heading" }, [
+      element("div", {}, [
+        element("span", { className: "eyebrow", text: "OPERATION INSIGHTS" }),
+        element("h2", { text: t("insights.title"), attrs: { id: "insights-drawer-title" } }),
+      ], docFactory),
+      iconOnlyButton("close", "icon-button", toggleInsights, { title: t("common.close"), attrs: { "aria-label": t("a11y.closeDrawer") } }, docFactory),
+    ], docFactory),
+    element("p", {
+      className: "drawer-intro",
+      text: t("insights.description"),
+    }, [], docFactory),
+    element("div", { className: "insights-actions" }, [
+      button(t("insights.exportDiagnostics"), "small-button", exportDiagnostics, { disabled: state.insightsBusy === true }, docFactory),
+      button(state.insightsBusy === true ? t("common.refreshing") : t("common.refresh"), "small-button", loadInsights, { disabled: state.insightsBusy === true }, docFactory),
+    ], docFactory),
+  ], docFactory);
+  attachDrawerKeyboard(drawer, docFactory, () => { state.insightsOpen = false; });
+  if (!data) {
+    drawer.append(element("p", { className: "drawer-empty", text: state.insightsBusy === true ? t("insights.loading") : t("insights.notLoaded") }, [], docFactory));
+    return drawer;
+  }
+  const summary = data.summary || {};
+  const totalRuns = summary.totalRuns ?? 0;
+  const totalInputTokens = summary.totalInputTokens ?? 0;
+  const totalOutputTokens = summary.totalOutputTokens ?? 0;
+  const totalTokens = summary.totalTokens ?? 0;
+  const acceptedCount = summary.acceptedCount ?? 0;
+  const rejectedCount = summary.rejectedCount ?? 0;
+  const conflictedCount = summary.conflictedCount ?? 0;
+  const decidedTotal = acceptedCount + rejectedCount + conflictedCount;
+  const acceptRate = decidedTotal > 0
+    ? `${((acceptedCount / decidedTotal) * 100).toFixed(1)}%`
+    : t("insights.noData");
+  const fees = estimateFees(data.recentRuns);
+  const feeEntries = Object.entries(fees);
+  const estimatedFeeTotal = feeEntries.reduce((sum, [, bucket]) => sum + (bucket.fee || 0), 0);
+  drawer.append(element("div", { className: "insights-summary-grid" }, [
+    element("div", { className: "insights-summary-card" }, [
+      element("span", { className: "label", text: t("insights.totalOps") }, [], docFactory),
+      element("span", { className: "value", text: totalRuns.toLocaleString("zh-CN") }, [], docFactory),
+      element("span", { className: "hint", text: t("insights.totalOpsHint") }, [], docFactory),
+    ], docFactory),
+    element("div", { className: "insights-summary-card" }, [
+      element("span", { className: "label", text: t("insights.inputTokens") }, [], docFactory),
+      element("span", { className: "value", text: totalInputTokens.toLocaleString("zh-CN") }, [], docFactory),
+      element("span", { className: "hint", text: t("insights.inputTokensHint") }, [], docFactory),
+    ], docFactory),
+    element("div", { className: "insights-summary-card" }, [
+      element("span", { className: "label", text: t("insights.outputTokens") }, [], docFactory),
+      element("span", { className: "value", text: totalOutputTokens.toLocaleString("zh-CN") }, [], docFactory),
+      element("span", { className: "hint", text: t("insights.outputTokensHint") }, [], docFactory),
+    ], docFactory),
+    element("div", { className: "insights-summary-card" }, [
+      element("span", { className: "label", text: t("insights.totalTokens") }, [], docFactory),
+      element("span", { className: "value", text: totalTokens.toLocaleString("zh-CN") }, [], docFactory),
+      element("span", { className: "hint", text: t("insights.totalTokensHint") }, [], docFactory),
+    ], docFactory),
+    element("div", { className: "insights-summary-card" }, [
+      element("span", { className: "label", text: t("insights.acceptRate") }, [], docFactory),
+      element("span", { className: "value", text: acceptRate }, [], docFactory),
+      element("span", { className: "hint", text: t("insights.acceptRateHint", { accepted: acceptedCount, rejected: rejectedCount, conflicted: conflictedCount }) }, [], docFactory),
+    ], docFactory),
+    element("div", { className: "insights-summary-card" }, [
+      element("span", { className: "label", text: t("insights.estimatedFee") }, [], docFactory),
+      element("span", { className: "value", text: `$${estimatedFeeTotal.toFixed(4)}` }, [], docFactory),
+      element("span", { className: "hint", text: t("insights.estimatedFeeHint") }, [], docFactory),
+    ], docFactory),
+  ], docFactory));
+  if (data.revisionMetrics) {
+    drawer.append(element("div", { className: "insights-revision-actions" }, [
+      button(
+        state.showRevisionMetrics ? t("insights.hideRevisionRate") : t("insights.showRevisionRate"),
+        "small-button",
+        toggleRevisionMetrics,
+        {},
+        docFactory,
+      ),
+    ], docFactory));
+    if (state.showRevisionMetrics) {
+      const rm = data.revisionMetrics;
+      const rate = typeof rm.acceptedAfterRejectionRate === "number" ? rm.acceptedAfterRejectionRate : 0;
+      const accepted = rm.acceptedAfterRejection ?? 0;
+      const total = rm.totalProposalsAccepted ?? 0;
+      const ratePct = (rate * 100).toFixed(1);
+      const rateColor = rate < 0.1 ? "#10b981" : rate <= 0.25 ? "#eab308" : "#ef4444";
+      drawer.append(element("div", { className: "insights-revision-card" }, [
+        element("span", { className: "label", text: t("insights.revisionRate") }, [], docFactory),
+        element("span", {
+          className: "value",
+          text: `${ratePct}% · ${accepted}/${total}`,
+          attrs: { style: `color: ${rateColor};` },
+        }, [], docFactory),
+        element("span", { className: "hint", text: t("insights.revisionRateHint") }, [], docFactory),
+      ], docFactory));
+    }
+    // v0.7.0 Stage 3 (D4): payload 变形率卡片与二次编辑率卡片共用
+    // showRevisionMetrics 开关（不新增开关），满足 D5 "默认隐藏"约束。
+    // rate 颜色编码用 hex（参考 v0.5.0 fpsMonitor 模式）：
+    // 低(绿 #10b981, <5%)、中(黄 #eab308, 5-15%)、高(红 #ef4444, >15%)。
+    if (state.showRevisionMetrics && data.payloadHashVariations) {
+      const phv = data.payloadHashVariations;
+      const phvRate = typeof phv.variationRate === "number" ? phv.variationRate : 0;
+      const phvVariation = phv.proposalsWithVariation ?? 0;
+      const phvTotal = phv.totalProposals ?? 0;
+      const phvRatePct = (phvRate * 100).toFixed(1);
+      const phvRateColor = phvRate < 0.05 ? "#10b981" : phvRate <= 0.15 ? "#eab308" : "#ef4444";
+      drawer.append(element("div", { className: "insights-payload-card" }, [
+        element("span", { className: "label", text: t("insights.payloadDrift") }, [], docFactory),
+        element("span", {
+          className: "value",
+          text: `${phvRatePct}% · ${phvVariation}/${phvTotal}`,
+          attrs: { style: `color: ${phvRateColor};` },
+        }, [], docFactory),
+        element("span", { className: "hint", text: t("insights.payloadDriftHint") }, [], docFactory),
+      ], docFactory));
+    }
+  }
+  if (data.generatedAt) {
+    drawer.append(element("p", { className: "insights-generated-at", text: t("insights.generatedAt", { date: formatDate(data.generatedAt) }) }, [], docFactory));
+  }
+  if (feeEntries.length) {
+    const feeTable = element("div", { className: "insights-fee-table" }, [
+      element("div", { className: "insights-fee-row insights-fee-header" }, [
+        element("span", { text: "Provider" }, [], docFactory),
+        element("span", { text: t("insights.colInputTokens") }, [], docFactory),
+        element("span", { text: t("insights.colOutputTokens") }, [], docFactory),
+        element("span", { text: t("insights.colCachedTokens") }, [], docFactory),
+        element("span", { text: t("insights.colEstimatedFee") }, [], docFactory),
+      ], docFactory),
+      ...feeEntries.map(([providerId, bucket]) => element("div", { className: "insights-fee-row" }, [
+        element("span", { text: providerId }, [], docFactory),
+        element("span", { text: bucket.inputTokens.toLocaleString("zh-CN") }, [], docFactory),
+        element("span", { text: bucket.outputTokens.toLocaleString("zh-CN") }, [], docFactory),
+        element("span", { text: bucket.cachedInputTokens.toLocaleString("zh-CN") }, [], docFactory),
+        element("span", { text: `$${(bucket.fee || 0).toFixed(4)}` }, [], docFactory),
+      ], docFactory)),
+    ], docFactory);
+    drawer.append(feeTable);
+  }
+  drawer.append(element("h3", { text: t("insights.recentOps") }, [], docFactory));
+  const recentRuns = Array.isArray(data.recentRuns) ? data.recentRuns.slice(0, 20) : [];
+  if (!recentRuns.length) {
+    drawer.append(element("p", { className: "drawer-empty", text: t("insights.recentOpsEmpty") }, [], docFactory));
+  } else {
+    drawer.append(element("div", { className: "insights-run-list" }, recentRuns.map((run) => element("div", { className: "insights-run-row" }, [
+      element("span", { className: `state-pill state-${run.state}`, text: insightsStateLabel(run.state) }, [], docFactory),
+      element("span", { className: "run-provider", text: run.providerId ?? "—" }, [], docFactory),
+      element("span", { className: "run-time", text: run.startedAt ? formatDate(run.startedAt) : "—" }, [], docFactory),
+      element("span", { className: "run-tokens", text: run.totalTokens === null || run.totalTokens === undefined ? "—" : run.totalTokens.toLocaleString("zh-CN") }, [], docFactory),
+    ], docFactory)), docFactory));
+  }
+  return drawer;
+}
+
+function insightsStateLabel(state) {
+  return {
+    accepted: t("insights.accepted"),
+    rejected: t("insights.rejected"),
+    conflicted: t("insights.conflicted"),
+  }[state] || state || "—";
+}
+
+function timelineDrawer(docFactory = (typeof document !== "undefined" ? document : null)) {
+  const data = state.timelineEvents;
+  const drawer = element("aside", { className: "version-drawer timeline-drawer", attrs: { role: "dialog", "aria-modal": "true", "aria-labelledby": "timeline-drawer-title" } }, [
+    element("div", { className: "drawer-heading" }, [
+      element("div", {}, [
+        element("span", { className: "eyebrow", text: "VERSION TIMELINE" }, [], docFactory),
+        element("h2", { text: t("timelineDrawer.title"), attrs: { id: "timeline-drawer-title" } }, [], docFactory),
+      ], docFactory),
+      iconOnlyButton("close", "icon-button", toggleTimeline, { title: t("common.close"), attrs: { "aria-label": t("a11y.closeDrawer") } }, docFactory),
+    ], docFactory),
+    element("p", {
+      className: "drawer-intro",
+      text: t("timelineDrawer.description"),
+    }, [], docFactory),
+  ], docFactory);
+  attachDrawerKeyboard(drawer, docFactory, () => {
+    state.timelineOpen = false;
+    state.timelineSelected = null;
+  });
+
+  if (state.timelineBusy) {
+    drawer.append(element("p", { className: "drawer-empty", text: t("timelineDrawer.loading") }, [], docFactory));
+    return drawer;
+  }
+  if (!data || !Array.isArray(data.events) || !data.events.length) {
+    drawer.append(element("p", { className: "drawer-empty", text: t("timelineDrawer.empty") }, [], docFactory));
+    return drawer;
+  }
+
+  const events = data.events;
+  drawer.append(element("h3", { text: t("timelineDrawer.nodeCount", { count: events.length }) }, [], docFactory));
+
+  // v0.7.0 Stage 1 (D1 + D5): assign each event to a distinct horizontal
+  // lane so that branch forks and merge points can be visually
+  // distinguished. The lane map is consulted by `timelineNodeRow` (via the
+  // closure-bound `laneByCommitId`) and by the SVG overlay below.
+  const laneByCommitId = assignTimelineLanes(events);
+  const hasMerge = events.some((event) => (event.parentCommitIds ?? []).length > 1);
+
+  const layout = element("div", { className: "timeline-layout" }, [], docFactory);
+  const viewport = element("div", { className: "timeline-list compare-drawer-virtual" }, [], docFactory);
+  layout.append(viewport);
+
+  // Bind the lane lookup into the row renderer via a closure so the
+  // virtualiser still sees the standard (event, index, docFactory) row
+  // signature it expects.
+  const rowRenderer = (event, index, doc) => timelineNodeRow(event, index, doc, laneByCommitId);
+  const controller = virtualizeDiffRows(events, viewport, docFactory, rowRenderer, {
+    overscan: 5,
+    estimateHeight: 64,
+    viewportHeight: 600,
+  });
+  viewport.__virtualController = controller;
+  viewport.addEventListener("scroll", () => {
+    controller.update(viewport.scrollTop || 0, viewport.clientHeight || 600);
+  });
+  controller.update(0, viewport.clientHeight || 600);
+
+  // v0.7.0 Stage 1 (D7): SVG overlay. Render an <svg> overlay sitting on
+  // top of the timeline list viewport. Each <path> encodes a connection
+  // between a merge commit and one of its non-mainline parents (position 1
+  // onwards). The overlay is only appended when at least one merge commit
+  // exists so that purely linear histories remain visually identical to
+  // the v0.6.0 baseline (no empty SVG element in the DOM tree).
+  if (hasMerge) {
+    const overlay = buildTimelineSvgOverlay(events, laneByCommitId, docFactory);
+    if (overlay) viewport.append(overlay);
+  }
+
+  const preview = element("div", { className: "timeline-preview" }, [], docFactory);
+  const selected = state.timelineSelected;
+  if (!selected) {
+    preview.append(element("div", { className: "timeline-preview-empty", text: t("timelineDrawer.previewEmpty") }, [], docFactory));
+  } else {
+    const opState = selected.operationSummary?.state;
+    const stateLabel = opState ? (TIMELINE_STATE_LABELS[opState] || opState) : t("timelineDrawer.noOperation");
+    const stateColor = opState ? TIMELINE_STATE_COLORS[opState] : "#9ca3af";
+    const statePillClass = opState
+      ? `timeline-state-pill timeline-state-${opState}`
+      : "timeline-state-pill timeline-state-none";
+    preview.append(element("div", { className: "timeline-preview-detail" }, [
+      element("div", { className: "timeline-preview-row" }, [
+        element("span", { className: "timeline-preview-label", text: t("timelineDrawer.createdAt") }, [], docFactory),
+        element("span", { text: formatDate(selected.createdAt), title: selected.commitId }, [], docFactory),
+      ], docFactory),
+      element("div", { className: "timeline-preview-row" }, [
+        element("span", { className: "timeline-preview-label", text: t("timelineDrawer.operationState") }, [], docFactory),
+        element("span", {
+          className: statePillClass,
+          text: stateLabel,
+          attrs: { style: `color: ${stateColor};` },
+        }, [], docFactory),
+      ], docFactory),
+    ], docFactory));
+  }
+  layout.append(preview);
+  drawer.append(layout);
+  return drawer;
+}
+
+/**
+ * v0.7.0 Stage 1 (D5): assign each event to a distinct horizontal lane
+ * offset so that branch forks and merge points can be visually
+ * distinguished. The algorithm is intentionally simple ("轨道分配" per
+ * the design spec) and does not invoke GitGraph.js or any complex layout
+ * solver:
+ *
+ * 1. Iterate events in the order they appear in the timeline (already
+ *    sorted by `created_at` descending on the host side).
+ * 2. The first parent of each commit (position 0) inherits the lane of
+ *    the parent — this represents the mainline and keeps the trunk on
+ *    lane 0.
+ * 3. Subsequent parents (position >= 1) indicate a branch merge. We
+ *    allocate a fresh lane for each such parent by scanning the lane pool
+ *    for the lowest free index < 10 (per the D5 constraint "轨道数 < 10")
+ *    and assigning it to the parent commit.
+ *
+ * The function returns a `Map<string, number>` mapping commit id to lane
+ * index. Commits not present in the map default to lane 0.
+ *
+ * @param {Array<{commitId: string, parentCommitIds?: string[]}>} events
+ * @returns {Map<string, number>}
+ */
+function assignTimelineLanes(events) {
+  const laneByCommitId = new Map();
+  /** Lanes currently in use by active branches. `Set<number>` so we can
+   * cheaply test membership and pick the lowest free index. */
+  const activeLanes = new Set([0]);
+  // Pass 1: scan merge commits first (any order) so that non-mainline
+  // parents get a fresh lane BEFORE the linear inheritance pass below
+  // would otherwise collapse them onto lane 0. This two-pass approach is
+  // necessary because the events array is sorted by `created_at` descending
+  // (newest first), so a merge commit is typically visited before its
+  // branch fork parent — but the parent's own event row would inherit the
+  // mainline lane if we processed it in a single pass. By pre-allocating
+  // branch lanes in pass 1, pass 2 can skip already-assigned commits and
+  // preserve the fork topology.
+  for (const event of events) {
+    const parents = event.parentCommitIds ?? [];
+    if (parents.length <= 1) continue; // linear commit, no branch allocation
+    for (let i = 1; i < parents.length && activeLanes.size < 10; i++) {
+      const branchParent = parents[i];
+      if (laneByCommitId.has(branchParent)) continue; // already assigned
+      // Pick the lowest free lane index in [0, 10).
+      let lane = 0;
+      while (activeLanes.has(lane) && lane < 10) lane++;
+      if (lane >= 10) break; // D5 cap reached; remaining parents share lane 0
+      laneByCommitId.set(branchParent, lane);
+      activeLanes.add(lane);
+    }
+  }
+  // Pass 2: linear inheritance. Each commit not already assigned a lane
+  // (via pass 1) inherits its first parent's lane so the mainline stays on
+  // lane 0. Seed commits (zero parents) default to lane 0.
+  for (const event of events) {
+    const commitId = event.commitId;
+    if (laneByCommitId.has(commitId)) continue; // already assigned in pass 1
+    const parents = event.parentCommitIds ?? [];
+    if (parents.length === 0) {
+      laneByCommitId.set(commitId, 0);
+      continue;
+    }
+    const firstParent = parents[0];
+    const parentLane = laneByCommitId.get(firstParent) ?? 0;
+    laneByCommitId.set(commitId, parentLane);
+  }
+  return laneByCommitId;
+}
+
+/**
+ * v0.7.0 Stage 1 (D7): build the SVG overlay element containing one <path>
+ * per non-mainline branch merge connection. The overlay is an <svg> element
+ * created in the SVG namespace so that CSS and querySelector can address
+ * its <path> children. Connection coordinates are computed from the lane
+ * assignments (D5) and the event index (vertical position) using a simple
+ * deterministic grid so the overlay stays in sync with the virtualised
+ * list above it.
+ *
+ * @param {Array<{commitId: string, parentCommitIds?: string[]}>} events
+ * @param {Map<string, number>} laneByCommitId
+ * @param {Document} docFactory
+ * @returns {SVGSVGElement | null}
+ */
+function buildTimelineSvgOverlay(events, laneByCommitId, docFactory) {
+  // Collect merge connections: each entry is { fromLane, fromY, toLane, toY }
+  // representing a <path> from a merge commit to one of its non-mainline
+  // parents. Only parents at position >= 1 produce a connection; the
+  // mainline (position 0) is rendered implicitly by the vertical alignment
+  // of the timeline nodes themselves.
+  const connections = [];
+  const eventIndexByCommitId = new Map();
+  events.forEach((event, index) => {
+    eventIndexByCommitId.set(event.commitId, index);
+  });
+  for (const event of events) {
+    const parents = event.parentCommitIds ?? [];
+    if (parents.length <= 1) continue; // linear commit, no merge connection
+    const mergeIndex = eventIndexByCommitId.get(event.commitId) ?? 0;
+    const mergeLane = laneByCommitId.get(event.commitId) ?? 0;
+    const mergeY = mergeIndex * 64 + 32; // matches `estimateHeight` (64) + half-height
+    for (let i = 1; i < parents.length; i++) {
+      const branchParent = parents[i];
+      const parentIndex = eventIndexByCommitId.get(branchParent);
+      if (parentIndex === undefined) continue; // parent not in timeline (e.g. not a checkpoint)
+      const parentLane = laneByCommitId.get(branchParent) ?? 0;
+      const parentY = parentIndex * 64 + 32;
+      connections.push({
+        fromLane: mergeLane,
+        fromY: mergeY,
+        toLane: parentLane,
+        toY: parentY,
+      });
+    }
+  }
+  if (connections.length === 0) return null;
+  const laneWidth = 24; // px per lane column
+  const overlayWidth = 10 * laneWidth; // D5 cap (10 lanes)
+  const overlay = element("svg:svg", {
+    className: "timeline-svg-overlay",
+    attrs: {
+      "data-lane-width": String(laneWidth),
+      "data-connections": String(connections.length),
+      "aria-hidden": "true",
+      viewBox: `0 0 ${overlayWidth} 100`,
+      preserveAspectRatio: "none",
+    },
+  }, [], docFactory);
+  for (const connection of connections) {
+    const fromX = connection.fromLane * laneWidth + laneWidth / 2;
+    const toX = connection.toLane * laneWidth + laneWidth / 2;
+    const fromY = connection.fromY;
+    const toY = connection.toY;
+    // Cubic bezier curve so the connection visually resembles a GitGraph
+    // branch line without introducing the full GitGraph.js layout solver
+    // (D5 constraint). The control points sit at the midpoint Y so the
+    // curve has a smooth horizontal bend.
+    const midY = (fromY + toY) / 2;
+    const path = element("svg:path", {
+      className: "timeline-lane timeline-lane-merge",
+      attrs: {
+        d: `M ${fromX} ${fromY} C ${fromX} ${midY}, ${toX} ${midY}, ${toX} ${toY}`,
+        "data-from-lane": String(connection.fromLane),
+        "data-to-lane": String(connection.toLane),
+      },
+    }, [], docFactory);
+    overlay.append(path);
+  }
+  return overlay;
+}
+
+function timelineNodeRow(event, _index, docFactory = (typeof document !== "undefined" ? document : null), laneByCommitId = new Map()) {
+  const opState = event.operationSummary?.state;
+  const stateLabel = opState ? (TIMELINE_STATE_LABELS[opState] || opState) : t("timelineDrawer.noOperationShort");
+  const stateColor = opState ? TIMELINE_STATE_COLORS[opState] : "#9ca3af";
+  const statePillClass = opState
+    ? `timeline-state-pill timeline-state-${opState}`
+    : "timeline-state-pill timeline-state-none";
+  // v0.7.0 Stage 1 (D5): surface the lane assignment via a data attribute
+  // so CSS can apply horizontal padding per lane, and tests can verify that
+  // forks and merges receive distinct lane indices.
+  const lane = laneByCommitId.get(event.commitId) ?? 0;
+  const node = element("article", {
+    className: "timeline-node compare-block",
+    attrs: {
+      "data-checkpoint-id": event.checkpointId,
+      "data-commit-id": event.commitId,
+      "data-lane": String(lane),
+    },
+  }, [
+    element("div", { className: "timeline-node-heading" }, [
+      element("span", { className: "timeline-node-dot", attrs: { style: `background: ${stateColor};` } }, [], docFactory),
+      element("span", { className: "timeline-node-time", text: formatDate(event.createdAt) }, [], docFactory),
+      element("span", {
+        className: statePillClass,
+        text: stateLabel,
+        attrs: { style: `color: ${stateColor};` },
+      }, [], docFactory),
+    ], docFactory),
+  ], docFactory);
+  node.addEventListener("click", () => {
+    state.timelineSelected = event;
+    renderWorkspace();
+  });
+  return node;
+}
+
+function getRAF(docFactory, options) {
+  return options?.requestAnimationFrame
+    || docFactory?.defaultView?.requestAnimationFrame
+    || (typeof requestAnimationFrame !== "undefined" ? requestAnimationFrame : null)
+    || ((cb) => setTimeout(() => cb(Date.now()), 0));
+}
+
+function getCAF(docFactory, options) {
+  return options?.cancelAnimationFrame
+    || docFactory?.defaultView?.cancelAnimationFrame
+    || (typeof cancelAnimationFrame !== "undefined" ? cancelAnimationFrame : null)
+    || ((id) => clearTimeout(id));
+}
+
+function getResizeObserverCtor(docFactory, options) {
+  return options?.ResizeObserver
+    || docFactory?.defaultView?.ResizeObserver
+    || (typeof ResizeObserver !== "undefined" ? ResizeObserver : null);
+}
+
+// Virtualizes a list of diff blocks inside a scrollable container using
+// position:absolute + top offset. Renders only visible rows + overscan.
+// Returns a controller { update, destroy, ...introspection }.
+function virtualizeDiffRows(blocks, container, docFactory, renderRow, options = {}) {
+  const blocksList = Array.isArray(blocks) ? blocks : [];
+  const overscan = options.overscan ?? 5;
+  const estimateHeight = options.estimateHeight ?? 48;
+  const rowHeightCache = new Map(); // index -> measured height
+  const offsetCache = new Map();    // index -> top offset (memoized)
+  const renderedNodes = new Map();  // index -> element
+  const observers = [];
+  let track = null;
+  let lastScrollTop = 0;
+  let lastViewportHeight = options.viewportHeight ?? 600;
+  let pendingRAF = null;
+
+  function heightOf(index) {
+    return rowHeightCache.get(index) ?? estimateHeight;
+  }
+
+  function offsetFor(index) {
+    if (offsetCache.has(index)) return offsetCache.get(index);
+    let top = 0;
+    for (let i = 0; i < index; i++) top += heightOf(i);
+    offsetCache.set(index, top);
+    return top;
+  }
+
+  function totalHeight() {
+    let total = 0;
+    for (let i = 0; i < blocksList.length; i++) total += heightOf(i);
+    return total;
+  }
+
+  // Binary search: find first index whose top + height > scrollTop.
+  // O(log n) in offsetCache lookups (offsets memoized).
+  function findFirstVisible(scrollTop) {
+    let lo = 0;
+    let hi = blocksList.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (offsetFor(mid) + heightOf(mid) <= scrollTop) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    return lo;
+  }
+
+  function computeVisibleRange(scrollTop, viewportHeight) {
+    if (!blocksList.length) return { start: 0, end: 0 };
+    const firstVisible = findFirstVisible(scrollTop);
+    const start = Math.max(0, firstVisible - overscan);
+    let end = firstVisible;
+    let cursor = offsetFor(firstVisible);
+    const limit = scrollTop + viewportHeight;
+    while (end < blocksList.length && cursor < limit) {
+      cursor += heightOf(end);
+      end++;
+    }
+    return { start, end: Math.min(blocksList.length, end + overscan) };
+  }
+
+  function ensureTrack() {
+    if (track) return track;
+    track = element("div", { className: "compare-drawer-virtual-track" }, [], docFactory);
+    container.append(track);
+    return track;
+  }
+
+  function measureNode(node, entry) {
+    if (entry?.contentRect && typeof entry.contentRect.height === "number" && entry.contentRect.height > 0) {
+      return entry.contentRect.height;
+    }
+    const rect = node.getBoundingClientRect?.();
+    if (rect && typeof rect.height === "number" && rect.height > 0) return rect.height;
+    if (typeof node.offsetHeight === "number" && node.offsetHeight > 0) return node.offsetHeight;
+    return estimateHeight;
+  }
+
+  function attachObserver(index, node) {
+    const ROCtor = getResizeObserverCtor(docFactory, options);
+    if (!ROCtor) return null;
+    const observer = new ROCtor((entries) => {
+      for (const entry of entries) {
+        const target = entry?.target || node;
+        const newHeight = measureNode(target, entry);
+        if (newHeight && newHeight !== rowHeightCache.get(index)) {
+          rowHeightCache.set(index, newHeight);
+          offsetCache.clear();
+          // Re-render with the latest known scroll position.
+          scheduleRender(lastScrollTop, lastViewportHeight);
+        }
+      }
+    });
+    observer.observe(node);
+    observers.push(observer);
+    return observer;
+  }
+
+  function doRender(scrollTop, viewportHeight) {
+    const trackEl = ensureTrack();
+    const total = totalHeight();
+    trackEl.style.height = `${total}px`;
+    const { start, end } = computeVisibleRange(scrollTop, viewportHeight);
+
+    // Remove rows outside [start, end).
+    for (const [idx, node] of renderedNodes) {
+      if (idx < start || idx >= end) {
+        node.remove();
+        renderedNodes.delete(idx);
+      }
+    }
+
+    // Render (or reposition) rows in [start, end).
+    for (let i = start; i < end; i++) {
+      let node = renderedNodes.get(i);
+      if (!node) {
+        node = renderRow(blocksList[i], i, docFactory);
+        node.style.position = "absolute";
+        node.style.left = "0";
+        node.style.right = "0";
+        node.style.top = `${offsetFor(i)}px`;
+        attachObserver(i, node);
+        renderedNodes.set(i, node);
+        trackEl.append(node);
+      } else {
+        node.style.top = `${offsetFor(i)}px`;
+      }
+    }
+  }
+
+  function scheduleRender(scrollTop, viewportHeight) {
+    lastScrollTop = scrollTop;
+    lastViewportHeight = viewportHeight;
+    if (pendingRAF !== null) return;
+    const raf = getRAF(docFactory, options);
+    const caf = getCAF(docFactory, options);
+    pendingRAF = raf(() => {
+      pendingRAF = null;
+      doRender(lastScrollTop, lastViewportHeight);
+    });
+    // Stash cancel handle for destroy().
+    scheduleRender._caf = caf;
+  }
+
+  function destroy() {
+    if (pendingRAF !== null) {
+      const caf = scheduleRender._caf || getCAF(docFactory, options);
+      try { caf(pendingRAF); } catch { /* noop */ }
+      pendingRAF = null;
+    }
+    for (const observer of observers) {
+      try { observer.disconnect?.(); } catch { /* noop */ }
+    }
+    observers.length = 0;
+    renderedNodes.clear();
+    offsetCache.clear();
+  }
+
+  return {
+    update: scheduleRender,
+    renderImmediate: doRender,
+    destroy,
+    // Introspection helpers for tests / dev tooling.
+    _rowHeightCache: rowHeightCache,
+    _offsetCache: offsetCache,
+    _renderedNodes: renderedNodes,
+    _findFirstVisible: findFirstVisible,
+    _computeVisibleRange: computeVisibleRange,
+    _offsetFor: offsetFor,
+    _totalHeight: totalHeight,
+  };
+}
+
+// FPS overlay shown only in dev mode (window.__OPTIMIZER_DEV__). Updates every
+// ~500ms with color-coded text (>=55 green / >=30 orange / <30 red).
+function fpsMonitor(docFactory, options = {}) {
+  const devFlag = typeof window !== "undefined" && window !== null
+    ? window.__OPTIMIZER_DEV__
+    : null;
+  if (!devFlag) return null;
+  const raf = options.requestAnimationFrame
+    || docFactory?.defaultView?.requestAnimationFrame
+    || (typeof requestAnimationFrame !== "undefined" ? requestAnimationFrame : null);
+  const perf = options.performance
+    || (typeof performance !== "undefined" ? performance : { now: () => Date.now() });
+  if (!raf || !perf) return null;
+  const indicator = element("div", { className: "fps-monitor" }, [], docFactory);
+  let lastTime = perf.now ? perf.now() : Date.now();
+  let frames = 0;
+  function loop(now) {
+    frames++;
+    if (now - lastTime >= 500) {
+      const fps = Math.round((frames * 1000) / (now - lastTime));
+      indicator.textContent = `${fps} FPS`;
+      indicator.style.color = fps >= 55 ? "#16a34a" : fps >= 30 ? "#d97706" : "#dc2626";
+      frames = 0;
+      lastTime = now;
+    }
+    raf(loop);
+  }
+  raf(loop);
+  return indicator;
+}
+
+// v0.8.0 Stage 3 (a11y): linkedom's HTMLSelectElement.value is a getter-only
+// property, so assigning .value throws in unit tests. Real browsers implement
+// the setter. This helper tries the native setter first and falls back to
+// marking the matching <option> as selected so the initial state is correct
+// in both environments.
+function setSelectValue(selectEl, value) {
+  try {
+    selectEl.value = value;
+    return;
+  } catch {
+    // linkedom getter-only — fall through to option marking.
+  }
+  const options = selectEl.options || [];
+  for (const option of options) {
+    if (option.value === value) {
+      option.setAttribute("selected", "selected");
+    } else {
+      option.removeAttribute("selected");
+    }
+  }
+}
+
+function compareDrawer(docFactory = (typeof document !== "undefined" ? document : null)) {
+  const history = state.versionHistory;
+  const documents = state.workspace.documents;
+  const drawer = element("aside", { className: "version-drawer compare-drawer", attrs: { role: "dialog", "aria-modal": "true", "aria-labelledby": "compare-drawer-title" } }, [
+    element("div", { className: "drawer-heading" }, [
+      element("div", {}, [
+        element("span", { className: "eyebrow", text: "DOCUMENT DIFF" }),
+        element("h2", { text: t("compare.title"), attrs: { id: "compare-drawer-title" } }),
+      ]),
+      iconOnlyButton("close", "icon-button", toggleCompare, { title: t("compare.close"), attrs: { "aria-label": t("a11y.closeDrawer") } }),
+    ]),
+    element("p", {
+      className: "drawer-intro",
+      text: t("compare.description"),
+    }),
+  ]);
+  attachDrawerKeyboard(drawer, docFactory, () => { state.compareOpen = false; state.compareResult = null; });
+  if (!history) {
+    drawer.append(element("p", { className: "drawer-empty", text: t("compare.loading") }));
+    return drawer;
+  }
+  if (!history.checkpoints.length) {
+    drawer.append(element("p", { className: "drawer-empty", text: t("compare.noCheckpoint") }));
+    return drawer;
+  }
+  const selection = state.compareSelection;
+  const snapshotOptions = history.checkpoints.map((checkpoint) =>
+    element("option", {
+      value: checkpoint.id,
+      text: formatDate(checkpoint.createdAt),
+    }),
+  );
+  const snapshotASelect = element("select", { name: "snapshotIdA", attrs: { "aria-label": t("compare.snapshotA") } }, snapshotOptions);
+  setSelectValue(snapshotASelect, selection.snapshotIdA);
+  snapshotASelect.addEventListener("change", () => {
+    state.compareSelection.snapshotIdA = snapshotASelect.value;
+    state.compareResult = null;
+  });
+  const snapshotBSelect = element("select", { name: "snapshotIdB", attrs: { "aria-label": t("compare.snapshotB") } },
+    history.checkpoints.map((checkpoint) =>
+      element("option", {
+        value: checkpoint.id,
+        text: formatDate(checkpoint.createdAt),
+      }),
+    ),
+  );
+  setSelectValue(snapshotBSelect, selection.snapshotIdB);
+  snapshotBSelect.addEventListener("change", () => {
+    state.compareSelection.snapshotIdB = snapshotBSelect.value;
+    state.compareResult = null;
+  });
+  const documentASelect = element("select", { name: "documentIdA", attrs: { "aria-label": t("compare.documentA") } },
+    documents.map((document) => element("option", { value: document.id, text: document.title })),
+  );
+  setSelectValue(documentASelect, selection.documentIdA);
+  documentASelect.addEventListener("change", () => {
+    state.compareSelection.documentIdA = documentASelect.value;
+    state.compareResult = null;
+  });
+  const documentBSelect = element("select", { name: "documentIdB", attrs: { "aria-label": t("compare.documentB") } },
+    documents.map((document) => element("option", { value: document.id, text: document.title })),
+  );
+  setSelectValue(documentBSelect, selection.documentIdB);
+  documentBSelect.addEventListener("change", () => {
+    state.compareSelection.documentIdB = documentBSelect.value;
+    state.compareResult = null;
+  });
+  const sameSnapshot = selection.snapshotIdA === selection.snapshotIdB
+    && selection.documentIdA === selection.documentIdB;
+  const canCompare = Boolean(
+    selection.snapshotIdA
+      && selection.snapshotIdB
+      && selection.documentIdA
+      && selection.documentIdB
+      && !sameSnapshot
+      && !state.compareBusy,
+  );
+  const form = element("form", { className: "compare-form" }, [
+    element("div", { className: "compare-form-grid" }, [
+      element("label", { className: "field" }, [
+        element("span", { text: t("compare.snapshotA") }),
+        snapshotASelect,
+      ]),
+      element("label", { className: "field" }, [
+        element("span", { text: t("compare.snapshotB") }),
+        snapshotBSelect,
+      ]),
+      element("label", { className: "field" }, [
+        element("span", { text: t("compare.documentA") }),
+        documentASelect,
+      ]),
+      element("label", { className: "field" }, [
+        element("span", { text: t("compare.documentB") }),
+        documentBSelect,
+      ]),
+    ]),
+    sameSnapshot
+      ? element("p", { className: "form-hint compare-hint-warning", text: t("compare.sameSelection") })
+      : null,
+    button(
+      state.compareBusy ? t("compare.generating") : t("compare.generate"),
+      "primary-button compare-submit",
+      runCompareDocuments,
+      { disabled: !canCompare },
+    ),
+  ]);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void runCompareDocuments();
+  });
+  drawer.append(form);
+  if (state.compareResult) {
+    drawer.append(compareResultView(state.compareResult, docFactory));
+  } else if (state.compareBusy) {
+    drawer.append(element("p", { className: "drawer-empty", text: t("compare.comparing") }, [], docFactory));
+  }
+  return drawer;
+}
+
+async function runCompareDocuments() {
+  if (state.compareBusy) return;
+  const selection = state.compareSelection;
+  if (!selection.snapshotIdA || !selection.snapshotIdB || !selection.documentIdA || !selection.documentIdB) return;
+  if (
+    selection.snapshotIdA === selection.snapshotIdB
+    && selection.documentIdA === selection.documentIdB
+  ) return;
+  state.compareBusy = true;
+  state.compareResult = null;
+  renderWorkspace();
+  try {
+    const result = await invokeHost("compare_documents", {
+      input: {
+        schemaVersion: 1,
+        snapshotIdA: selection.snapshotIdA,
+        snapshotIdB: selection.snapshotIdB,
+        documentIdA: selection.documentIdA,
+        documentIdB: selection.documentIdB,
+      },
+    });
+    state.compareResult = result;
+  } catch (error) {
+    setNotice("error", normalizeHostError(error).message);
+  } finally {
+    state.compareBusy = false;
+    renderWorkspace();
+  }
+}
+
+function compareResultView(result, docFactory = (typeof document !== "undefined" ? document : null)) {
+  const summary = result.summary || {};
+  const blocks = Array.isArray(result.blocks) ? result.blocks : [];
+  const summaryChips = [
+    { label: t("compare.added"), value: summary.addedCount ?? 0, className: "compare-chip-added" },
+    { label: t("compare.removed"), value: summary.removedCount ?? 0, className: "compare-chip-removed" },
+    { label: t("compare.modified"), value: summary.modifiedCount ?? 0, className: "compare-chip-modified" },
+    { label: t("compare.unchanged"), value: summary.unchangedCount ?? 0, className: "compare-chip-unchanged" },
+  ];
+  const section = element("section", { className: "compare-result" }, [
+    element("div", { className: "compare-summary" }, summaryChips.map((chip) =>
+      element("span", { className: `compare-chip ${chip.className}` }, [
+        element("strong", { text: String(chip.value) }, [], docFactory),
+        element("span", { text: chip.label }, [], docFactory),
+      ], docFactory),
+    ), docFactory),
+    element("h3", { text: t("compare.blockSequence", { count: blocks.length }) }, [], docFactory),
+  ], docFactory);
+  if (!blocks.length) {
+    section.append(element("p", { className: "drawer-empty", text: t("compare.noBlocks") }, [], docFactory));
+    return section;
+  }
+  // Virtualized scroll viewport: keeps the same visual structure (heading +
+  // list of block rows) but renders only the visible slice + overscan so
+  // 1000+ diff rows stay responsive. The container element is passed to
+  // virtualizeDiffRows which manages an inner track + absolutely positioned
+  // rows. Scroll position is read from the viewport element.
+  const viewport = element("div", { className: "compare-drawer-virtual compare-block-list" }, [], docFactory);
+  section.append(viewport);
+  const controller = virtualizeDiffRows(blocks, viewport, docFactory, compareBlockRow, {
+    overscan: 5,
+    estimateHeight: 48,
+    viewportHeight: 600,
+  });
+  // Store controller on the viewport for dev introspection and so future
+  // re-renders can destroy it (compareDrawer is rebuilt top-down on render).
+  viewport.__virtualController = controller;
+  viewport.addEventListener("scroll", () => {
+    controller.update(viewport.scrollTop || 0, viewport.clientHeight || 600);
+  });
+  // Initial render with scrollTop=0. Use requestAnimationFrame via the
+  // controller's throttled update so we don't block the current paint.
+  controller.update(0, viewport.clientHeight || 600);
+  return section;
+}
+
+function compareBlockRow(entry, _index, docFactory = (typeof document !== "undefined" ? document : null)) {
+  const kind = entry.kind || "unchanged";
+  const labels = {
+    added: t("compare.added"),
+    removed: t("compare.removed"),
+    modified: t("compare.modified"),
+    unchanged: t("compare.unchanged"),
+  };
+  const idLabel = entry.blockIdA && entry.blockIdB
+    ? `${entry.blockIdA.slice(0, 10)} ↔ ${entry.blockIdB.slice(0, 10)}`
+    : entry.blockIdA
+      ? `${entry.blockIdA.slice(0, 12)} · ${t("compare.onlyLeft")}`
+      : `${entry.blockIdB?.slice(0, 12) ?? ""} · ${t("compare.onlyRight")}`;
+  const row = element("article", { className: `compare-block compare-block-${kind}` }, [
+    element("div", { className: "compare-block-heading" }, [
+      element("span", { className: `compare-kind-pill compare-kind-${kind}`, text: labels[kind] || kind }, [], docFactory),
+      element("code", { text: idLabel }, [], docFactory),
+    ], docFactory),
+  ], docFactory);
+  if (entry.textDiff && Array.isArray(entry.textDiff) && entry.textDiff.length) {
+    const diff = element("div", { className: "compare-text-diff" }, [], docFactory);
+    for (const op of entry.textDiff) {
+      if (op.equal !== undefined) {
+        diff.append(element("span", { className: "diff-equal", text: op.equal }, [], docFactory));
+      } else if (op.delete !== undefined) {
+        diff.append(element("del", { className: "diff-delete", text: op.delete }, [], docFactory));
+      } else if (op.insert !== undefined) {
+        diff.append(element("ins", { className: "diff-insert", text: op.insert }, [], docFactory));
+      }
+    }
+    row.append(diff);
+  }
+  return row;
 }
 
 function styleDrawer() {
@@ -1981,63 +3481,63 @@ function styleDrawer() {
     element("div", { className: "drawer-heading" }, [
       element("div", {}, [
         element("span", { className: "eyebrow", text: "KNOWLEDGE & STYLE" }),
-        element("h2", { text: "项目知识与风格" }),
+        element("h2", { text: t("styles.title") }),
       ]),
-      button("×", "icon-button", toggleStyles, { title: "关闭" }),
+      button("×", "icon-button", toggleStyles, { title: t("common.close") }),
     ]),
     element("p", {
       className: "style-help",
-      text: "canonical 事实与约束进入 L3 Context；归档或拒绝内容永不召回。never_send 只允许发给本地模型。",
+      text: t("styles.description"),
     }),
     knowledgeForm(),
-    element("h3", { text: `有效事实 / 约束 · ${canonicalKnowledge.length}` }),
+    element("h3", { text: t("styles.canonicalCount", { count: canonicalKnowledge.length }) }),
   ]);
   if (!canonicalKnowledge.length) {
-    drawer.append(element("p", { className: "drawer-empty", text: "尚无有效事实或约束。" }));
+    drawer.append(element("p", { className: "drawer-empty", text: t("styles.canonicalEmpty") }));
   }
   for (const item of canonicalKnowledge) drawer.append(knowledgeItemCard(item));
   if (inactiveKnowledge.length) {
-    drawer.append(element("h3", { text: `非 canonical · ${inactiveKnowledge.length}` }));
+    drawer.append(element("h3", { text: t("styles.inactiveCount", { count: inactiveKnowledge.length }) }));
     for (const item of inactiveKnowledge) drawer.append(knowledgeItemCard(item));
   }
-  drawer.append(element("h3", { text: `启用风格 · ${active.length}` }));
+  drawer.append(element("h3", { text: t("styles.activeCount", { count: active.length }) }));
   if (!active.length) {
-    drawer.append(element("p", { className: "drawer-empty", text: "尚无启用样本。请先在正文中选择一段文字。" }));
+    drawer.append(element("p", { className: "drawer-empty", text: t("styles.activeEmpty") }));
   }
   for (const sample of active) drawer.append(styleSampleCard(sample));
   if (archived.length) {
-    drawer.append(element("h3", { text: `已归档 · ${archived.length}` }));
+    drawer.append(element("h3", { text: t("styles.archivedCount", { count: archived.length }) }));
     for (const sample of archived) drawer.append(styleSampleCard(sample));
   }
   return drawer;
 }
 
 function knowledgeForm() {
-  const kind = element("select", { name: "kind", attrs: { "aria-label": "知识类型" } }, [
-    element("option", { value: "fact", text: "事实" }),
-    element("option", { value: "constraint", text: "约束" }),
+  const kind = element("select", { name: "kind", attrs: { "aria-label": t("styles.kindLabel") } }, [
+    element("option", { value: "fact", text: t("styles.kindFact") }),
+    element("option", { value: "constraint", text: t("styles.kindConstraint") }),
   ]);
-  const severity = element("select", { name: "severity", disabled: true, attrs: { "aria-label": "约束强度" } }, [
-    element("option", { value: "hard", text: "硬约束" }),
-    element("option", { value: "soft", text: "软约束" }),
+  const severity = element("select", { name: "severity", disabled: true, attrs: { "aria-label": t("styles.severityLabel") } }, [
+    element("option", { value: "hard", text: t("styles.severityHard") }),
+    element("option", { value: "soft", text: t("styles.severitySoft") }),
   ]);
   kind.addEventListener("change", () => { severity.disabled = kind.value !== "constraint"; });
-  const sensitivity = element("select", { name: "sensitivity", attrs: { "aria-label": "发送策略" } }, [
-    element("option", { value: "local_sensitive", text: "可在确认后发送" }),
-    element("option", { value: "never_send", text: "仅本地模型" }),
-    element("option", { value: "local", text: "本地内容" }),
-    element("option", { value: "public", text: "公开内容" }),
+  const sensitivity = element("select", { name: "sensitivity", attrs: { "aria-label": t("styles.sensitivityLabel") } }, [
+    element("option", { value: "local_sensitive", text: t("styles.sensitivity.local_sensitive") }),
+    element("option", { value: "never_send", text: t("styles.sensitivity.never_send") }),
+    element("option", { value: "local", text: t("styles.sensitivity.local") }),
+    element("option", { value: "public", text: t("styles.sensitivity.public") }),
   ]);
   const content = element("textarea", {
     name: "content",
-    placeholder: "写入不可违背的事实，或 AI 必须遵守的约束",
+    placeholder: t("styles.contentPlaceholder"),
     attrs: { required: "", rows: "3", maxlength: "65536" },
   });
   const form = element("form", { className: "knowledge-form" }, [
     element("div", { className: "knowledge-form-grid" }, [kind, severity, sensitivity]),
-    labeledInput("标题", "title", "例如：主角视觉 / 禁止剧透", true),
-    element("label", { className: "field" }, [element("span", { text: "内容" }), content]),
-    element("button", { className: "primary-button", text: "添加为 canonical", type: "submit" }),
+    labeledInput(t("styles.titleLabel"), "title", t("styles.titlePlaceholder"), true),
+    element("label", { className: "field" }, [element("span", { text: t("styles.contentLabel") }), content]),
+    element("button", { className: "primary-button", text: t("styles.addCanonical"), type: "submit" }),
   ]);
   form.addEventListener("submit", createKnowledgeItem);
   return form;
@@ -2046,25 +3546,24 @@ function knowledgeForm() {
 function knowledgeItemCard(item) {
   const inactive = item.status !== "canonical";
   const kindLabel = item.kind === "fact"
-    ? "事实"
-    : (item.severity === "hard" ? "硬约束" : "软约束");
+    ? t("styles.kindLabelFact")
+    : (item.severity === "hard" ? t("styles.kindLabelHard") : t("styles.kindLabelSoft"));
   const actions = inactive
-    ? [button("恢复 canonical", "small-button", () => updateKnowledgeItemStatus(item, "canonical"))]
+    ? [button(t("styles.restoreCanonical"), "small-button", () => updateKnowledgeItemStatus(item, "canonical"))]
     : [
-        button("归档", "small-button", () => updateKnowledgeItemStatus(item, "archived")),
-        button("拒绝", "small-button", () => updateKnowledgeItemStatus(item, "rejected")),
+        button(t("styles.archive"), "small-button", () => updateKnowledgeItemStatus(item, "archived")),
+        button(t("styles.reject"), "small-button", () => updateKnowledgeItemStatus(item, "rejected")),
       ];
   return element("article", { className: `style-card knowledge-card${inactive ? " archived" : ""}` }, [
     element("div", { className: "style-card-heading" }, [
       element("strong", { text: item.title }),
       element("span", {
         className: `policy-pill${item.sensitivity === "never_send" ? " local-only" : ""}`,
-        text: `${kindLabel} · ${item.sensitivity === "never_send" ? "仅本地" : item.status}`,
+        text: t("styles.itemMeta", { kind: kindLabel, sensitivity: item.sensitivity === "never_send" ? t("styles.localOnly") : item.status }),
       }),
     ]),
     element("p", { text: item.content }),
     element("div", { className: "style-card-footer" }, [
-      element("code", { text: `r${item.revision} · ${item.authority} · ${item.contentHash.slice(0, 15)}…` }),
       element("div", { className: "knowledge-actions" }, actions),
     ]),
   ]);
@@ -2088,7 +3587,7 @@ async function createKnowledgeItem(event) {
       input,
     });
     state.knowledgeItems = [created, ...state.knowledgeItems];
-    setNotice("success", "项目知识已设为 canonical；下次 AI 操作会在发送前列出它。" );
+    setNotice("success", t("styles.canonicalNotice"));
     renderWorkspace();
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
@@ -2107,7 +3606,7 @@ async function updateKnowledgeItemStatus(item, status) {
       },
     });
     state.knowledgeItems = state.knowledgeItems.map((candidate) => candidate.id === updated.id ? updated : candidate);
-    setNotice("success", status === "canonical" ? "知识已恢复为 canonical。" : `知识已${status === "archived" ? "归档" : "拒绝"}，不会再进入上下文。`);
+    setNotice("success", status === "canonical" ? t("styles.restoredNotice") : t("styles.statusNotice", { status: status === "archived" ? t("styles.statusArchived") : t("styles.statusRejected") }));
     renderWorkspace();
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
@@ -2123,13 +3622,12 @@ function styleSampleCard(sample) {
       element("strong", { text: sample.title }),
       element("span", {
         className: `policy-pill${sample.sensitivity === "never_send" ? " local-only" : ""}`,
-        text: sample.sensitivity === "never_send" ? "仅本地" : "可发送",
+        text: sample.sensitivity === "never_send" ? t("styles.sensitivityLocal") : t("styles.sensitivitySendable"),
       }),
     ]),
     element("p", { text: sample.content }),
     element("div", { className: "style-card-footer" }, [
-      element("code", { text: `r${sample.revision} · ${sample.contentHash.slice(0, 15)}…` }),
-      button(archived ? "重新启用" : "归档", "small-button", () => updateStyleSampleStatus(
+      button(archived ? t("styles.reenable") : t("styles.archive"), "small-button", () => updateStyleSampleStatus(
         sample,
         archived ? "canonical" : "archived",
       )),
@@ -2143,17 +3641,17 @@ async function pinCurrentStyleSample() {
     const block = state.workspace.blocks.find((candidate) => candidate.id === state.activeBlockId);
     const selection = state.aiSelection?.blockId === block?.id ? state.aiSelection : null;
     if (!block || !selection || selection.from === selection.to) {
-      throw { code: "STYLE_SELECTION_REQUIRED", message: "请先在一个正文 Block 中选择要固定的风格片段。" };
+      throw { code: "STYLE_SELECTION_REQUIRED", message: t("error.styleSelectionRequired") };
     }
     const content = block.plainText.slice(selection.from, selection.to).trim();
     if (!content) {
-      throw { code: "STYLE_SELECTION_REQUIRED", message: "风格样本不能只有空白字符。" };
+      throw { code: "STYLE_SELECTION_REQUIRED", message: t("error.styleSampleBlank") };
     }
     const document = state.workspace.documents.find((item) => item.id === block.documentId);
     const created = await invokeHost("create_style_sample", {
       input: {
         schemaVersion: 1,
-        title: `${document?.title ?? "正文"} · 样本 ${state.styleSamples.length + 1}`,
+        title: t("styles.styleSampleTitle", { title: document?.title ?? t("doc.textIcon"), count: state.styleSamples.length + 1 }),
         content,
         sensitivity: "local_sensitive",
       },
@@ -2162,7 +3660,8 @@ async function pinCurrentStyleSample() {
     state.stylesOpen = true;
     state.providersOpen = false;
     state.versionsOpen = false;
-    setNotice("success", "风格样本已固定；后续 AI 操作会在发送前列出它。" );
+    state.timelineOpen = false;
+    setNotice("success", t("styles.styleSamplePinned"));
     renderWorkspace();
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
@@ -2181,7 +3680,7 @@ async function updateStyleSampleStatus(sample, status) {
       },
     });
     state.styleSamples = state.styleSamples.map((item) => item.id === updated.id ? updated : item);
-    setNotice("success", status === "canonical" ? "风格样本已重新启用。" : "风格样本已归档，不会再进入上下文。" );
+    setNotice("success", status === "canonical" ? t("styles.styleSampleReenabled") : t("styles.styleSampleArchived"));
     renderWorkspace();
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
@@ -2198,11 +3697,11 @@ function providerDrawer() {
     element("div", { className: "drawer-heading" }, [
       element("div", {}, [
         element("span", { className: "eyebrow", text: "MODEL PROVIDERS" }),
-        element("h2", { text: "模型与凭据" }),
+        element("h2", { text: t("providers.title") }),
       ]),
-      button("×", "icon-button", toggleProviders, { title: "关闭" }),
+      iconOnlyButton("close", "icon-button", toggleProviders, { title: t("common.close") }),
     ]),
-    element("nav", { className: "provider-tabs", attrs: { "aria-label": "模型供应商" } },
+    element("nav", { className: "provider-tabs", attrs: { "aria-label": t("providers.ariaLabel") } },
       Object.entries(PROVIDER_PRESETS).map(([id, preset]) => button(
         preset.label,
         `provider-tab${id === providerId ? " active" : ""}`,
@@ -2222,30 +3721,30 @@ function providerDrawer() {
       element("span", { className: "status-dot" }),
       element("strong", {
         text: credentialRequired
-          ? (settings.credentialExists ? "凭据已存入系统保险库" : "尚未保存凭据")
-          : "固定本地端点 · 无需 API Key",
+          ? (settings.credentialExists ? t("providers.credentialStored") : t("providers.credentialMissing"))
+          : t("providers.fixedLocalEndpoint"),
       }),
     ]),
-    checkboxField("启用此供应商", "enabled", settings.enabled),
+    checkboxField(t("providers.enableProvider"), "enabled", settings.enabled),
     ...(providerId === "ollama"
       ? ollamaProviderFields(settings)
-      : [labeledInput("默认模型", "defaultModel", PROVIDER_PRESETS[providerId].defaultModel, true, settings.defaultModel)]),
+      : [labeledInput(t("providers.defaultModel"), "defaultModel", PROVIDER_PRESETS[providerId].defaultModel, true, settings.defaultModel)]),
     ...(providerId === "qwen" ? qwenProviderFields(settings) : []),
     ...(credentialRequired ? [
-      passwordField("API Key", "apiKey", settings.credentialExists ? "留空则保持现有凭据" : "仅发送到 Rust 宿主"),
+      passwordField(t("providers.apiKey"), "apiKey", settings.credentialExists ? t("providers.apiKeyKeepEmpty") : t("providers.apiKeySendToHost")),
       element("p", {
         className: "form-hint",
-        text: "API Key 只写入操作系统凭据库。WebView 无读取命令；本地偏好仅保存模型名、区域和启用状态。",
+        text: t("providers.apiKeyHint"),
       }),
     ] : [
       element("p", {
         className: "form-hint",
-        text: "仅连接本机回环 127.0.0.1:11434/v1；地址不可由文档或页面修改，never_send 样本可在本地上下文中使用。请先在 Ollama 中拉取同名模型。",
+        text: t("providers.ollamaHint"),
       }),
     ]),
-    element("button", { className: "primary-button", text: "保存模型设置", type: "submit" }),
+    element("button", { className: "primary-button", text: t("providers.saveSettings"), type: "submit" }),
     credentialRequired && settings.credentialExists
-      ? button("删除已保存凭据", "quiet-button provider-delete", deleteProviderCredential)
+      ? button(t("providers.deleteCredential"), "quiet-button provider-delete", deleteProviderCredential)
       : null,
   ]);
   form.addEventListener("submit", saveProviderSettings);
@@ -2257,7 +3756,7 @@ function compatibleProviderPanel() {
   const settings = state.providerSettings.openai_compatible;
   const endpoint = settings.trustedEndpoint;
   const endpointSelect = element("select", { name: "trustedEndpointId" }, [
-    element("option", { value: "", text: "选择已信任端点" }),
+    element("option", { value: "", text: t("providers.trustedEndpointPlaceholder") }),
     ...state.trustedModelEndpoints.map((candidate) => element("option", {
       value: candidate.id,
       text: `${candidate.label} · ${candidate.baseUrl}`,
@@ -2282,14 +3781,14 @@ function compatibleProviderPanel() {
   });
   const panel = element("div", { className: "provider-compatible-panel" }, [
     element("label", { className: "field" }, [
-      element("span", { text: "宿主信任端点" }),
+      element("span", { text: t("providers.trustedEndpoints") }),
       endpointSelect,
     ]),
   ]);
   if (endpoint) panel.append(compatibleEndpointSettingsForm(settings, endpoint));
   else panel.append(element("p", {
     className: "form-hint",
-    text: "先在下方登记并明确确认一个公共 HTTPS Origin。模型请求不会接受页面临时传入的 URL。",
+    text: t("providers.registerHint"),
   }));
   panel.append(compatibleEndpointRegistrationForm());
   return panel;
@@ -2303,46 +3802,46 @@ function compatibleEndpointSettingsForm(settings, endpoint) {
   const modelInput = element("input", {
     name: "defaultModel",
     value: settings.defaultModel,
-    placeholder: "例如 gpt-4o-mini 或服务商模型 ID",
+    placeholder: t("providers.modelIdPlaceholder"),
     attrs: { list: "compatible-model-list", autocomplete: "off" },
   });
   const status = discovery?.endpointId !== endpoint.id
-    ? "尚未探测；探测只调用 GET /models，不会发送项目正文。"
+    ? t("providers.discoverIdle")
     : discovery.state === "loading"
-      ? "正在执行有界模型列表探测…"
+      ? t("providers.discoverLoading")
       : discovery.state === "success"
-        ? `端点可达，返回 ${models.length} 个模型 ID；这不代表 JSON/reasoning 能力已验证。`
+        ? t("providers.discoverDone", { count: models.length })
         : discovery.message;
   const form = element("form", { className: "provider-form compatible-settings-form" }, [
     element("div", { className: `credential-status${settings.credentialExists ? " connected" : ""}` }, [
       element("span", { className: "status-dot" }),
       element("strong", {
-        text: settings.credentialExists ? "端点凭据已存入系统保险库" : "尚未保存此端点的凭据",
+        text: settings.credentialExists ? t("providers.endpointCredentialStored") : t("providers.endpointCredentialMissing"),
       }),
     ]),
     element("p", { className: "form-hint" }, [
-      element("span", { text: "实际目标：" }),
+      element("span", { text: t("providers.actualTarget") }),
       element("code", { text: `${endpoint.baseUrl}/chat/completions` }),
     ]),
-    checkboxField("启用此端点", "enabled", settings.enabled),
-    element("label", { className: "field" }, [element("span", { text: "默认模型" }), modelInput]),
+    checkboxField(t("providers.enableEndpoint"), "enabled", settings.enabled),
+    element("label", { className: "field" }, [element("span", { text: t("providers.defaultModel") }), modelInput]),
     element("datalist", { attrs: { id: "compatible-model-list" } },
       models.map((model) => element("option", { value: model.id }))),
-    passwordField("API Key", "apiKey", settings.credentialExists ? "留空则保持现有凭据" : "只写入系统凭据库"),
+    passwordField(t("providers.apiKey"), "apiKey", settings.credentialExists ? t("providers.apiKeyKeepEmpty") : t("providers.apiKeyWriteOnly")),
     button(
       discovery?.endpointId === endpoint.id && discovery.state === "loading"
-        ? "探测中…"
-        : "探测模型列表",
+        ? t("providers.probing")
+        : t("providers.probeModels"),
       "quiet-button",
       probeCompatibleModels,
       { disabled: discovery?.endpointId === endpoint.id && discovery.state === "loading" },
     ),
     element("p", { className: "form-hint", text: status, attrs: { role: "status" } }),
-    element("button", { className: "primary-button", text: "保存端点设置", type: "submit" }),
+    element("button", { className: "primary-button", text: t("providers.saveEndpoint"), type: "submit" }),
     settings.credentialExists
-      ? button("删除已保存凭据", "quiet-button provider-delete", deleteProviderCredential)
+      ? button(t("providers.deleteCredential"), "quiet-button provider-delete", deleteProviderCredential)
       : null,
-    button("移除信任端点", "quiet-button provider-delete", removeCompatibleEndpoint),
+    button(t("providers.removeTrustedEndpoint"), "quiet-button provider-delete", removeCompatibleEndpoint),
   ]);
   form.addEventListener("submit", saveCompatibleProviderSettings);
   return form;
@@ -2350,26 +3849,26 @@ function compatibleEndpointSettingsForm(settings, endpoint) {
 
 function compatibleEndpointRegistrationForm() {
   const maxField = element("select", { name: "maxOutputTokenField" }, [
-    element("option", { value: "max_tokens", text: "max_tokens（默认）" }),
+    element("option", { value: "max_tokens", text: t("providers.maxTokensDefault") }),
     element("option", { value: "max_completion_tokens", text: "max_completion_tokens" }),
   ]);
   const form = element("form", { className: "provider-form compatible-register-form" }, [
-    element("h3", { text: "登记新的可信端点" }),
-    labeledInput("名称", "label", "例如：团队模型网关", true, ""),
-    labeledInput("HTTPS 主机名", "hostname", "api.vendor.com（不含协议和端口）", true, ""),
+    element("h3", { text: t("providers.registerNew") }),
+    labeledInput(t("providers.nameLabel"), "label", t("providers.namePlaceholder"), true, ""),
+    labeledInput(t("providers.hostnameLabel"), "hostname", t("providers.hostnamePlaceholder"), true, ""),
     labeledInput("Base path", "basePath", "/v1", true, "/v1"),
-    labeledInput("再次输入确认 Origin", "confirmedOrigin", "https:" + "//api.vendor.com", true, ""),
-    checkboxField("服务声明支持 response_format=json_object", "jsonObject", false),
-    checkboxField("服务声明支持 stream_options.include_usage", "streamUsage", false),
+    labeledInput(t("providers.confirmOriginLabel"), "confirmedOrigin", "https:" + "//api.vendor.com", true, ""),
+    checkboxField(t("providers.jsonObjectOption"), "jsonObject", false),
+    checkboxField(t("providers.streamUsageOption"), "streamUsage", false),
     element("label", { className: "field" }, [
-      element("span", { text: "输出 token 字段" }),
+      element("span", { text: t("providers.outputTokenField") }),
       maxField,
     ]),
     element("p", {
       className: "form-hint",
-      text: "确认后 Host 只允许该公共 HTTPS Origin（443）、安全 base path 和独立凭据槽；禁止重定向并绕过系统代理。能力选项是人工声明，/models 探测不会验证它们。",
+      text: t("providers.trustConfirmHint"),
     }),
-    element("button", { className: "primary-button", text: "确认并信任端点", type: "submit" }),
+    element("button", { className: "primary-button", text: t("providers.trustSubmit"), type: "submit" }),
   ]);
   form.addEventListener("submit", registerCompatibleEndpoint);
   return form;
@@ -2388,16 +3887,16 @@ function passwordField(label, name, placeholder) {
 
 function qwenProviderFields(settings) {
   const select = element("select", { name: "qwenRegion" }, [
-    ["china", "中国内地"],
-    ["singapore", "新加坡"],
-    ["us", "美国"],
-    ["germany", "德国"],
-    ["japan", "日本"],
+    ["china", t("providers.region.china")],
+    ["singapore", t("providers.region.singapore")],
+    ["us", t("providers.region.us")],
+    ["germany", t("providers.region.germany")],
+    ["japan", t("providers.region.japan")],
   ].map(([value, label]) => element("option", { value, text: label })));
   select.value = settings.qwenRegion;
   return [
-    element("label", { className: "field" }, [element("span", { text: "部署区域" }), select]),
-    labeledInput("Workspace ID（部分区域必填）", "qwenWorkspaceId", "仅允许字母、数字、_ 和 -", false, settings.qwenWorkspaceId),
+    element("label", { className: "field" }, [element("span", { text: t("providers.regionLabel") }), select]),
+    labeledInput(t("providers.workspaceIdLabel"), "qwenWorkspaceId", t("providers.workspaceIdHint"), false, settings.qwenWorkspaceId),
   ];
 }
 
@@ -2411,18 +3910,18 @@ function ollamaProviderFields(settings) {
   });
   const models = discovery?.state === "success" ? discovery.models : [];
   const status = discovery?.state === "loading"
-    ? "正在连接本机 Ollama…"
+    ? t("providers.ollama.connecting")
     : discovery?.state === "success"
-      ? (models.length > 0 ? `已发现 ${models.length} 个本地模型。` : "Ollama 可达，但尚未安装模型。")
+      ? (models.length > 0 ? t("providers.ollama.discovered", { count: models.length }) : t("providers.ollama.empty"))
       : discovery?.state === "error"
         ? discovery.message
-        : "尚未检测本机 Ollama。";
+        : t("providers.ollama.idle");
   return [
-    element("label", { className: "field" }, [element("span", { text: "默认模型" }), input]),
+    element("label", { className: "field" }, [element("span", { text: t("providers.defaultModel") }), input]),
     element("datalist", { attrs: { id: "ollama-model-list" } },
       models.map((model) => element("option", { value: model.id }))),
     button(
-      discovery?.state === "loading" ? "检测中…" : "检测本地模型",
+      discovery?.state === "loading" ? t("providers.ollama.detecting") : t("providers.ollama.detect"),
       "quiet-button",
       probeOllamaModels,
       { disabled: discovery?.state === "loading" },
@@ -2449,7 +3948,7 @@ async function probeOllamaModels(event) {
     state.ollamaDiscovery = {
       state: "error",
       models: [],
-      message: `Ollama 不可用：${normalizeHostError(error).message}`,
+      message: t("providers.ollama.unavailable", { message: normalizeHostError(error).message }),
     };
   }
   renderWorkspace();
@@ -2484,7 +3983,7 @@ async function registerCompatibleEndpoint(event) {
       credentialExists: false,
     };
     persistProviderSettings();
-    setNotice("success", `${endpoint.label} 已登记；凭据槽与 ${endpoint.baseUrl} 已由宿主绑定。`);
+    setNotice("success", t("providers.endpointRegistered", { label: endpoint.label, baseUrl: endpoint.baseUrl }));
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
   } finally {
@@ -2505,10 +4004,10 @@ async function saveCompatibleProviderSettings(event) {
   setFormBusy(form, true);
   try {
     if (!defaultModel) {
-      throw { code: "INVALID_MODEL_REQUEST", message: "请填写默认模型 ID。" };
+      throw { code: "INVALID_MODEL_REQUEST", message: t("error.modelIdRequired") };
     }
     if (enabled && !apiKey && !previous.credentialExists) {
-      throw { code: "PROVIDER_CREDENTIAL_MISSING", message: "启用端点前请先填写 API Key。" };
+      throw { code: "PROVIDER_CREDENTIAL_MISSING", message: t("error.endpointCredentialMissing") };
     }
     if (apiKey) {
       await invokeHost("store_provider_secret", {
@@ -2524,7 +4023,7 @@ async function saveCompatibleProviderSettings(event) {
     };
     persistProviderSettings();
     await refreshProviderSecretStatus();
-    setNotice("success", `${endpoint.label} 设置已保存；请求目标仍由 Host 端点 ID 解析。`);
+    setNotice("success", t("providers.endpointSaved", { label: endpoint.label }));
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
   } finally {
@@ -2548,7 +4047,7 @@ async function probeCompatibleModels(event) {
       input: { schemaVersion: 1, endpointId: endpoint.id },
     });
     if (response.endpointId !== endpoint.id) {
-      throw { code: "PROVIDER_PROTOCOL", message: "模型探测响应与所选端点不匹配。" };
+      throw { code: "PROVIDER_PROTOCOL", message: t("error.providerProtocol") };
     }
     const models = Array.isArray(response.models)
       ? response.models.filter((model) => model && typeof model.id === "string")
@@ -2563,7 +4062,7 @@ async function probeCompatibleModels(event) {
       state: "error",
       endpointId: endpoint.id,
       models: [],
-      message: `探测失败：${normalizeHostError(error).message}`,
+      message: t("providers.probeFailed", { message: normalizeHostError(error).message }),
     };
   }
   renderWorkspace();
@@ -2572,7 +4071,7 @@ async function probeCompatibleModels(event) {
 async function removeCompatibleEndpoint() {
   const endpoint = state.providerSettings.openai_compatible.trustedEndpoint;
   if (!endpoint) return;
-  if (!window.confirm(`移除对 ${endpoint.baseUrl} 的信任，并删除它的独立凭据？`)) return;
+  if (!window.confirm(t("providers.removeConfirm", { baseUrl: endpoint.baseUrl }))) return;
   try {
     await invokeHost("remove_trusted_model_endpoint", {
       input: { schemaVersion: 1, endpointId: endpoint.id },
@@ -2587,7 +4086,7 @@ async function removeCompatibleEndpoint() {
     state.compatibleDiscovery = null;
     await refreshTrustedModelEndpoints();
     persistProviderSettings();
-    setNotice("success", `${endpoint.label} 的信任记录与凭据已移除。`);
+    setNotice("success", t("providers.endpointRemoved", { label: endpoint.label }));
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
   }
@@ -2614,7 +4113,7 @@ async function saveProviderSettings(event) {
       });
     }
     if (enabled && credentialRequired && !apiKey && !previous.credentialExists) {
-      throw { code: "PROVIDER_CREDENTIAL_MISSING", message: "启用供应商前请先填写 API Key。" };
+      throw { code: "PROVIDER_CREDENTIAL_MISSING", message: t("error.providerCredentialMissing") };
     }
     state.providerSettings[providerId] = {
       ...previous,
@@ -2629,8 +4128,8 @@ async function saveProviderSettings(event) {
     setNotice(
       "success",
       credentialRequired
-        ? `${PROVIDER_PRESETS[providerId].label} 设置已保存；明文凭据未返回 WebView。`
-        : `${PROVIDER_PRESETS[providerId].label} 设置已保存；请求只会发往固定回环端点。`,
+        ? t("providers.providerSavedCredential", { label: PROVIDER_PRESETS[providerId].label })
+        : t("providers.providerSavedLocal", { label: PROVIDER_PRESETS[providerId].label }),
     );
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
@@ -2656,7 +4155,7 @@ async function deleteProviderCredential() {
       credentialExists: false,
     };
     persistProviderSettings();
-    setNotice("success", `${PROVIDER_PRESETS[providerId].label} 凭据已从系统保险库删除。`);
+    setNotice("success", t("providers.credentialDeleted", { label: PROVIDER_PRESETS[providerId].label }));
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
   }
@@ -2678,24 +4177,23 @@ function versionDrawer() {
   const history = state.versionHistory;
   const drawer = element("aside", { className: "version-drawer" }, [
     element("div", { className: "drawer-heading" }, [
-      element("div", {}, [element("span", { className: "eyebrow", text: "VERSION GRAPH" }), element("h2", { text: "版本历史" })]),
-      button("×", "icon-button", toggleVersions, { title: "关闭" }),
+      element("div", {}, [element("span", { className: "eyebrow", text: "VERSION GRAPH" }), element("h2", { text: t("versions.title") })]),
+      button("×", "icon-button", toggleVersions, { title: t("common.close") }),
     ]),
   ]);
   if (!history) {
-    drawer.append(element("p", { className: "drawer-empty", text: "正在读取版本…" }));
+    drawer.append(element("p", { className: "drawer-empty", text: t("versions.loading") }));
     return drawer;
   }
-  drawer.append(element("h3", { text: `检查点 · ${history.checkpoints.length}` }));
-  if (!history.checkpoints.length) drawer.append(element("p", { className: "drawer-empty", text: "尚未建立检查点。" }));
+  drawer.append(element("h3", { text: t("versions.checkpoints", { count: history.checkpoints.length }) }));
+  if (!history.checkpoints.length) drawer.append(element("p", { className: "drawer-empty", text: t("versions.noCheckpoint") }));
   for (const checkpoint of history.checkpoints) {
     drawer.append(element("article", { className: "version-card" }, [
-      element("strong", { text: formatDate(checkpoint.createdAt) }),
-      element("code", { text: checkpoint.commitId.slice(0, 18) }),
-      button("恢复到这里", "small-button", () => restoreCheckpoint(checkpoint.id)),
+      element("strong", { text: formatDate(checkpoint.createdAt), title: checkpoint.commitId }),
+      button(t("versions.restoreHere"), "small-button", () => restoreCheckpoint(checkpoint.id)),
     ]));
   }
-  drawer.append(element("h3", { text: `提交 · ${history.commits.length}` }));
+  drawer.append(element("h3", { text: t("versions.commits", { count: history.commits.length }) }));
   for (const commit of [...history.commits].reverse().slice(0, 50)) {
     drawer.append(element("article", { className: "commit-row" }, [
       element("span", { className: `commit-dot${commit.id === history.headCommitId ? " current" : ""}` }),
@@ -2714,7 +4212,7 @@ function formatDate(value) {
 }
 
 async function restoreCheckpoint(checkpointId) {
-  if (!window.confirm("恢复会创建一个新的 Commit，当前历史不会被删除。继续吗？")) return;
+  if (!window.confirm(t("checkpoint.restoreConfirm"))) return;
   try {
     await flushAll();
     const response = await invokeHost("restore_checkpoint", {
@@ -2735,12 +4233,573 @@ async function restoreCheckpoint(checkpointId) {
     };
     state.selectedDocumentId = selectInitialDocument(response.workspace, state.selectedDocumentId);
     state.versionHistory = null;
+    state.compareResult = null;
     state.conflictDraft = null;
-    setNotice("success", `已恢复 ${response.changedBlocks} 个 Block，并创建新的恢复提交。`);
+    setNotice("success", t("checkpoint.restoredBlocks", { count: response.changedBlocks }));
     scheduleSummaryRefresh();
     await loadVersionHistory();
   } catch (error) {
     setNotice("error", normalizeHostError(error).message);
+    renderWorkspace();
+  }
+}
+
+function toggleBackupWizard() {
+  state.backupWizardOpen = !state.backupWizardOpen;
+  if (state.backupWizardOpen) {
+    state.providersOpen = false;
+    state.stylesOpen = false;
+    state.candidatesOpen = false;
+    state.versionsOpen = false;
+    state.insightsOpen = false;
+    state.timelineOpen = false;
+    state.compareOpen = false;
+    state.backupWizardStep = 1;
+    state.backupWizardMode = null;
+    state.backupWizardResult = null;
+    state.backupWizardManifest = null;
+    state.backupWizardWarnings = [];
+  }
+  renderWorkspace();
+}
+
+function resetBackupWizardForm() {
+  state.backupWizardForm = {
+    includeEndpoints: true,
+    includeRecent: true,
+    outputPath: "",
+    archivePath: "",
+    targetDirectory: "",
+    newProjectId: "",
+    overwrite: false,
+  };
+}
+
+function browseBackupOutputPath(docFactory) {
+  const picker = element("input", {
+    type: "file",
+    attrs: {
+      "aria-label": t("wizard.backup.outputPath"),
+      webkitdirectory: "",
+      directory: "",
+    },
+  }, [], docFactory);
+  picker.hidden = true;
+  picker.addEventListener("change", () => {
+    const file = picker.files?.[0];
+    picker.remove();
+    if (!file) return;
+    const dir = file.path || "";
+    if (dir) state.backupWizardForm.outputPath = dir;
+    renderWorkspace();
+  }, { once: true });
+  (docFactory.body || docFactory).append(picker);
+  picker.click();
+}
+
+function browseBackupArchivePath(docFactory) {
+  const picker = element("input", {
+    type: "file",
+    attrs: {
+      accept: ".optimizer-backup,.zip",
+      "aria-label": t("wizard.restore.archivePath"),
+    },
+  }, [], docFactory);
+  picker.hidden = true;
+  picker.addEventListener("change", () => {
+    const file = picker.files?.[0];
+    picker.remove();
+    if (!file) return;
+    state.backupWizardForm.archivePath = file.path || file.name || "";
+    renderWorkspace();
+  }, { once: true });
+  (docFactory.body || docFactory).append(picker);
+  picker.click();
+}
+
+function browseRestoreTargetDirectory(docFactory) {
+  const picker = element("input", {
+    type: "file",
+    attrs: {
+      "aria-label": t("wizard.restore.targetDirectory"),
+      webkitdirectory: "",
+      directory: "",
+    },
+  }, [], docFactory);
+  picker.hidden = true;
+  picker.addEventListener("change", () => {
+    const file = picker.files?.[0];
+    picker.remove();
+    if (!file) return;
+    const dir = file.path || "";
+    if (dir) state.backupWizardForm.targetDirectory = dir;
+    renderWorkspace();
+  }, { once: true });
+  (docFactory.body || docFactory).append(picker);
+  picker.click();
+}
+
+function backupWizardStep1(docFactory) {
+  const backupRadio = element("input", {
+    type: "radio",
+    name: "wizard-mode",
+    value: "backup",
+    attrs: { checked: state.backupWizardMode === "backup" ? "" : undefined },
+  }, [], docFactory);
+  backupRadio.addEventListener("change", () => {
+    state.backupWizardMode = "backup";
+  });
+  const restoreRadio = element("input", {
+    type: "radio",
+    name: "wizard-mode",
+    value: "restore",
+    attrs: { checked: state.backupWizardMode === "restore" ? "" : undefined },
+  }, [], docFactory);
+  restoreRadio.addEventListener("change", () => {
+    state.backupWizardMode = "restore";
+  });
+  return element("div", { className: "wizard-step-content" }, [
+    element("div", { className: "wizard-options" }, [
+      element("label", { className: "wizard-option-card" }, [
+        backupRadio,
+        element("div", { className: "wizard-option-body" }, [
+          element("strong", { text: t("wizard.operation.backup") }, [], docFactory),
+          element("span", { className: "wizard-option-desc", text: t("wizard.operation.backupDescription") }, [], docFactory),
+        ], docFactory),
+      ], docFactory),
+      element("label", { className: "wizard-option-card" }, [
+        restoreRadio,
+        element("div", { className: "wizard-option-body" }, [
+          element("strong", { text: t("wizard.operation.restore") }, [], docFactory),
+          element("span", { className: "wizard-option-desc", text: t("wizard.operation.restoreDescription") }, [], docFactory),
+        ], docFactory),
+      ], docFactory),
+    ], docFactory),
+    element("div", { className: "wizard-actions" }, [
+      button(t("wizard.cancel"), "quiet-button", toggleBackupWizard, {}, docFactory),
+      button(
+        t("wizard.next"),
+        "small-button",
+        () => {
+          if (!state.backupWizardMode) {
+            const checked = docFactory.querySelector?.("input[name='wizard-mode']:checked");
+            if (checked) state.backupWizardMode = checked.value;
+          }
+          if (!state.backupWizardMode) return;
+          state.backupWizardStep = 2;
+          renderWorkspace();
+        },
+        {}, docFactory,
+      ),
+    ], docFactory),
+  ], docFactory);
+}
+
+function backupWizardStep2Backup(docFactory) {
+  const form = element("form", { className: "wizard-form", attrs: { "data-wizard-form": "backup" } }, [
+    element("label", { className: "field" }, [
+      element("span", { className: "field-label", text: t("wizard.backup.outputPath") }, [], docFactory),
+      element("div", { className: "field-row" }, [
+        element("input", {
+          type: "text",
+          name: "outputPath",
+          placeholder: t("wizard.backup.outputPathPlaceholder"),
+          value: state.backupWizardForm.outputPath,
+          attrs: { "aria-label": t("wizard.backup.outputPath") },
+        }, [], docFactory),
+        button(t("wizard.backup.browse"), "small-button", (event) => {
+          event.preventDefault();
+          browseBackupOutputPath(docFactory);
+        }, {}, docFactory),
+      ], docFactory),
+    ], docFactory),
+    element("label", { className: "field checkbox-field" }, (() => {
+      const cb = element("input", { type: "checkbox", name: "includeEndpoints" }, [], docFactory);
+      cb.checked = state.backupWizardForm.includeEndpoints;
+      return [cb, element("span", { className: "field-label", text: t("wizard.backup.includeEndpoints") }, [], docFactory)];
+    })()),
+    element("p", { className: "field-hint", text: t("wizard.backup.includeEndpointsHint") }, [], docFactory),
+    element("label", { className: "field checkbox-field" }, (() => {
+      const cb = element("input", { type: "checkbox", name: "includeRecent" }, [], docFactory);
+      cb.checked = state.backupWizardForm.includeRecent;
+      return [cb, element("span", { className: "field-label", text: t("wizard.backup.includeRecent") }, [], docFactory)];
+    })()),
+  ], docFactory);
+
+  form.addEventListener("change", () => {
+    state.backupWizardForm.outputPath = form.elements.outputPath.value || "";
+    state.backupWizardForm.includeEndpoints = form.elements.includeEndpoints.checked;
+    state.backupWizardForm.includeRecent = form.elements.includeRecent.checked;
+  });
+
+  return element("div", { className: "wizard-step-content" }, [
+    form,
+    element("div", { className: "wizard-actions" }, [
+      button(t("wizard.back"), "quiet-button", () => {
+        state.backupWizardStep = 1;
+        renderWorkspace();
+      }, {}, docFactory),
+      button(
+        t("wizard.next"),
+        "small-button",
+        () => {
+          if (!state.backupWizardForm.outputPath.trim()) {
+            setNotice("error", t("wizard.error.noOutputPath"));
+            renderWorkspace();
+            return;
+          }
+          state.backupWizardWarnings = [t("wizard.warning.noSecret")];
+          state.backupWizardStep = 3;
+          renderWorkspace();
+        },
+        {}, docFactory,
+      ),
+    ], docFactory),
+  ], docFactory);
+}
+
+function backupWizardStep2Restore(docFactory) {
+  const form = element("form", { className: "wizard-form", attrs: { "data-wizard-form": "restore" } }, [
+    element("label", { className: "field" }, [
+      element("span", { className: "field-label", text: t("wizard.restore.archivePath") }, [], docFactory),
+      element("div", { className: "field-row" }, [
+        element("input", {
+          type: "text",
+          name: "archivePath",
+          placeholder: t("wizard.restore.archivePathPlaceholder"),
+          value: state.backupWizardForm.archivePath,
+          attrs: { "aria-label": t("wizard.restore.archivePath") },
+        }, [], docFactory),
+        button(t("wizard.restore.browse"), "small-button", (event) => {
+          event.preventDefault();
+          browseBackupArchivePath(docFactory);
+        }, {}, docFactory),
+      ], docFactory),
+    ], docFactory),
+    element("label", { className: "field" }, [
+      element("span", { className: "field-label", text: t("wizard.restore.targetDirectory") }, [], docFactory),
+      element("div", { className: "field-row" }, [
+        element("input", {
+          type: "text",
+          name: "targetDirectory",
+          placeholder: t("wizard.restore.targetDirectoryPlaceholder"),
+          value: state.backupWizardForm.targetDirectory,
+          attrs: { "aria-label": t("wizard.restore.targetDirectory") },
+        }, [], docFactory),
+        button(t("wizard.restore.browse"), "small-button", (event) => {
+          event.preventDefault();
+          browseRestoreTargetDirectory(docFactory);
+        }, {}, docFactory),
+      ], docFactory),
+    ], docFactory),
+    element("label", { className: "field" }, [
+      element("span", { className: "field-label", text: t("wizard.restore.newProjectId") }, [], docFactory),
+      element("input", {
+        type: "text",
+        name: "newProjectId",
+        placeholder: t("wizard.restore.newProjectIdPlaceholder"),
+        value: state.backupWizardForm.newProjectId,
+        attrs: { "aria-label": t("wizard.restore.newProjectId") },
+      }, [], docFactory),
+    ], docFactory),
+    element("label", { className: "field checkbox-field" }, (() => {
+      const cb = element("input", { type: "checkbox", name: "overwrite" }, [], docFactory);
+      cb.checked = state.backupWizardForm.overwrite;
+      return [cb, element("span", { className: "field-label", text: t("wizard.restore.overwrite") }, [], docFactory)];
+    })()),
+  ], docFactory);
+
+  form.addEventListener("change", () => {
+    state.backupWizardForm.archivePath = form.elements.archivePath.value || "";
+    state.backupWizardForm.targetDirectory = form.elements.targetDirectory.value || "";
+    state.backupWizardForm.newProjectId = form.elements.newProjectId.value || "";
+    state.backupWizardForm.overwrite = form.elements.overwrite.checked;
+  });
+
+  return element("div", { className: "wizard-step-content" }, [
+    form,
+    element("div", { className: "wizard-actions" }, [
+      button(t("wizard.back"), "quiet-button", () => {
+        state.backupWizardStep = 1;
+        renderWorkspace();
+      }, {}, docFactory),
+      button(
+        t("wizard.next"),
+        "small-button",
+        () => {
+          if (!state.backupWizardForm.archivePath.trim()) {
+            setNotice("error", t("wizard.error.noArchivePath"));
+            renderWorkspace();
+            return;
+          }
+          if (!state.backupWizardForm.targetDirectory.trim()) {
+            setNotice("error", t("wizard.error.noTargetDirectory"));
+            renderWorkspace();
+            return;
+          }
+          state.backupWizardWarnings = [
+            t("wizard.warning.noSecret"),
+            t("wizard.warning.newProjectId"),
+          ];
+          if (state.backupWizardForm.overwrite) {
+            state.backupWizardWarnings.push(t("wizard.warning.overwrite"));
+          }
+          state.backupWizardStep = 3;
+          renderWorkspace();
+        },
+        {}, docFactory,
+      ),
+    ], docFactory),
+  ], docFactory);
+}
+
+function backupWizardPreviewRows(manifest, docFactory) {
+  if (!manifest) return [];
+  return [
+    [t("wizard.preview.manifestSchemaVersion"), String(manifest.schemaVersion ?? "")],
+    [t("wizard.preview.sourceProjectId"), manifest.sourceProjectId || ""],
+    [t("wizard.preview.sourcePath"), manifest.sourcePath || ""],
+    [t("wizard.preview.generatedAt"), manifest.generatedAt || ""],
+    [t("wizard.preview.includedItems"), (manifest.includedItems || []).join(", ")],
+    [t("wizard.preview.optimizerVersion"), manifest.optimizerVersion || ""],
+    [t("wizard.preview.schemaDbVersion"), String(manifest.schemaDbVersion ?? "")],
+  ].map(([label, value]) =>
+    element("div", { className: "preview-row" }, [
+      element("span", { className: "preview-label", text: label }, [], docFactory),
+      element("span", { className: "preview-value", text: value }, [], docFactory),
+    ], docFactory),
+  );
+}
+
+function backupWizardStep3Preview(docFactory) {
+  const isBackup = state.backupWizardMode === "backup";
+  const warnings = state.backupWizardWarnings.map((warning) =>
+    element("p", { className: "wizard-warning", text: warning }, [], docFactory),
+  );
+
+  if (isBackup) {
+    return element("div", { className: "wizard-step-content" }, [
+      element("div", { className: "wizard-preview" }, [
+        element("h3", { text: t("wizard.preview.title") }, [], docFactory),
+        element("div", { className: "preview-rows" }, [
+          element("div", { className: "preview-row" }, [
+            element("span", { className: "preview-label", text: t("wizard.backup.outputPath") }, [], docFactory),
+            element("span", { className: "preview-value", text: state.backupWizardForm.outputPath }, [], docFactory),
+          ], docFactory),
+          element("div", { className: "preview-row" }, [
+            element("span", { className: "preview-label", text: t("wizard.backup.includeEndpoints") }, [], docFactory),
+            element("span", { className: "preview-value", text: state.backupWizardForm.includeEndpoints ? "yes" : "no" }, [], docFactory),
+          ], docFactory),
+          element("div", { className: "preview-row" }, [
+            element("span", { className: "preview-label", text: t("wizard.backup.includeRecent") }, [], docFactory),
+            element("span", { className: "preview-value", text: state.backupWizardForm.includeRecent ? "yes" : "no" }, [], docFactory),
+          ], docFactory),
+        ], docFactory),
+      ], docFactory),
+      element("div", { className: "wizard-warnings" }, warnings),
+      element("div", { className: "wizard-actions" }, [
+        button(t("wizard.back"), "quiet-button", () => {
+          state.backupWizardStep = 2;
+          renderWorkspace();
+        }, {}, docFactory),
+        button(
+          state.backupWizardBusy ? t("common.loading") : t("wizard.backup.execute"),
+          "small-button",
+          executeBackup,
+          { disabled: state.backupWizardBusy },
+          docFactory,
+        ),
+      ], docFactory),
+    ], docFactory);
+  }
+
+  return element("div", { className: "wizard-step-content" }, [
+    element("div", { className: "wizard-preview" }, [
+      element("h3", { text: t("wizard.preview.title") }, [], docFactory),
+      element("div", { className: "preview-rows" }, [
+        element("div", { className: "preview-row" }, [
+          element("span", { className: "preview-label", text: t("wizard.restore.archivePath") }, [], docFactory),
+          element("span", { className: "preview-value", text: state.backupWizardForm.archivePath }, [], docFactory),
+        ], docFactory),
+        element("div", { className: "preview-row" }, [
+          element("span", { className: "preview-label", text: t("wizard.restore.targetDirectory") }, [], docFactory),
+          element("span", { className: "preview-value", text: state.backupWizardForm.targetDirectory }, [], docFactory),
+        ], docFactory),
+        element("div", { className: "preview-row" }, [
+          element("span", { className: "preview-label", text: t("wizard.restore.newProjectId") }, [], docFactory),
+          element("span", { className: "preview-value", text: state.backupWizardForm.newProjectId || t("wizard.restore.newProjectIdPlaceholder") }, [], docFactory),
+        ], docFactory),
+        element("div", { className: "preview-row" }, [
+          element("span", { className: "preview-label", text: t("wizard.restore.overwrite") }, [], docFactory),
+          element("span", { className: "preview-value", text: state.backupWizardForm.overwrite ? "yes" : "no" }, [], docFactory),
+        ], docFactory),
+      ], docFactory),
+    ], docFactory),
+    element("div", { className: "wizard-warnings" }, warnings),
+    element("div", { className: "wizard-actions" }, [
+      button(t("wizard.back"), "quiet-button", () => {
+        state.backupWizardStep = 2;
+        renderWorkspace();
+      }, {}, docFactory),
+      button(
+        state.backupWizardBusy ? t("common.loading") : t("wizard.restore.execute"),
+        "small-button",
+        executeRestore,
+        { disabled: state.backupWizardBusy },
+        docFactory,
+      ),
+    ], docFactory),
+  ], docFactory);
+}
+
+function backupWizardResultView(docFactory) {
+  const result = state.backupWizardResult;
+  const manifest = result.manifest || state.backupWizardManifest;
+  const isBackup = state.backupWizardMode === "backup";
+  const rows = backupWizardPreviewRows(manifest, docFactory);
+
+  if (isBackup) {
+    rows.unshift(
+      element("div", { className: "preview-row" }, [
+        element("span", { className: "preview-label", text: t("wizard.preview.bytesWritten") }, [], docFactory),
+        element("span", { className: "preview-value", text: String(result.bytesWritten ?? "") }, [], docFactory),
+      ], docFactory),
+      element("div", { className: "preview-row" }, [
+        element("span", { className: "preview-label", text: t("wizard.preview.itemCount") }, [], docFactory),
+        element("span", { className: "preview-value", text: String(result.itemCount ?? "") }, [], docFactory),
+      ], docFactory),
+    );
+  } else {
+    rows.unshift(
+      element("div", { className: "preview-row" }, [
+        element("span", { className: "preview-label", text: t("wizard.preview.projectId") }, [], docFactory),
+        element("span", { className: "preview-value", text: result.projectId || "" }, [], docFactory),
+      ], docFactory),
+      element("div", { className: "preview-row" }, [
+        element("span", { className: "preview-label", text: t("wizard.preview.projectPath") }, [], docFactory),
+        element("span", { className: "preview-value", text: result.projectPath || "" }, [], docFactory),
+      ], docFactory),
+      element("div", { className: "preview-row" }, [
+        element("span", { className: "preview-label", text: t("wizard.preview.restoredItems") }, [], docFactory),
+        element("span", { className: "preview-value", text: (result.restoredItems || []).join(", ") }, [], docFactory),
+      ], docFactory),
+    );
+  }
+
+  return element("div", { className: "wizard-step-content" }, [
+    element("p", {
+      className: "wizard-success",
+      text: isBackup
+        ? t("wizard.success.backup", { path: result.archivePath || "" })
+        : t("wizard.success.restore", { path: result.projectPath || "" }),
+    }, [], docFactory),
+    element("div", { className: "wizard-preview" }, [
+      element("h3", { text: t("wizard.preview.title") }, [], docFactory),
+      element("div", { className: "preview-rows" }, rows),
+    ], docFactory),
+    ...(result.warnings || []).map((warning) =>
+      element("p", { className: "wizard-warning", text: warning }, [], docFactory),
+    ),
+    element("div", { className: "wizard-actions" }, [
+      button(t("wizard.close"), "small-button", () => {
+        state.backupWizardOpen = false;
+        state.backupWizardResult = null;
+        state.backupWizardManifest = null;
+        resetBackupWizardForm();
+        renderWorkspace();
+      }, {}, docFactory),
+    ], docFactory),
+  ], docFactory);
+}
+
+function backupRestoreWizard(docFactory = (typeof document !== "undefined" ? document : null)) {
+  const drawer = element("aside", { className: "version-drawer backup-wizard-drawer", attrs: { role: "dialog", "aria-modal": "true", "aria-labelledby": "backup-wizard-title" } }, [
+    element("div", { className: "drawer-heading" }, [
+      element("div", {}, [
+        element("span", { className: "eyebrow", text: "BACKUP & RESTORE" }, [], docFactory),
+        element("h2", { text: t("wizard.title"), attrs: { id: "backup-wizard-title" } }, [], docFactory),
+      ], docFactory),
+      button("×", "icon-button", toggleBackupWizard, { title: t("wizard.close"), attrs: { "aria-label": t("a11y.closeDrawer") } }, docFactory),
+    ], docFactory),
+  ], docFactory);
+  attachDrawerKeyboard(drawer, docFactory, () => { state.backupWizardOpen = false; });
+
+  const stepLabels = [t("wizard.step.select"), t("wizard.step.path"), t("wizard.step.preview")];
+  const steps = element("ol", { className: "wizard-steps" },
+    stepLabels.map((label, index) =>
+      element("li", {
+        className: `wizard-step${state.backupWizardStep >= index + 1 ? " active" : ""}`,
+        text: label,
+      }, [], docFactory),
+    ),
+    docFactory,
+  );
+  drawer.append(steps);
+
+  if (state.backupWizardResult) {
+    drawer.append(backupWizardResultView(docFactory));
+    return drawer;
+  }
+
+  if (state.backupWizardStep === 1) {
+    drawer.append(backupWizardStep1(docFactory));
+  } else if (state.backupWizardStep === 2) {
+    drawer.append(
+      state.backupWizardMode === "backup"
+        ? backupWizardStep2Backup(docFactory)
+        : backupWizardStep2Restore(docFactory),
+    );
+  } else if (state.backupWizardStep === 3) {
+    drawer.append(backupWizardStep3Preview(docFactory));
+  }
+
+  return drawer;
+}
+
+async function executeBackup() {
+  state.backupWizardBusy = true;
+  renderWorkspace();
+  try {
+    await flushAll();
+    const result = await invokeHost("export_project_backup", {
+      input: {
+        schemaVersion: 1,
+        includeEndpoints: state.backupWizardForm.includeEndpoints,
+        includeRecent: state.backupWizardForm.includeRecent,
+        outputPath: state.backupWizardForm.outputPath,
+      },
+    });
+    state.backupWizardResult = result;
+    state.backupWizardManifest = result.manifest || null;
+    setNotice("success", t("wizard.success.backup", { path: result.archivePath || "" }));
+  } catch (error) {
+    setNotice("error", normalizeHostError(error).message);
+  } finally {
+    state.backupWizardBusy = false;
+    renderWorkspace();
+  }
+}
+
+async function executeRestore() {
+  state.backupWizardBusy = true;
+  renderWorkspace();
+  try {
+    const result = await invokeHost("import_project_backup", {
+      input: {
+        schemaVersion: 1,
+        archivePath: state.backupWizardForm.archivePath,
+        targetDirectory: state.backupWizardForm.targetDirectory,
+        newProjectId: state.backupWizardForm.newProjectId || null,
+        overwrite: state.backupWizardForm.overwrite,
+      },
+    });
+    state.backupWizardResult = result;
+    state.backupWizardManifest = result.manifest || null;
+    setNotice("success", t("wizard.success.restore", { path: result.projectPath || "" }));
+  } catch (error) {
+    setNotice("error", normalizeHostError(error).message);
+  } finally {
+    state.backupWizardBusy = false;
     renderWorkspace();
   }
 }
@@ -2751,7 +4810,7 @@ async function closeProject() {
     state.summaryRefreshTimer = null;
     state.aiRunning?.controller.abort();
     await flushAll({ allowConflict: true });
-    if (state.conflictDraft && !window.confirm("仍有冲突草稿未处理，确定关闭项目吗？")) return;
+    if (state.conflictDraft && !window.confirm(t("save.conflictDraftClose"))) return;
     state.session = await invokeHost("close_project");
     state.workspace = null;
     state.selectedDocumentId = null;
@@ -2778,6 +4837,38 @@ async function closeProject() {
     state.aiRetry = null;
     state.aiContextMenu = null;
     state.commandPaletteOpen = false;
+    state.insightsOpen = false;
+    state.insightsData = null;
+    state.insightsBusy = null;
+    state.compareOpen = false;
+    state.compareBusy = false;
+    state.compareResult = null;
+    state.timelineOpen = false;
+    state.timelineEvents = null;
+    state.timelineBusy = false;
+    state.timelineSelected = null;
+    state.compareSelection = {
+      snapshotIdA: "",
+      snapshotIdB: "",
+      documentIdA: "",
+      documentIdB: "",
+    };
+    state.backupWizardOpen = false;
+    state.backupWizardStep = 1;
+    state.backupWizardMode = null;
+    state.backupWizardBusy = false;
+    state.backupWizardResult = null;
+    state.backupWizardManifest = null;
+    state.backupWizardWarnings = [];
+    state.backupWizardForm = {
+      includeEndpoints: true,
+      includeRecent: true,
+      outputPath: "",
+      archivePath: "",
+      targetDirectory: "",
+      newProjectId: "",
+      overwrite: false,
+    };
     state.activeBlockId = null;
     state.aiSelection = null;
     setNotice(null, null);
@@ -2833,3 +4924,21 @@ window.addEventListener("resize", () => {
 });
 
 bootstrap();
+
+export {
+  aiReviewView,
+  announceReviewState,
+  backupRestoreWizard,
+  commandPaletteModal,
+  compareBlockRow,
+  compareDrawer,
+  compareResultView,
+  element,
+  fpsMonitor,
+  insightsDrawer,
+  state,
+  timelineDrawer,
+  TIMELINE_STATE_COLORS,
+  toggleBackupWizard,
+  virtualizeDiffRows,
+};
