@@ -3,8 +3,8 @@ import type {
   ModelProviderId,
   OperationRunId,
   OperationState,
-} from "../../protocol/src/index.ts";
-import type { OperationTransition } from "../../kernel/src/index.ts";
+} from "@optimizer/protocol";
+import type { OperationTransition } from "@optimizer/kernel";
 import type { OperationAttempt } from "./types.ts";
 
 export type OperationExecutionErrorCode =

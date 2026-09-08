@@ -3,4 +3,4 @@
 // the editor-bridge public surface (canonicalJson) stays intact; new code
 // should import stableStringify from @optimizer/protocol directly.
 // TODO(cleanup): remove this file once the compatibility alias is unused.
-export { stableStringify as canonicalJson } from "../../protocol/src/stable-json.ts";
+export { stableStringify as canonicalJson } from "@optimizer/protocol";

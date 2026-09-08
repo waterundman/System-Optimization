@@ -49,12 +49,34 @@
   --shadow: 0 1px 3px rgba(0, 0, 0, 0.05), 0 1px 2px rgba(0, 0, 0, 0.03);
   --shadow-lg: 0 6px 20px rgba(0, 0, 0, 0.07), 0 2px 6px rgba(0, 0, 0, 0.03);
 
+  /* Motion — durations & easing */
+  --motion-instant: 80ms;
+  --motion-quick: 150ms;
+  --motion-standard: 240ms;
+  --motion-deliberate: 360ms;
+  --motion-entrance: 520ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0.2, 1);
+  --ease-emphasized: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-linear: linear;
+
   /* Spacing scale */
   --space-xs: 4px;
   --space-sm: 8px;
   --space-md: 16px;
   --space-lg: 24px;
   --space-xl: 40px;
+  --space-xxs: 2px;
+  --space-2xl: 48px;
+  --space-3xl: 56px;
+  --space-4xl: 64px;
+
+  /* Containers */
+  --container-prose: 680px;
+  --container-content: 1120px;
+  --container-dialog: 600px;
+
+  /* Radius pill */
+  --radius-pill: 999px;
 
   color: var(--ink);
   background: var(--paper);
@@ -1415,6 +1437,7 @@ button:disabled { cursor: not-allowed; opacity: 0.4; }
 /* ============================================================
    RESPONSIVE
    ============================================================ */
+/* Breakpoint Large — workspace 三列收紧、save-status 隐藏 */
 @media (max-width: 1000px) {
   .workspace-body.with-versions { grid-template-columns: 200px minmax(0, 1fr) 280px; }
   .workspace-body { grid-template-columns: 200px minmax(0, 1fr); }
@@ -1427,10 +1450,12 @@ button:disabled { cursor: not-allowed; opacity: 0.4; }
   .timeline-list { max-height: 50vh; }
 }
 
+/* Breakpoint Medium — welcome 双列折单列 */
 @media (max-width: 900px) {
   .welcome-content { grid-template-columns: 1fr; }
 }
 
+/* Breakpoint Compact — 模态/审核卡片纵向叠放 */
 @media (max-width: 640px) {
   .modal-backdrop { padding: 12px; }
   .context-modal { max-height: calc(100vh - 24px); padding: 18px; }
@@ -1450,14 +1475,10 @@ button:disabled { cursor: not-allowed; opacity: 0.4; }
 /* ============================================================
    ACCESSIBILITY
    ============================================================ */
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
-}
-
 :focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: 1px;
-  border-radius: var(--radius-sm);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px var(--accent-soft);
 }
 
 .optimizer-a11y-live {
@@ -1488,10 +1509,17 @@ button:disabled { cursor: not-allowed; opacity: 0.4; }
 @keyframes drawIn { from { stroke-dashoffset: 200; } to { stroke-dashoffset: 0; } }
 @keyframes bootTravel { 0% { transform: translateX(-110%); } 100% { transform: translateX(360%); } }
 
-/* --- Welcome — staggered entrance --- */
-.welcome-brand .brand-mark-large { opacity: 0; animation: fadeUp 0.7s cubic-bezier(0.22, 1, 0.36, 1) 0.08s forwards; }
+/* --- Motion presets --- */
+.motion-fade { animation: fadeIn var(--motion-standard) var(--ease-standard) both; }
+.motion-lift { transition: transform var(--motion-quick) var(--ease-standard), box-shadow var(--motion-quick) var(--ease-standard); }
+.motion-lift:active { transform: scale(0.98); }
+.motion-slide { animation: slideInRight var(--motion-deliberate) var(--ease-emphasized) both; }
+.motion-scale { animation: scaleIn var(--motion-standard) var(--ease-emphasized) both; }
 
-.welcome-content > * { opacity: 0; animation: fadeUp 0.55s cubic-bezier(0.22, 1, 0.36, 1) forwards; }
+/* --- Welcome — staggered entrance --- */
+.welcome-brand .brand-mark-large { opacity: 0; animation: fadeUp var(--motion-entrance) var(--ease-emphasized) 0.08s forwards; }
+
+.welcome-content > * { opacity: 0; animation: fadeUp var(--motion-entrance) var(--ease-emphasized) forwards; }
 .welcome-content > *:nth-child(2) { animation-delay: 0.18s; }
 .welcome-content > *:nth-child(3) { animation-delay: 0.28s; }
 
@@ -1503,44 +1531,27 @@ button:disabled { cursor: not-allowed; opacity: 0.4; }
 /* --- Card hover — refined lift --- */
 .version-card, .candidate-card, .style-card, .insights-summary-card,
 .insights-revision-card, .insights-payload-card, .context-item, .wizard-option-card {
-  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
-}
-.version-card:hover, .candidate-card:hover, .style-card:hover,
-.insights-summary-card:hover, .insights-revision-card:hover,
-.insights-payload-card:hover, .context-item:hover, .wizard-option-card:hover {
-  border-color: var(--line-strong);
-  box-shadow: var(--shadow);
-  transform: translateY(-1px);
+  transition: border-color var(--motion-quick) var(--ease-standard),
+              box-shadow var(--motion-quick) var(--ease-standard),
+              transform var(--motion-quick) var(--ease-standard);
 }
 
 /* --- Drawer — slide-in --- */
 .workspace-body.with-versions > :last-child {
-  animation: slideInRight 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+  animation: slideInRight var(--motion-deliberate) var(--ease-emphasized);
 }
 
 /* --- Modal — fade + scale --- */
-.modal-backdrop, .command-palette-backdrop { animation: fadeIn 0.2s ease; }
-.modal-backdrop > *, .command-palette { animation: scaleIn 0.26s cubic-bezier(0.22, 1, 0.36, 1); }
-
-/* --- Notice — slide up --- */
-.notice { animation: fadeUp 0.3s ease; }
+.modal-backdrop, .command-palette-backdrop { animation: fadeIn var(--motion-standard) var(--ease-standard); }
+.modal-backdrop > *, .command-palette { animation: scaleIn var(--motion-standard) var(--ease-emphasized); }
 
 /* --- Editor paper — atmospheric depth --- */
 .editor-paper { position: relative; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02), 0 12px 40px rgba(0, 0, 0, 0.025); }
-.editor-paper::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  pointer-events: none;
-  background: radial-gradient(circle at 15% 0%, rgba(0, 0, 0, 0.015), transparent 60%);
-}
-
 /* --- Editor block — staggered entrance --- */
-.editor-block { animation: fadeUp 0.3s ease forwards; }
+.editor-block { animation: fadeUp var(--motion-standard) var(--ease-standard) forwards; }
 
 /* --- Timeline node — entrance --- */
-.timeline-node { animation: fadeUp 0.25s ease forwards; }
+.timeline-node { animation: fadeUp var(--motion-quick) var(--ease-standard) forwards; }
 
 /* --- Timeline SVG overlay — draw-in --- */
 .timeline-svg-overlay path {
@@ -1665,11 +1676,14 @@ body::before {
   from { opacity: 0; transform: translateY(-8px); }
   to { opacity: 1; transform: translateY(0); }
 }
-.notice { animation: noticeSlide 0.35s cubic-bezier(0.22, 1, 0.36, 1); }
+.notice { animation: noticeSlide var(--motion-deliberate) var(--ease-emphasized); }
 
 /* --- Ghost button — refined hover transition --- */
 .ghost-button {
-  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
+  transition: background var(--motion-quick) var(--ease-standard),
+              border-color var(--motion-quick) var(--ease-standard),
+              color var(--motion-quick) var(--ease-standard),
+              transform var(--motion-quick) var(--ease-standard);
 }
 .ghost-button:active {
   transform: scale(0.97);
@@ -1677,7 +1691,9 @@ body::before {
 
 /* --- Primary button — refined press --- */
 .primary-button {
-  transition: transform 0.1s ease, box-shadow 0.15s ease;
+  transition: background var(--motion-quick) var(--ease-standard),
+              transform var(--motion-quick) var(--ease-standard),
+              box-shadow var(--motion-quick) var(--ease-standard);
 }
 .primary-button:active {
   transform: scale(0.98);

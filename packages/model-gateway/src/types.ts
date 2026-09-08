@@ -1,4 +1,4 @@
-import type { ModelProviderId, ProviderLocality } from "../../protocol/src/index.ts";
+import type { ModelProviderId, ProviderLocality } from "@optimizer/protocol";
 
 export type ProviderId = ModelProviderId;
 export type ProviderDialect = ProviderId;

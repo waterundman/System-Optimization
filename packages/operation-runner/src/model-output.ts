@@ -1,4 +1,4 @@
-import type { OutputKind } from "../../protocol/src/index.ts";
+import type { OutputKind } from "@optimizer/protocol";
 import { OperationStageError } from "./errors.ts";
 import type {
   FindingSeverity,

@@ -6,8 +6,8 @@ import type {
   OperationIntent,
   OperationIntentId,
   ProjectId,
-} from "../../protocol/src/index.ts";
-import type { Clock, ContentHasher, IdGenerator, TokenEstimator } from "../../kernel/src/index.ts";
+} from "@optimizer/protocol";
+import type { Clock, ContentHasher, IdGenerator, TokenEstimator } from "@optimizer/kernel";
 
 export class FixedClock implements Clock {
   private readonly value: string;

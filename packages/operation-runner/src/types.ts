@@ -5,21 +5,21 @@ import type {
   OperationRunId,
   PatchProposal,
   PatchProposalId,
-} from "../../protocol/src/index.ts";
-import type { EditorBlockSnapshot } from "../../editor-bridge/src/index.ts";
+} from "@optimizer/protocol";
+import type { EditorBlockSnapshot } from "@optimizer/editor-bridge";
 import type {
   Clock,
   CompileContextRequest,
   ContentHasher,
   OperationTransition,
-} from "../../kernel/src/index.ts";
+} from "@optimizer/kernel";
 import type {
   FinishReason,
   ModelProvider,
   ProviderErrorKind,
   ModelUsage,
   ReasoningOptions,
-} from "../../model-gateway/src/index.ts";
+} from "@optimizer/model-gateway";
 
 export interface OperationRunnerIds {
   nextRunId(): OperationRunId;

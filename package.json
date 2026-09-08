@@ -28,8 +28,9 @@
     "check:architecture": "node scripts/check-architecture.mjs",
     "check:i18n": "node scripts/check-i18n.mjs",
     "check:version-sync": "node scripts/check-version-sync.mjs",
+    "check:motion": "node scripts/check-motion-tokens.mjs",
     "check:types": "tsc -p . --noEmit",
-    "check": "npm run check:schemas && npm run check:architecture && npm run check:i18n && npm run check:version-sync && npm run check:types && npm run desktop:build && npm test",
+    "check": "npm run check:schemas && npm run check:architecture && npm run check:i18n && npm run check:version-sync && npm run check:motion && npm run check:types && npm run desktop:build && npm test",
     "lab": "node apps/kernel-lab/src/index.ts",
     "desktop:build": "node scripts/build-desktop.mjs",
     "desktop:dev": "npm run desktop:build && cargo run -p optimizer-desktop --bin optimizer-desktop --offline"

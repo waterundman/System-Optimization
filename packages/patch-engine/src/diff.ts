@@ -1,4 +1,4 @@
-import type { DiffGranularity } from "../../protocol/src/index.ts";
+import type { DiffGranularity } from "@optimizer/protocol";
 import { segmentText, type TextUnit } from "./segment.ts";
 import type {
   DiffOptions,

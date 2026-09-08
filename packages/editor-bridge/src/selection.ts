@@ -1,4 +1,4 @@
-import type { OperationTarget, TextAnchor } from "../../protocol/src/index.ts";
+import type { OperationTarget, TextAnchor } from "@optimizer/protocol";
 import { EditorBridgeError } from "./errors.ts";
 import type {
   EditorDocumentSnapshot,

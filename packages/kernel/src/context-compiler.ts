@@ -7,8 +7,8 @@ import type {
   ContextTier,
   OperationIntent,
   ProviderLocality,
-} from "../../protocol/src/index.ts";
-import { validateOperationIntent } from "../../protocol/src/index.ts";
+} from "@optimizer/protocol";
+import { validateOperationIntent } from "@optimizer/protocol";
 import { DomainError } from "./errors.ts";
 import type { ContextCandidate, KernelPorts } from "./ports.ts";
 import type { OperationProfile } from "./profiles.ts";

@@ -1,5 +1,5 @@
-import type { PatchHunk, PatchProposal } from "../../protocol/src/index.ts";
-import { validatePatchProposal } from "../../protocol/src/index.ts";
+import type { PatchHunk, PatchProposal } from "@optimizer/protocol";
+import { validatePatchProposal } from "@optimizer/protocol";
 import { diffText } from "./diff.ts";
 import { PatchEngineError } from "./errors.ts";
 import { stableStringify } from "./stable-json.ts";

@@ -5,12 +5,12 @@ import type {
   OperationTarget,
   PatchProposal,
   PatchProposalId,
-} from "../../protocol/src/index.ts";
+} from "@optimizer/protocol";
 import type {
   EditorBlockSnapshot,
   EditorDocumentSnapshot,
   EditorTransaction,
-} from "../../editor-bridge/src/index.ts";
+} from "@optimizer/editor-bridge";
 
 export type DiffSegmentKind = "equal" | "delete" | "insert";
 

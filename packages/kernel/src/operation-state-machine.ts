@@ -1,4 +1,4 @@
-import type { OperationState } from "../../protocol/src/index.ts";
+import type { OperationState } from "@optimizer/protocol";
 import { DomainError } from "./errors.ts";
 
 const transitions: Readonly<Record<OperationState, readonly OperationState[]>> = {

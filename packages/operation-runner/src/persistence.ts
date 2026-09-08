@@ -2,13 +2,13 @@ import type {
   OperationIntent,
   OperationPersistenceBundleV1,
   PersistReviewEventCommandV1,
-} from "../../protocol/src/index.ts";
+} from "@optimizer/protocol";
 import {
   stableStringify,
   type ContentHasher,
   type OperationTransition,
-} from "../../kernel/src/index.ts";
-import { ProviderError } from "../../model-gateway/src/index.ts";
+} from "@optimizer/kernel";
+import { ProviderError } from "@optimizer/model-gateway";
 import { OperationExecutionError, OperationStageError } from "./errors.ts";
 import type { OperationExecutionResult } from "./types.ts";
 

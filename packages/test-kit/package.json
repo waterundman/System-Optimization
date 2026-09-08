@@ -5,6 +5,9 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@optimizer/kernel": "*",
+    "@optimizer/protocol": "*"
   }
 }
-

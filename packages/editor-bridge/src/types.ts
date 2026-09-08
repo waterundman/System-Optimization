@@ -4,7 +4,7 @@ import type {
   DocumentId,
   OperationTarget,
   TextAnchor,
-} from "../../protocol/src/index.ts";
+} from "@optimizer/protocol";
 
 export interface EditorBlockSnapshot {
   readonly id: BlockId;

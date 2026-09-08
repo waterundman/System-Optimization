@@ -1,4 +1,4 @@
-import type { ContextTier, OperationType } from "../../protocol/src/index.ts";
+import type { ContextTier, OperationType } from "@optimizer/protocol";
 
 export interface OperationProfile {
   readonly version: string;

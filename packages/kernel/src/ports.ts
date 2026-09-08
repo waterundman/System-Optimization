@@ -5,7 +5,7 @@ import type {
   OperationIntent,
   RenderMode,
   Sensitivity,
-} from "../../protocol/src/index.ts";
+} from "@optimizer/protocol";
 
 export interface ContextCandidate {
   readonly id: string;

@@ -1,4 +1,4 @@
-import { stableStringify, type BlockId } from "../../protocol/src/index.ts";
+import { stableStringify, type BlockId } from "@optimizer/protocol";
 import { EditorBridgeError } from "./errors.ts";
 import type {
   CompiledEditorTransaction,

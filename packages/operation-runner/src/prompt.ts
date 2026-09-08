@@ -1,9 +1,9 @@
 import type {
   ContextPacket,
   OperationIntent,
-} from "../../protocol/src/index.ts";
-import { stableStringify } from "../../kernel/src/index.ts";
-import type { ModelMessage } from "../../model-gateway/src/index.ts";
+} from "@optimizer/protocol";
+import { stableStringify } from "@optimizer/kernel";
+import type { ModelMessage } from "@optimizer/model-gateway";
 
 const systemPrompt = `You are the controlled transformation engine inside Optimizer Kernel.
 Follow the trusted operation and output contract in the user message.

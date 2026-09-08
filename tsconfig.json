@@ -12,7 +12,16 @@
     "noUncheckedIndexedAccess": false,
     "isolatedModules": true,
     "verbatimModuleSyntax": false,
-    "types": ["node"]
+    "types": ["node"],
+    "paths": {
+      "@optimizer/protocol": ["./packages/protocol/src/index.ts"],
+      "@optimizer/kernel": ["./packages/kernel/src/index.ts"],
+      "@optimizer/editor-bridge": ["./packages/editor-bridge/src/index.ts"],
+      "@optimizer/patch-engine": ["./packages/patch-engine/src/index.ts"],
+      "@optimizer/model-gateway": ["./packages/model-gateway/src/index.ts"],
+      "@optimizer/operation-runner": ["./packages/operation-runner/src/index.ts"],
+      "@optimizer/test-kit": ["./packages/test-kit/src/index.ts"]
+    }
   },
   "include": [
     "packages/**/*.ts",

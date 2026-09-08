@@ -5,3 +5,6 @@ members = [
   "crates/optimizer-store",
 ]
 resolver = "3"
+
+[profile.dev]
+debug = "line-tables-only"

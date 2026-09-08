@@ -1,4 +1,4 @@
-import type { BlockId, BlockKind, DocumentId } from "../../protocol/src/index.ts";
+import type { BlockId, BlockKind, DocumentId } from "@optimizer/protocol";
 import { EditorBridgeError } from "./errors.ts";
 import type { EditorBlockSnapshot, EditorDocumentSnapshot } from "./types.ts";
 

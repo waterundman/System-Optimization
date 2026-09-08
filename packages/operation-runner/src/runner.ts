@@ -2,21 +2,21 @@ import type {
   ContextPacket,
   OperationRunId,
   OperationState,
-} from "../../protocol/src/index.ts";
+} from "@optimizer/protocol";
 import {
   DomainError,
   OperationLifecycle,
   canTransition,
   coreOperationProfiles,
   stableStringify,
-} from "../../kernel/src/index.ts";
-import { PatchEngineError, compilePatchProposal } from "../../patch-engine/src/index.ts";
+} from "@optimizer/kernel";
+import { PatchEngineError, compilePatchProposal } from "@optimizer/patch-engine";
 import {
   ProviderError,
   type FinishReason,
   type ModelStreamEvent,
   type ModelUsage,
-} from "../../model-gateway/src/index.ts";
+} from "@optimizer/model-gateway";
 import {
   OperationExecutionError,
   OperationStageError,

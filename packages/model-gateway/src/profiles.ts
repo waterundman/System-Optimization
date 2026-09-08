@@ -1,5 +1,5 @@
 import { ProviderError } from "./errors.ts";
-import type { QwenDeploymentRegion } from "../../protocol/src/index.ts";
+import type { QwenDeploymentRegion } from "@optimizer/protocol";
 import type { ProviderProfile } from "./types.ts";
 
 const verifiedAt = "2026-07-14";

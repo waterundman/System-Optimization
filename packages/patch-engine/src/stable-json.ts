@@ -1,1 +1,1 @@
-export { stableStringify } from "../../protocol/src/stable-json.ts";
+export { stableStringify } from "@optimizer/protocol";

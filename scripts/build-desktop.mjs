@@ -46,7 +46,13 @@ for (const packageName of [
       transformed = stripTypeScriptTypes(code, {
         mode: "transform",
         sourceMap: false,
-      }).replace(/(from\s+["'][^"']+)\.ts(["'])/gu, "$1.js$2");
+      })
+        .replace(/(from\s+["'][^"']+)\.ts(["'])/gu, "$1.js$2")
+        // Rewrite @optimizer/* workspace bare imports to the flat sibling
+        // layout of dist/runtime/packages/<pkg>/src so the desktop bundle
+        // resolves one module graph instead of mixing bundled JS with the
+        // root workspace source files.
+        .replace(/(from\s+["'])@optimizer\/([^"']+)(["'])/gu, "$1../../$2/src/index.js$3");
     } catch (error) {
       throw new Error(
         `Failed to strip TypeScript types from ${relative(repository, input)}: ${
