@@ -10,7 +10,7 @@
 
 #![cfg(test)]
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use optimizer_store::snapshot::{
     ProjectSnapshotV1, SnapshotBlock, SnapshotBranch, SnapshotCommit, SnapshotDocument,
@@ -126,12 +126,29 @@ fn generate_removed_snapshots() -> (ProjectSnapshotV1, ProjectSnapshotV1) {
 }
 
 // ============================================================
-// T04/T05 — compare_documents 10k blocks 性能基线
+// 性能门禁阈值（perf regression gate）
 //
-// 注意：contract 原始门槛为 unchanged < 50ms / modified < 800ms，但当前
-// compare_documents 的 LCS 实现为 O(n*m) DP（lcs_by_order_key），10k*10k
-// = 100M cells，单次 DP 即 ~5s。在无法修改 src/ 的约束下，门槛调整为
-// 现实回归基线（~2x 实际耗时余量），并记录实际耗时供后续 Stage 优化对照。
+// 采数日期：2026-09-09，本机实测（Windows 11，cargo test 默认 debug profile）：
+// - 全 unchanged: 12.9ms（contract 原始门槛 50ms，当前实现已满足）
+// - 全 modified: 257.0ms（contract 原始门槛 800ms，当前实现已满足）
+// - 全 added: 2.1ms
+// - 全 removed: 2.0ms
+//
+// 阈值 = max(实测 × 3, 1s)，3 倍余量用于吸收 GitHub runner 与本机性能差。
+// 调整阈值前请先 `cargo test -p optimizer-store --test compare_perf_baseline
+// -- --ignored --nocapture` 重新采数。
+// ============================================================
+/// 实测 12.9ms × 3 < 1s，取下限 1s
+const COMPARE_UNCHANGED_THRESHOLD: Duration = Duration::from_secs(1);
+/// 实测 257.0ms × 3 ≈ 771ms < 1s，取下限 1s
+const COMPARE_MODIFIED_THRESHOLD: Duration = Duration::from_secs(1);
+/// 实测 2.1ms × 3 < 1s，取下限 1s
+const COMPARE_ADDED_THRESHOLD: Duration = Duration::from_secs(1);
+/// 实测 2.0ms × 3 < 1s，取下限 1s
+const COMPARE_REMOVED_THRESHOLD: Duration = Duration::from_secs(1);
+
+// ============================================================
+// T04/T05 — compare_documents 10k blocks 性能基线
 // ============================================================
 #[test]
 #[ignore]
@@ -142,7 +159,7 @@ fn compare_documents_10k_blocks_baseline() {
     );
     println!("-----------+---------------+---------------------------------------------");
 
-    // 全 unchanged（contract 原始门槛 50ms；实际 ~5s，调整为 < 10s 回归基线）
+    // 全 unchanged（contract 原始门槛 50ms）
     let (snap_a, snap_b) = generate_unchanged_snapshots();
     let start = Instant::now();
     let result = compare_documents(&snap_a, &snap_b, "doc-1", "doc-1");
@@ -158,15 +175,15 @@ fn compare_documents_10k_blocks_baseline() {
     assert_eq!(result.summary.unchanged_count, 10_000, "all blocks unchanged");
     assert_eq!(result.summary.modified_count, 0);
     assert!(
-        unchanged_duration.as_secs() < 10,
-        "unchanged took {:?}, expected < 10s (baseline; contract original was 50ms, \
-         infeasible under O(n*m) LCS without src/ changes)",
-        unchanged_duration
+        unchanged_duration <= COMPARE_UNCHANGED_THRESHOLD,
+        "perf regression: unchanged actual={:?} threshold={:?}",
+        unchanged_duration,
+        COMPARE_UNCHANGED_THRESHOLD
     );
     drop(snap_a);
     drop(snap_b);
 
-    // 全 modified（contract 原始门槛 800ms；实际 ~5-8s，调整为 < 15s 回归基线）
+    // 全 modified（contract 原始门槛 800ms）
     let (snap_a, snap_b) = generate_modified_snapshots();
     let start = Instant::now();
     let result = compare_documents(&snap_a, &snap_b, "doc-1", "doc-1");
@@ -182,15 +199,15 @@ fn compare_documents_10k_blocks_baseline() {
     assert_eq!(result.summary.modified_count, 10_000, "all blocks modified");
     assert_eq!(result.summary.unchanged_count, 0);
     assert!(
-        modified_duration.as_secs() < 15,
-        "modified took {:?}, expected < 15s (baseline; contract original was 800ms, \
-         infeasible under O(n*m) LCS without src/ changes)",
-        modified_duration
+        modified_duration <= COMPARE_MODIFIED_THRESHOLD,
+        "perf regression: modified actual={:?} threshold={:?}",
+        modified_duration,
+        COMPARE_MODIFIED_THRESHOLD
     );
     drop(snap_a);
     drop(snap_b);
 
-    // 全 added（无严格门槛，仅测量 + 输出）
+    // 全 added（仅测量 + 输出 + 门禁断言）
     let (snap_a, snap_b) = generate_added_snapshots();
     let start = Instant::now();
     let result = compare_documents(&snap_a, &snap_b, "doc-1", "doc-1");
@@ -204,10 +221,16 @@ fn compare_documents_10k_blocks_baseline() {
         result.summary.unchanged_count
     );
     assert_eq!(result.summary.added_count, 10_000, "all blocks added");
+    assert!(
+        added_duration <= COMPARE_ADDED_THRESHOLD,
+        "perf regression: added actual={:?} threshold={:?}",
+        added_duration,
+        COMPARE_ADDED_THRESHOLD
+    );
     drop(snap_a);
     drop(snap_b);
 
-    // 全 removed（无严格门槛，仅测量 + 输出）
+    // 全 removed（仅测量 + 输出 + 门禁断言）
     let (snap_a, snap_b) = generate_removed_snapshots();
     let start = Instant::now();
     let result = compare_documents(&snap_a, &snap_b, "doc-1", "doc-1");
@@ -221,4 +244,10 @@ fn compare_documents_10k_blocks_baseline() {
         result.summary.unchanged_count
     );
     assert_eq!(result.summary.removed_count, 10_000, "all blocks removed");
+    assert!(
+        removed_duration <= COMPARE_REMOVED_THRESHOLD,
+        "perf regression: removed actual={:?} threshold={:?}",
+        removed_duration,
+        COMPARE_REMOVED_THRESHOLD
+    );
 }

@@ -10,12 +10,36 @@
 #![cfg(test)]
 
 use std::io::Cursor;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use optimizer_store::snapshot::{
     ProjectSnapshotV1, SnapshotBlock, SnapshotBranch, SnapshotCommit, SnapshotDocument,
     SnapshotProject, SNAPSHOT_SCHEMA_VERSION, decode_snapshot, encode_snapshot,
 };
+
+// ============================================================
+// 性能门禁阈值（perf regression gate）
+//
+// 采数日期：2026-09-09，本机实测（Windows 11，cargo test 默认 debug profile）：
+// - 10k blocks encode: 197.9ms / decode: 117.3ms
+// - 100k blocks encode: 1.710s / decode: 829.8ms
+// - zstd 各 level（1/3/6/9）encode 最慢 208.5ms（level 9）、decode 最慢 12.2ms
+//
+// 阈值 = max(实测 × 3, 1s)，3 倍余量用于吸收 GitHub runner 与本机性能差。
+// 调整阈值前请先 `cargo test -p optimizer-store -- --ignored --nocapture` 重新采数。
+// ============================================================
+/// 实测 197.9ms × 3 ≈ 594ms < 1s，取下限 1s
+const ENCODE_10K_THRESHOLD: Duration = Duration::from_secs(1);
+/// 实测 117.3ms × 3 ≈ 352ms < 1s，取下限 1s
+const DECODE_10K_THRESHOLD: Duration = Duration::from_secs(1);
+/// 实测 1.710s × 3 ≈ 5.13s，向上取整 5.2s
+const ENCODE_100K_THRESHOLD: Duration = Duration::from_millis(5_200);
+/// 实测 829.8ms × 3 ≈ 2.49s，向上取整 2.5s
+const DECODE_100K_THRESHOLD: Duration = Duration::from_millis(2_500);
+/// 最慢档（level 9）encode 实测 208.5ms × 3 < 1s，取下限 1s
+const ZSTD_LEVEL_ENCODE_THRESHOLD: Duration = Duration::from_secs(1);
+/// 最慢档 decode 实测 12.2ms × 3 < 1s，取下限 1s
+const ZSTD_LEVEL_DECODE_THRESHOLD: Duration = Duration::from_secs(1);
 
 /// 生成包含 10k SnapshotBlock 的 ProjectSnapshotV1。
 fn generate_10k_blocks_snapshot() -> ProjectSnapshotV1 {
@@ -70,7 +94,7 @@ fn generate_10k_blocks_snapshot() -> ProjectSnapshotV1 {
 }
 
 // ============================================================
-// T06 — 10k blocks encode < 2s, decode < 1s（基线）
+// T06 — 10k blocks encode/decode 性能门禁（阈值见文件顶部常量）
 // ============================================================
 #[test]
 #[ignore]
@@ -87,9 +111,10 @@ fn snapshot_encode_10k_blocks_baseline() {
         encoded.checksum
     );
     assert!(
-        encode_duration.as_secs() < 2,
-        "encode took {:?}, expected < 2s",
-        encode_duration
+        encode_duration <= ENCODE_10K_THRESHOLD,
+        "perf regression: actual={:?} threshold={:?}",
+        encode_duration,
+        ENCODE_10K_THRESHOLD
     );
 
     let start = Instant::now();
@@ -97,9 +122,10 @@ fn snapshot_encode_10k_blocks_baseline() {
     let decode_duration = start.elapsed();
     println!("10k blocks decode: {:?}", decode_duration);
     assert!(
-        decode_duration.as_secs() < 1,
-        "decode took {:?}, expected < 1s",
-        decode_duration
+        decode_duration <= DECODE_10K_THRESHOLD,
+        "perf regression: actual={:?} threshold={:?}",
+        decode_duration,
+        DECODE_10K_THRESHOLD
     );
 
     assert_eq!(snapshot, decoded, "roundtrip should preserve snapshot");
@@ -129,11 +155,17 @@ fn snapshot_zstd_level_comparison() {
             compressed.len(),
             duration
         );
+        assert!(
+            duration <= ZSTD_LEVEL_ENCODE_THRESHOLD,
+            "perf regression: level={level} actual={:?} threshold={:?}",
+            duration,
+            ZSTD_LEVEL_ENCODE_THRESHOLD
+        );
     }
 }
 
 // ============================================================
-// T01/T02 — 100k blocks encode < 3s, decode < 1.5s（基线）
+// T01/T02 — 100k blocks encode/decode 性能门禁（阈值见文件顶部常量）
 // ============================================================
 /// 生成包含 100k SnapshotBlock 的 ProjectSnapshotV1。
 fn generate_100k_blocks_snapshot() -> ProjectSnapshotV1 {
@@ -201,9 +233,10 @@ fn snapshot_encode_100k_blocks_baseline() {
         encoded.checksum
     );
     assert!(
-        encode_duration.as_secs() < 3,
-        "encode took {:?}, expected < 3s",
-        encode_duration
+        encode_duration <= ENCODE_100K_THRESHOLD,
+        "perf regression: actual={:?} threshold={:?}",
+        encode_duration,
+        ENCODE_100K_THRESHOLD
     );
 
     let start = Instant::now();
@@ -211,9 +244,10 @@ fn snapshot_encode_100k_blocks_baseline() {
     let decode_duration = start.elapsed();
     println!("100k blocks decode: {:?}", decode_duration);
     assert!(
-        decode_duration.as_millis() < 1500,
-        "decode took {:?}, expected < 1.5s",
-        decode_duration
+        decode_duration <= DECODE_100K_THRESHOLD,
+        "perf regression: actual={:?} threshold={:?}",
+        decode_duration,
+        DECODE_100K_THRESHOLD
     );
 
     assert_eq!(
@@ -264,6 +298,18 @@ fn zstd_level_comparison_baseline() {
             ratio,
             encode_duration,
             decode_duration
+        );
+        assert!(
+            encode_duration <= ZSTD_LEVEL_ENCODE_THRESHOLD,
+            "perf regression: level={level} encode actual={:?} threshold={:?}",
+            encode_duration,
+            ZSTD_LEVEL_ENCODE_THRESHOLD
+        );
+        assert!(
+            decode_duration <= ZSTD_LEVEL_DECODE_THRESHOLD,
+            "perf regression: level={level} decode actual={:?} threshold={:?}",
+            decode_duration,
+            ZSTD_LEVEL_DECODE_THRESHOLD
         );
     }
 

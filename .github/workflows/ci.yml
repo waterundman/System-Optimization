@@ -66,6 +66,14 @@ jobs:
             cargo-audit.log
             npm-audit.log
 
+  perf:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Performance gate (ignored perf tests with threshold assertions)
+        run: cargo test -p optimizer-store --locked -- --ignored --nocapture
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest

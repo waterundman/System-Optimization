@@ -11,3 +11,5 @@ target2/
 apps/optimizer-desktop/src-tauri/icons/icon.png
 .stage3_backup/
 .workbuddy/
+.wb_empty/
+.wb_tmp_empty/
