@@ -237,4 +237,10 @@ test("T04: review.bulkWarning is defined in zh-CN and en-US without emoji", asyn
     zh["review.bulkWarning"].includes("{count}"),
     "zh-CN review.bulkWarning must accept a {count} placeholder",
   );
+  // Same structural guarantee for en-US: the interpolated count placeholder
+  // must exist so the rendered English warning shows the hunk count too.
+  assert.ok(
+    en["review.bulkWarning"].includes("{count}"),
+    "en-US review.bulkWarning must accept a {count} placeholder",
+  );
 });

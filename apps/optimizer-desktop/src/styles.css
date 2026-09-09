@@ -55,6 +55,9 @@
   --motion-standard: 240ms;
   --motion-deliberate: 360ms;
   --motion-entrance: 520ms;
+  --motion-progress: 1.4s; /* progress/draw loop (bootTravel) */
+  --motion-pulse: 1.6s; /* pulse/breath loop (bootPulse) */
+  --motion-ambient: 5s; /* slow ambient loop (brand breathe) */
   --ease-standard: cubic-bezier(0.2, 0, 0.2, 1);
   --ease-emphasized: cubic-bezier(0.22, 1, 0.36, 1);
   --ease-linear: linear;
@@ -169,7 +172,7 @@ button:disabled { cursor: not-allowed; opacity: 0.4; }
   height: 100%;
   border-radius: inherit;
   background: var(--accent);
-  animation: bootTravel 1.4s var(--ease-standard) infinite;
+  animation: bootTravel var(--motion-progress) var(--ease-standard) infinite;
 }
 
 /* --- Brand mark --- */
@@ -324,7 +327,7 @@ button:disabled { cursor: not-allowed; opacity: 0.4; }
   border-radius: var(--radius);
   background: var(--paper);
   text-align: left;
-  transition: border-color 120ms, background 120ms;
+  transition: border-color var(--motion-quick), background var(--motion-quick);
 }
 .recent-project-open:hover { border-color: var(--line-strong); background: var(--panel); }
 .recent-project-mark {
@@ -353,7 +356,7 @@ button:disabled { cursor: not-allowed; opacity: 0.4; }
   border-radius: var(--radius-sm);
   background: transparent;
   font-size: 11px;
-  transition: color 120ms, background 120ms;
+  transition: color var(--motion-quick), background var(--motion-quick);
 }
 .recent-project-remove:hover { color: var(--danger); background: var(--danger-soft); }
 .recent-project-missing .recent-project-open { border-style: dashed; }
@@ -378,7 +381,7 @@ button:disabled { cursor: not-allowed; opacity: 0.4; }
   background: var(--paper);
   font-weight: 400;
   font-size: 13px;
-  transition: border-color 120ms, box-shadow 120ms;
+  transition: border-color var(--motion-quick), box-shadow var(--motion-quick);
 }
 
 .field input:focus, .field select:focus {
@@ -398,7 +401,7 @@ button:disabled { cursor: not-allowed; opacity: 0.4; }
 .primary-button, .secondary-button, .ghost-button, .quiet-button, .danger-button, .small-button, .tool-button, .icon-button {
   border: 0;
   border-radius: var(--radius);
-  transition: background 120ms, border-color 120ms, color 120ms;
+  transition: background var(--motion-quick), border-color var(--motion-quick), color var(--motion-quick);
   font-weight: 500;
 }
 
@@ -583,7 +586,7 @@ button:disabled { cursor: not-allowed; opacity: 0.4; }
   background: transparent;
   text-align: left;
   font-size: 13px;
-  transition: background 100ms;
+  transition: background var(--motion-instant);
 }
 .document-button:hover { background: var(--panel-hover); }
 .document-button.active {
@@ -634,7 +637,7 @@ button:disabled { cursor: not-allowed; opacity: 0.4; }
   opacity: 0;
   pointer-events: none;
   background: linear-gradient(90deg, transparent, var(--panel-hover) 24%);
-  transition: opacity 120ms;
+  transition: opacity var(--motion-quick);
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
 }
 .document-row:hover .document-actions, .document-row:focus-within .document-actions { opacity: 1; }
@@ -670,7 +673,7 @@ button:disabled { cursor: not-allowed; opacity: 0.4; }
   border-radius: 4px;
   background: transparent;
   font-size: 10px;
-  transition: color 100ms, background 100ms;
+  transition: color var(--motion-instant), background var(--motion-instant);
 }
 .document-structure-action:hover { color: var(--ink); background: var(--panel-hover); }
 
@@ -748,7 +751,7 @@ button:disabled { cursor: not-allowed; opacity: 0.4; }
   background: var(--paper);
   font-weight: 500;
   font-size: 12px;
-  transition: background 100ms, border-color 100ms;
+  transition: background var(--motion-instant), border-color var(--motion-instant);
 }
 .tool-button:hover { background: var(--panel); border-color: var(--line-strong); }
 .tool-button:disabled { opacity: 0.4; }
@@ -825,7 +828,7 @@ button:disabled { cursor: not-allowed; opacity: 0.4; }
   color: var(--faint);
   font-size: 10px;
   opacity: 0;
-  transition: opacity 120ms;
+  transition: opacity var(--motion-quick);
 }
 .editor-block:hover .block-meta, .editor-block:focus-within .block-meta { opacity: 1; }
 .block-content {
@@ -986,7 +989,7 @@ button:disabled { cursor: not-allowed; opacity: 0.4; }
   border-radius: var(--radius);
   background: var(--paper);
   cursor: pointer;
-  transition: border-color 0.15s, box-shadow 0.15s;
+  transition: border-color var(--motion-quick), box-shadow var(--motion-quick);
 }
 .timeline-node:hover { border-color: var(--line-strong); box-shadow: var(--shadow-sm); }
 .timeline-node-heading { display: flex; align-items: center; gap: 8px; }
@@ -1517,16 +1520,16 @@ button:disabled { cursor: not-allowed; opacity: 0.4; }
 .motion-scale { animation: scaleIn var(--motion-standard) var(--ease-emphasized) both; }
 
 /* --- Welcome — staggered entrance --- */
-.welcome-brand .brand-mark-large { opacity: 0; animation: fadeUp var(--motion-entrance) var(--ease-emphasized) 0.08s forwards; }
+.welcome-brand .brand-mark-large { opacity: 0; animation: fadeUp var(--motion-entrance) var(--ease-emphasized) var(--motion-instant) forwards; }
 
 .welcome-content > * { opacity: 0; animation: fadeUp var(--motion-entrance) var(--ease-emphasized) forwards; }
-.welcome-content > *:nth-child(2) { animation-delay: 0.18s; }
-.welcome-content > *:nth-child(3) { animation-delay: 0.28s; }
+.welcome-content > *:nth-child(2) { animation-delay: var(--motion-quick); }
+.welcome-content > *:nth-child(3) { animation-delay: var(--motion-standard); }
 
 /* --- Brand mark — gentle breathing --- */
-.brand-mark { animation: breathe 5s var(--ease-standard) infinite; }
-.boot-screen { animation: fadeIn 0.5s var(--ease-standard) both; }
-.boot-screen .boot-mark { animation: bootPulse 1.6s var(--ease-standard) infinite; }
+.brand-mark { animation: breathe var(--motion-ambient) var(--ease-standard) infinite; }
+.boot-screen { animation: fadeIn var(--motion-entrance) var(--ease-standard) both; }
+.boot-screen .boot-mark { animation: bootPulse var(--motion-pulse) var(--ease-standard) infinite; }
 
 /* --- Card hover — refined lift --- */
 .version-card, .candidate-card, .style-card, .insights-summary-card,
@@ -1556,11 +1559,11 @@ button:disabled { cursor: not-allowed; opacity: 0.4; }
 /* --- Timeline SVG overlay — draw-in --- */
 .timeline-svg-overlay path {
   stroke-dasharray: 200;
-  animation: drawIn 0.6s var(--ease-standard) forwards;
+  animation: drawIn var(--motion-entrance) var(--ease-standard) forwards;
 }
 
 /* --- Focus — smooth ring transition --- */
-.field input, .field select, .command-palette input { transition: border-color 0.15s, box-shadow 0.15s; }
+.field input, .field select, .command-palette input { transition: border-color var(--motion-quick), box-shadow var(--motion-quick); }
 
 /* --- Buttons with icons — flex layout --- */
 .tool-button { display: inline-flex; align-items: center; gap: 5px; }
@@ -1627,7 +1630,7 @@ body::before {
   border-radius: var(--radius-sm);
   color: var(--faint);
   background: transparent;
-  transition: color 0.15s, background 0.15s, border-color 0.15s;
+  transition: color var(--motion-quick), background var(--motion-quick), border-color var(--motion-quick);
 }
 .document-structure-action:hover, .document-restore:hover {
   color: var(--ink);
