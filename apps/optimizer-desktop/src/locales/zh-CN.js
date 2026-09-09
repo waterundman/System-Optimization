@@ -131,6 +131,7 @@ export default {
   "review.allRejectedNotice": "全部已拒绝，正文不变。",
   "review.applied": "已应用 {count} 个修改项，并创建可审计的 ai_accept Commit。",
   "review.restored": "已从项目数据库恢复未完成的候选审查。",
+  "review.bulkWarning": "该提案包含 {count} 个 hunks，建议分批逐项审查",
   "candidate.center": "候选中心",
   "candidate.close": "关闭候选中心",
   "candidate.description": "待审查的提案保存在项目中，随时可以继续。",

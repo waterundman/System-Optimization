@@ -66,7 +66,7 @@ MVP 主链（项目包校验 → 版本化章节树 → 自动保存/检查点 �
 | 4 | implementation-audit.md（2026-07-21）滞后 | "发布供应链缺失/i18n 未资源化"等行与 v0.8.0 实际不符，误导后续决策 | 随 v0.9.0 一并刷新 |
 | 5 | .stage3_backup/（288K 拆分备份）未 gitignore | 仓库噪音 | 重构提交后删除或加入 .gitignore |
 | 6 | check:motion 5 处字面量缓动 | 一致性小瑕疵 | 换 var(--ease-*) |
-| 7 | 全仓库仅 1 处 TODO（canonical-json.ts 兼容别名清理） | 债务量极低 | 别名下线时删除 |
+| 7 | 全仓库仅 1 处 TODO（canonical-json.ts 兼容别名清理） | 债务量极低 | 已于 2026-09-09 下线：删除 `packages/editor-bridge/src/canonical-json.ts`（别名未进入公开导出面，无消费者），全仓源码 0 引用 |
 
 ## 六、代码质量亮点
 

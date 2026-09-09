@@ -43,7 +43,7 @@ function aiReviewView() {
   const accepted = Object.values(review.session.decisions).filter((value) => value === "accepted").length;
   const rejected = Object.values(review.session.decisions).filter((value) => value === "rejected").length;
   const total = proposal.hunks.length;
-  return element("section", { className: "ai-review-card" }, [
+  const section = element("section", { className: "ai-review-card" }, [
     element("div", { className: "review-heading" }, [
       element("div", {}, [
         element("span", { className: "eyebrow", text: "PATCH REVIEW" }),
@@ -61,6 +61,13 @@ function aiReviewView() {
         ]),
       ]),
     ]),
+    proposal.hunks.length > 12
+      ? element("div", {
+        className: "review-bulk-warning",
+        attrs: { role: "status" },
+        text: t("review.bulkWarning", { count: proposal.hunks.length }),
+      })
+      : null,
     proposal.summary ? element("p", { className: "review-summary", text: proposal.summary }) : null,
     review.candidateBranch
       ? element("div", { className: "review-branch-notice" }, [
@@ -96,6 +103,8 @@ function aiReviewView() {
       ]),
     ]),
   ]);
+  attachReviewHunkKeyboard(section);
+  return section;
 }
 
 function hunkReviewView(review, hunk, index) {
@@ -161,6 +170,45 @@ function hunkReviewView(review, hunk, index) {
     }
   });
   return article;
+}
+
+// v0.9.0 Stage 4 (D-4): j/k quick hunk navigation. While focus is anywhere
+// inside the patch review card, a bare `j` moves focus to the next hunk and
+// `k` to the previous hunk (vim-style). At the first/last hunk the focus
+// stays put (no wrap) so the motion is predictable and never escapes the
+// review card. Modified key combos (Ctrl/Meta/Alt) and every other key are
+// ignored, so the existing Tab/Enter/Arrow navigation is fully preserved.
+// The handler reads document.activeElement (falling back to the card's own
+// ownerDocument) to locate the current hunk, which keeps it robust in both
+// real browsers and linkedom-based unit tests.
+function attachReviewHunkKeyboard(section) {
+  section.addEventListener("keydown", (event) => {
+    if (event.key !== "j" && event.key !== "k") return;
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    const doc = section.ownerDocument
+      || (typeof document !== "undefined" ? document : null);
+    const hunks = Array.from(section.querySelectorAll(".review-hunk"));
+    if (hunks.length === 0) return;
+    const active = doc ? doc.activeElement : null;
+    const current = active && typeof active.closest === "function"
+      ? active.closest(".review-hunk")
+      : null;
+    const currentIdx = current ? hunks.indexOf(current) : -1;
+    let nextIdx = currentIdx;
+    if (event.key === "j") {
+      nextIdx = currentIdx < 0
+        ? 0
+        : Math.min(currentIdx + 1, hunks.length - 1);
+    } else {
+      nextIdx = currentIdx < 0
+        ? hunks.length - 1
+        : Math.max(currentIdx - 1, 0);
+    }
+    if (nextIdx !== currentIdx && hunks[nextIdx]) {
+      event.preventDefault();
+      hunks[nextIdx].focus();
+    }
+  });
 }
 
 // v0.8.0 Stage 3 (a11y): announce the current patch review state through

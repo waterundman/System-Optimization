@@ -18,8 +18,8 @@
 | FR-07 差异、逐项/整段接受拒绝、保留候选、冲突 | 完成 | 中文分层 diff、逐 hunk 与全部接受/拒绝、atomic group 事件重放、逐 revision 审计、原子应用和冲突拒绝；候选中心从不可变 artifact/event 恢复跨会话审查；schema v7 以独立 Commit 与物化快照保存候选分支且不移动主 HEAD | 当前分支入口采用 exact-base 保护；冲突候选保持可审计但不自动 rebase，后续增强不能以静默覆盖替代 |
 | FR-08 事实、约束、风格、摘要及 canonical 状态 | 完成 | schema v6 事实/约束库、authority/sensitivity/severity、canonical/archived/rejected、目标绑定 L3 Context；风格样本与分层摘要 | 自动事实抽取属于后续增强，不是 MVP 必需项 |
 | FR-09 OpenAI-compatible 与 Ollama | 完成 | DeepSeek、Qwen、Kimi、MiniMax 固定官方端点；Ollama 固定回环；Host 设备级可信端点注册表、逐字 HTTPS origin 确认、端点专属 Secret、保守能力声明、受限 `/models` 探测、禁代理/重定向与 schema v9 来源审计 | `/models` 只验证当时可达性与模型列表，不谎称自动证明 JSON/usage 等语义能力；通用端点不开放 HTTP、任意端口、私网 IP literal、自定义 CA 或系统代理 |
-| FR-10 日志、token/费用、模型、来源、反馈 | 部分 | Operation/Context/usage/lifecycle/Artifact/Review 本地审计 | 缺费用换算、接受率/二次编辑率聚合、用户反馈与诊断导出 |
-| FR-11 备份、迁移备份、完整性与恢复向导 | 部分 | 迁移前在线备份、快照 checksum、Store invariant | 缺用户可见项目备份和损坏恢复向导、恢复演练入口 |
+| FR-10 日志、token/费用、模型、来源、反馈 | 部分 | Operation/Context/usage/lifecycle/Artifact/Review 本地审计；schema v8 不可变模型尝试审计（逐次 attempt 进原子存储、失败可追溯）；schema v10 Operation insights 复合索引 | 缺费用换算、接受率/二次编辑率聚合、用户反馈与诊断导出 |
+| FR-11 备份、迁移备份、完整性与恢复向导 | 部分 | 迁移前在线备份、快照 checksum、Store invariant；v0.8.0 落地宿主项目包级备份恢复（`workspace_commands_backup.rs` 的 `export/import_project_backup` 与 `backup_restore_integration.rs` 端到端 9 测试） | 缺用户可见备份/损坏恢复向导与恢复演练入口（底层恢复已可测试） |
 | FR-12 停顿/段落补全 | 缺失（MAY） | 默认不启用，符合非目标 | P1 实验项，不阻塞 MVP MUST |
 
 ## 非功能与工程验收
@@ -34,7 +34,7 @@
 | 国际化 | 部分 | Unicode/语言标签/中文 diff；界面字符串尚未资源化 |
 | 性能预算 | 缺失证据 | 无 10 万字热启动、Context 编译、补丁落盘基准与阈值门禁 |
 | 插件最小权限与跨宿主复用 | 缺失 | 有 Ports/Adapters 协议，但无 Obsidian contract adapter、WASM 插件 runtime/manifest/权限 |
-| 发布与供应链 | 缺失 | 无正式安装包签名、SBOM、依赖审计门禁、分阶段更新和真实迁移矩阵 |
+| 发布与供应链 | 部分 | v0.8.0 已落地：CI release job（`v*` tag 触发）、cargo/npm audit 双门禁（release 阻塞）、CycloneDX SBOM（Rust + 前端双产物）、tauri-action 上传 MSI/NSIS；缺口：Windows 代码签名证书（signtool）与 updater 签名密钥（pubkey/endpoints）仍未接入，`updater.active=false`，无真实迁移矩阵 |
 | Beta 指标 | 缺失 | 无 20—50 用户数据；产品阈值不能由单机自动测试证明 |
 
 ## 当前执行顺序
@@ -44,3 +44,18 @@
 3. `M5`：插件/Obsidian contract、安装签名、SBOM、依赖审计与更新。
 
 每一轮实现后必须更新本文件状态与直接证据；只有所有 MVP MUST 和第 25 章工程验收均有可复核证据时，才可以声明完整目标完成。Beta 用户指标需要真实外部数据，不能用测试替代。
+
+## 2026-09-09 增量审计说明
+
+本次随 v0.8.0 实际实现刷新，依据 `README.md` 与 `docs/project-health-review-2026-09-08.md` 复核，仅修订明显落后行，未重写整篇。修订明细：
+
+| 表 | 行 | 旧状态 | 新状态 | 修订要点 |
+|---|---|---|---|---|
+| 功能需求 | FR-10 | 部分 | 部分 | 证据补充 schema v8 不可变模型尝试审计、schema v10 Operation insights 复合索引 |
+| 功能需求 | FR-11 | 部分 | 部分 | 证据补充宿主项目包级备份恢复（`workspace_commands_backup.rs` + `backup_restore_integration.rs` 9 测试） |
+| 非功能与工程验收 | 可访问性 | 部分 | 部分 | 补充 trapFocus、`aria-live`、a11y 专项测试 14+ 项与 `a11y.*` 字典键证据 |
+| 非功能与工程验收 | 国际化 | 部分 | 完成 | 已资源化：zh-CN/en-US 502 键、`check-i18n.mjs` 进 CI；缺口降为 en-US 母语级润色 |
+| 非功能与工程验收 | 性能预算 | 缺失证据 | 部分 | 已有 `snapshot_perf_baseline.rs` / `compare_perf_baseline.rs` 基础设施（默认 ignored），仍无 CI 阈值门禁 |
+| 非功能与工程验收 | 发布与供应链 | 缺失 | 部分 | v0.8.0 已落地 CI release job + 双 audit 门禁 + CycloneDX SBOM + tauri-action MSI/NSIS；缺口为签名与真实迁移矩阵 |
+
+未改动行（状态与 v0.8.0 一致，未扩大范围）：事务/隔离/密钥隔离/离线/插件最小权限/Beta 指标等。

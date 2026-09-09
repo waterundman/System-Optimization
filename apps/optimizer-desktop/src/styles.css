@@ -169,7 +169,7 @@ button:disabled { cursor: not-allowed; opacity: 0.4; }
   height: 100%;
   border-radius: inherit;
   background: var(--accent);
-  animation: bootTravel 1.4s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+  animation: bootTravel 1.4s var(--ease-standard) infinite;
 }
 
 /* --- Brand mark --- */
@@ -1524,9 +1524,9 @@ button:disabled { cursor: not-allowed; opacity: 0.4; }
 .welcome-content > *:nth-child(3) { animation-delay: 0.28s; }
 
 /* --- Brand mark — gentle breathing --- */
-.brand-mark { animation: breathe 5s ease-in-out infinite; }
-.boot-screen { animation: fadeIn 0.5s ease both; }
-.boot-screen .boot-mark { animation: bootPulse 1.6s ease-in-out infinite; }
+.brand-mark { animation: breathe 5s var(--ease-standard) infinite; }
+.boot-screen { animation: fadeIn 0.5s var(--ease-standard) both; }
+.boot-screen .boot-mark { animation: bootPulse 1.6s var(--ease-standard) infinite; }
 
 /* --- Card hover — refined lift --- */
 .version-card, .candidate-card, .style-card, .insights-summary-card,
@@ -1556,7 +1556,7 @@ button:disabled { cursor: not-allowed; opacity: 0.4; }
 /* --- Timeline SVG overlay — draw-in --- */
 .timeline-svg-overlay path {
   stroke-dasharray: 200;
-  animation: drawIn 0.6s ease forwards;
+  animation: drawIn 0.6s var(--ease-standard) forwards;
 }
 
 /* --- Focus — smooth ring transition --- */
@@ -1702,4 +1702,22 @@ body::before {
 /* --- Reduced motion — disable all animations --- */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; }
+}
+
+/* Review bulk warning */
+/* v0.9.0 Stage 4 (D-4): shown at the top of the patch review card when a
+   proposal exceeds 12 hunks, so reviewers are nudged to review in batches.
+   Uses only existing design tokens — no hardcoded color/timing literals. */
+.review-bulk-warning {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin: var(--space-md) 0;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius);
+  background: var(--warning-soft);
+  color: var(--warning-text);
+  font-size: 13px;
+  line-height: 1.7;
 }

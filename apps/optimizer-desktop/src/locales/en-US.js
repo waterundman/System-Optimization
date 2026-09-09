@@ -131,6 +131,7 @@ export default {
   "review.allRejectedNotice": "All edits rejected; text is unchanged.",
   "review.applied": "Applied {count} edits; version recorded.",
   "review.restored": "Resumed unfinished candidate review from project database.",
+  "review.bulkWarning": "This proposal contains {count} hunks; consider reviewing them one batch at a time.",
   "candidate.center": "Candidate center",
   "candidate.close": "Close candidate center",
   "candidate.description": "Proposals and review decisions are stored in the project database; resume later or after reopening.",
